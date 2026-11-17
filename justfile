@@ -162,6 +162,13 @@ _reset-data deployments paths node_paths:
     restore_replicas
     trap - EXIT
 
+# Detect local LLM runtimes, start one if needed, and pick models with fzf for the gateway.
+llm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'printf "\033[0;31m✗ llm setup failed\033[0m\n" >&2' ERR
+    bash scripts/setup-llm.sh
+
 # Show the available project commands.
 help:
     @echo ""
@@ -171,6 +178,7 @@ help:
     @echo ""
     @printf "\033[0;33mSetup & Lifecycle:\033[0m\n"
     @printf "  %-38s %s\n" "just init" "Initialize local configuration without overwriting it"
+    @printf "  %-38s %s\n" "just llm" "Detect local LLM runtimes and pick gateway models with fzf"
     @printf "  %-38s %s\n" "just cluster-create" "Create the empty KIND cluster"
     @printf "  %-38s %s\n" "just cluster-delete" "Delete the project cluster, keeping all data"
     @printf "  %-38s %s\n" "just reset" "Delete workflows, artifacts, and run history, then re-init"
@@ -502,6 +510,7 @@ check:
     trap 'printf "\033[0;31m✗ check failed\033[0m\n" >&2' ERR
     printf "\033[0;34m=== Checking project ===\033[0m\n"
     node --check scripts/init-llm-gateway.js
+    bash -n scripts/setup-llm.sh
     node --check scripts/generate-kind-config.js
     node --check scripts/init-openobserve.js
     node --check scripts/init-orchestrator.js

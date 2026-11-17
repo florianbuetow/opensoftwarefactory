@@ -96,10 +96,13 @@ default Docker socket automatically.
 
 ### 2. Configure a local model
 
-Start LM Studio and load a model. The seeded agents expect
-`qwen3.5-9b-mlx`; if you choose another model, update the model mapping in
-`services/llm-gateway/config/config.yaml` after initialization and select it
-for the relevant agents in the Factory UI.
+Run `just llm` (needs `fzf` and `jq`). It detects well-known local runtimes
+(LM Studio, Ollama, llama.cpp, MLX LM, vLLM, Jan), offers to start one that is
+installed but not serving, lists its models, and writes your selection to
+`services/llm-gateway/config/config.yaml`. The seeded agents expect
+`qwen3.5-9b-mlx`; select that model, or choose another one for the relevant
+agents in the Factory UI. Run `just deploy` afterwards if the cluster is
+already running.
 
 ### 3. Initialize, build, and run the factory
 
@@ -158,6 +161,7 @@ local factory data.
 | `just deploy` | Deploy already-built images to the running cluster |
 | `just update` | Build local images, then deploy them to the running cluster |
 | `just cluster-delete` | Delete the cluster; all data remains |
+| `just llm` | Detect local LLM runtimes and pick gateway models with fzf |
 | `just init` | Create local configuration that does not exist yet |
 | `just reset` | Delete workflows, artifacts, and run history, then re-initialize |
 | `just reset-observe` | Delete OpenObserve data, keeping its configuration |
