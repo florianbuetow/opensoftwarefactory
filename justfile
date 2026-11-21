@@ -85,7 +85,7 @@ reset:
     printf "\033[0;34m=== Resetting factory data ===\033[0m\n"
     printf "\033[0;33mThis deletes every workflow, stored artifact, and run history on this host.\033[0m\n"
     just _reset-data "temporal blobstore orchestrator agent-registry policy-registry" \
-        "services/orchestrator/config/config.yaml services/blobstore/data/objects services/blobstore/data/meta" \
+        "services/blobstore/data/objects services/blobstore/data/meta" \
         "/var/lib/opensoftwarefactory/temporal"
     printf "\033[0;32m✓ Factory data reset\033[0m\n"
     echo ""

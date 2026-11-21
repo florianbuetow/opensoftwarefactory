@@ -117,7 +117,7 @@ function page() {
   const server = orchestrator();
   const ids = new Map(), selectors = new Map();
   const byId = (id) => { if (!ids.has(id)) ids.set(id, new FakeNode("div")); return ids.get(id); };
-  const notices = [], questions = [], menus = [], inputs = [];
+  const notices = [], questions = [], menus = [], inputs = [], dialogs = [];
   const windowListeners = {}; // the drags on the canvas end on the window
   const storage = new Map();
   const answers = { confirm: true };
@@ -149,7 +149,8 @@ function page() {
     tabs: {}, pageToggles: {}, activeTab: "workflows",
     menu: { hidden: true }, closeMenu() {}, openMenu: (_ev, items) => menus.push(items),
     openPopover: () => ({ close() {} }), fitWidth() {},
-    titleCase: (id) => String(id || "").split(/[-_\s]+/).filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" "),
+    icon: () => h("span"),
+    openDialog: (config) => { const dialog = { ...config, open: true, close() { dialog.open = false; } }; dialogs.push(dialog); return dialog; },
     iconButton: (name, label, onclick) => h("button", { title: label, onclick }),
     emptyPanel: (title, action) => h("div", { className: "empty", title, action }),
     errorPanel: (message) => h("div", { className: "error-panel", title: message }),
@@ -162,21 +163,31 @@ function page() {
     confirmAction: async (question, action) => { questions.push(`${question} [${action}]`); return answers.confirm; },
     Inputs: { setBlocker(fn) { context.blocker = fn; }, open: (...args) => inputs.push(args) },
   };
-  // index.html loads connectors.js before workflows.js; the page needs its logic only.
-  const connectors = read("connectors.js");
-  const app = read("app.js");
+  // index.html loads connectors.js before workflows.js; the page needs its logic only. From
+  // app.js it takes the sidebar tree, the group helpers, and titleCase as they are.
+  const connectors = read("connectors.js"), app = read("app.js");
+  const shared = [app.slice(app.indexOf("const titleCase"), app.indexOf("// midTruncate")), app.slice(app.indexOf("// createTree renders"), app.indexOf("// openDialog shows"))].join("\n");
   const markdown = app.slice(app.indexOf("function markdownInline("), app.indexOf("function renderMarkdown("));
-  vm.runInNewContext(`${read("workflowref.js")}\n${markdown}\n${connectors.slice(0, connectors.indexOf("// ---- Connectors page ----"))}\n${read("workflows.js")}`, context);
+  vm.runInNewContext(`${shared}\n${read("workflowref.js")}\n${markdown}\n${connectors.slice(0, connectors.indexOf("// ---- Connectors page ----"))}\n${read("workflows.js")}`, context);
   const head = selectors.get("#tab-workflows .canvas-head");
   const ui = {
-    context, server, notices, questions, inputs, answers, byId,
+    context, server, notices, questions, inputs, answers, byId, dialogs,
     save: () => find(head, (n) => n.className === "primary wf-save"),
     versions: () => find(head, (n) => n.tag === "select"),
     note: () => find(head, (n) => n.className === "wf-version-note"),
     shownVersion: () => ui.versions().children.find((o) => o.selected)?.textContent,
-    rows: () => byId("wf-list").children,
-    names: () => ui.rows().map((li) => li.textContent),
-    selectedRow: () => ui.rows().find((li) => li.attrs["aria-selected"] === "true")?.textContent,
+    // The sidebar tree: its visible rows (groups and workflows) by their labels.
+    rows: () => all(byId("wf-list")).filter((n) => String(n.className || "").startsWith("tree-row")),
+    names: () => ui.rows().map((row) => row.textContent),
+    row: (label) => ui.rows().find((row) => row.textContent === label),
+    selectedRow: () => ui.rows().find((row) => row.attrs["aria-selected"] === "true")?.textContent,
+    // dialog is the open dialog; fill types into its Group and Name fields and submits it.
+    dialog: () => dialogs.filter((d) => d.open).at(-1),
+    field: (id) => find(ui.dialog().body, (n) => n.id === id),
+    async submit(fields = {}) {
+      for (const [id, value] of Object.entries(fields)) ui.field(id).value = value;
+      await fire(ui.dialog().footer.find((b) => b.className === "primary"), "click");
+    },
     tiles: () => all(byId("canvas")).filter((n) => n.attrs["data-step"]).map((n) => n.attrs["data-step"]),
     // menu opens the canvas menu and returns the item with that label: [label, run, class, tip, disabled].
     async menu(label, node = byId("canvas")) {
@@ -351,7 +362,7 @@ test("description edits survive page visits and prevent unload and workflow-wide
   ui.context.tabs.workflows.hide();
   await ui.open("/demo");
   assert.equal(find(box, (n) => n.tag === "textarea").value, "Unfinished description");
-  for (const action of ["Rename workflow", "Duplicate workflow", "Delete workflow"]) await ui.run(action);
+  for (const action of ["Rename workflow…", "Duplicate workflow", "Delete workflow"]) await ui.run(action);
   assert.deepEqual(ui.posts(), [], "editing a description blocks conflicting workflow mutations");
   ui.answers.confirm = false;
   await ui.open("/demo?version=1");
@@ -556,38 +567,48 @@ test("a workflow node opens the version it is pinned to, and the path leads back
   assert.equal(path.children[0].href, "#workflows/demo");
 });
 
-test("a new workflow is a draft until its first Save stores v1", async () => {
+test("a new workflow asks for a group and a name, and is a draft until its first Save stores v1", async () => {
   const ui = page();
   await ui.open();
+  const before = ui.notices.length;
   await ui.run("New workflow");
-  assert.deepEqual(ui.names().length, 3);
+  assert.equal(ui.dialog().title, "New workflow");
+  assert.equal(ui.field("wf-name-group").value, "", "an ungrouped workflow on the canvas suggests no group");
+  assert.equal(ui.field("wf-name-name").value, "Workflow 1", "the lowest free number");
+  // The group is required, as on Agents and Policies; the problem shows under the field.
+  await ui.submit();
+  assert.equal(find(ui.dialog().body, (n) => n.className === "error-text" && n.textContent).textContent, "Enter a group.");
+  assert.deepEqual(ui.names(), ["Demo", "Inner"], "nothing is made before the dialog is done");
+  await ui.submit({ "wf-name-group": "Notes", "wf-name-name": "Release Notes" });
+  assert.equal(ui.dialog(), undefined);
+  assert.deepEqual(ui.names(), ["Notes", "Release Notes", "Demo", "Inner"], "groups come first; the group of the draft opens");
+  assert.equal(ui.selectedRow(), "Release Notes");
   assert.equal(ui.versions().hidden, true, "nothing stored yet");
   assert.equal(ui.note().textContent, "Not saved yet");
   assert.equal(ui.save().disabled, true);
   assert.equal(ui.save().title, "Needs a step");
   assert.deepEqual(ui.posts(), [], "a draft is not stored");
-  // The name is typed in the list row; a draft is renamed on the page only.
-  const input = find(ui.byId("wf-list"), (n) => n.className === "rename");
-  input.value = "Release Notes";
-  await fire(input, "keydown", { key: "Enter" });
-  assert.equal(ui.selectedRow(), "Release Notes");
-  assert.deepEqual(ui.posts(), []);
+  assert.equal(ui.notices.length, before, "creating it shows no notice");
   await ui.run("Add agent");
   assert.equal(ui.save().disabled, false);
   assert.equal(ui.save().title, "Stores the workflow as v1");
   assert.equal((await ui.menu("Run workflow…"))[4], true, "a draft cannot run");
   await ui.save().onclick();
   await settle();
-  assert.equal(ui.posts()[0].path, "/api/orchestrator/workflows/release-notes/versions");
-  assert.equal(ui.posts()[0].body.name, "release-notes");
+  assert.equal(ui.posts()[0].path, "/api/orchestrator/workflows/notes%2Frelease-notes/versions", "the grouped name is one part of the path");
+  assert.equal(ui.posts()[0].body.name, "notes/release-notes");
   assert.equal(ui.versions().hidden, false);
   assert.equal(ui.shownVersion(), "v1 (newest)");
   assert.equal(ui.notices.at(-1).text, "Saved v1");
-  // A draft that is left without a step is gone.
-  await ui.run("New workflow");
-  assert.equal(ui.names().length, 4);
-  await fire(ui.rows()[0], "click");
-  assert.equal(ui.names().length, 3);
+  assert.equal(ui.context.location.hash, "#workflows/notes%2Frelease-notes/step-1");
+  // New in a group's menu starts in that group. A draft that is left without a step is gone.
+  await ui.run("New workflow", ui.row("Notes"));
+  assert.equal(ui.field("wf-name-group").value, "Notes");
+  assert.equal(ui.field("wf-name-name").value, "Workflow 1");
+  await ui.submit();
+  assert.deepEqual(ui.names(), ["Notes", "Release Notes", "Workflow 1", "Demo", "Inner"]);
+  await fire(ui.row("Demo"), "click");
+  assert.deepEqual(ui.names(), ["Notes", "Release Notes", "Demo", "Inner"]);
   assert.equal(ui.questions.length, 0, "an empty draft holds no work");
 });
 
@@ -602,22 +623,33 @@ test("rename, duplicate and delete go to the orchestrator", async () => {
   assert.equal(ui.selectedRow(), "Demo Copy");
   assert.equal(ui.shownVersion(), "v1 (newest)");
   assert.equal(ui.notices.some((n) => n.text === "Duplicated"), true);
-  // Rename asks the orchestrator, which follows the name in every workflow; the page follows too.
-  await fire(ui.rows()[1], "click");
-  await ui.run("Rename workflow");
-  const input = find(ui.byId("wf-list"), (n) => n.className === "rename");
-  input.value = "Core";
-  await fire(input, "keydown", { key: "Enter" });
+  // Rename asks for the group and the name; another group moves the workflow there. The
+  // orchestrator follows the name in every workflow; the page follows too.
+  await fire(ui.row("Inner"), "click");
+  await ui.run("Rename workflow…");
+  assert.equal(ui.dialog().title, "Rename workflow");
+  assert.equal(ui.field("wf-name-group").value, "");
+  assert.equal(ui.field("wf-name-name").value, "Inner");
+  await ui.submit({ "wf-name-name": "Core" });
+  assert.equal(find(ui.dialog().body, (n) => n.className === "error-text" && n.textContent).textContent, "Enter a group.", "Rename needs a group as well");
+  await ui.submit({ "wf-name-group": "Ecc", "wf-name-name": "Core" });
   const rename = ui.posts().at(-1);
   assert.equal(rename.path, "/api/orchestrator/workflows/inner/rename");
-  assert.deepEqual(rename.body, { name: "core" });
+  assert.deepEqual(rename.body, { name: "ecc/core" });
+  assert.equal(ui.dialog(), undefined);
+  assert.deepEqual(ui.names(), ["Ecc", "Core", "Demo", "Demo Copy"]);
   assert.equal(ui.selectedRow(), "Core");
   assert.equal(ui.notices.at(-1).text, "Renamed");
-  await fire(ui.rows()[0], "click");
+  // A name taken already is refused under the field, names that differ only in case included.
+  await ui.run("Rename workflow…", ui.row("Demo Copy"));
+  await ui.submit({ "wf-name-group": "ECC", "wf-name-name": "core" });
+  assert.equal(find(ui.dialog().body, (n) => n.className === "error-text" && n.textContent).textContent, "There is already a workflow named Ecc / Core.");
+  ui.dialog().close();
+  await fire(ui.row("Demo"), "click");
   const build = find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "build");
-  assert.equal(build.attrs["aria-label"], "Step build: Core v1", "the node follows the new name and keeps its version");
+  assert.equal(build.attrs["aria-label"], "Step build: Ecc / Core v1", "the node follows the new name and keeps its version");
   assert.equal(ui.save().disabled, true, "following a rename is no unsaved edit");
-  // Delete asks first, then removes every version.
+  // Delete asks first, then removes every version; the next workflow in its group takes its place.
   ui.answers.confirm = false;
   await ui.run("Delete workflow");
   assert.equal(ui.questions.at(-1), "Delete Demo with all its versions? [Delete]");
@@ -626,9 +658,70 @@ test("rename, duplicate and delete go to the orchestrator", async () => {
   await ui.run("Delete workflow");
   assert.equal(ui.posts().at(-1).method, "DELETE");
   assert.equal(ui.posts().at(-1).path, "/api/orchestrator/workflows/demo");
-  assert.deepEqual(ui.names(), ["Core", "Demo Copy"]);
+  assert.deepEqual(ui.names(), ["Ecc", "Core", "Demo Copy"]);
+  assert.equal(ui.selectedRow(), "Demo Copy");
   assert.equal(ui.notices.at(-1).text, "Deleted");
+  // A duplicate stays in the group of its original.
+  await ui.run("Duplicate workflow", ui.row("Core"));
+  assert.equal(ui.posts().at(-1).path, "/api/orchestrator/workflows/ecc%2Fcore-copy/versions");
+  assert.equal(ui.posts().at(-1).body.name, "ecc/core-copy");
+  assert.deepEqual(ui.names(), ["Ecc", "Core", "Core Copy", "Demo Copy"]);
+  assert.equal(ui.selectedRow(), "Core Copy");
+  // Delete group asks first and deletes every workflow in it; the workflow after the group takes its place.
+  await ui.run("Delete group", ui.row("Ecc"));
+  assert.equal(ui.questions.at(-1), "Delete Ecc with its 2 workflows and all their versions? [Delete]");
+  assert.deepEqual(ui.posts().filter((c) => c.method === "DELETE").slice(-2).map((c) => c.path).sort(), ["/api/orchestrator/workflows/ecc%2Fcore", "/api/orchestrator/workflows/ecc%2Fcore-copy"]);
+  assert.deepEqual(ui.names(), ["Demo Copy"]);
+  assert.equal(ui.selectedRow(), "Demo Copy");
+  assert.deepEqual(Object.keys(ui.server.store).sort(), ["demo-copy"]);
   assert.equal(ui.posts().some((c) => c.method === "PUT"), false);
+});
+
+test("the sidebar is a tree of groups whose folders start closed, but the group of the workflow shown opens", async () => {
+  const ui = page();
+  const flow = (name) => [{ name, version: 1, created: "2026-11-01T10:00:00Z", created_by: "ada", steps: [{ id: "plan", service: "agent", agent: "demo/coder@v1", position: { x: 0, y: 40 } }] }];
+  for (const name of ["ecc/ECC-plan", "ecc/review/code-review", "ops/deploy"]) ui.server.store[name] = flow(name);
+  await ui.open("/ecc%2Freview%2Fcode-review/plan");
+  // In every group its subgroups first, then its workflows; a row shows the last part in title case.
+  assert.deepEqual(ui.names(), ["Ecc", "Review", "Code Review", "ECC Plan", "Ops", "Demo", "Inner"]);
+  assert.equal(ui.selectedRow(), "Code Review");
+  assert.equal(ui.context.location.hash, "#workflows/ecc%2Freview%2Fcode-review/plan");
+  assert.deepEqual(ui.rows().filter((r) => ["true", "false"].includes(r.attrs["aria-expanded"])).map((r) => [r.textContent, r.attrs["aria-expanded"]]), [["Ecc", "true"], ["Review", "true"], ["Ops", "false"]], "every group has a triangle");
+  // A click on a group opens it and keeps the workflow on the canvas.
+  await fire(ui.row("Ops"), "click");
+  assert.deepEqual(ui.names(), ["Ecc", "Review", "Code Review", "ECC Plan", "Ops", "Deploy", "Demo", "Inner"]);
+  assert.equal(ui.selectedRow(), "Ops");
+  await ui.run("Add agent");
+  assert.equal(ui.selectedRow(), "Ops", "an edit leaves the group picked");
+  ui.answers.confirm = false;
+  await fire(ui.row("Deploy"), "click");
+  assert.equal(ui.selectedRow(), "Code Review", "kept edits mark the workflow on the canvas again");
+  ui.answers.confirm = true;
+  await fire(ui.row("Deploy"), "click");
+  assert.equal(ui.context.location.hash, "#workflows/ops%2Fdeploy/plan");
+  assert.equal(ui.selectedRow(), "Deploy");
+  // A link typed with plain slashes finds the grouped name as well.
+  await ui.open("/ecc/ECC-plan/plan");
+  assert.equal(ui.selectedRow(), "ECC Plan");
+  assert.equal(ui.context.location.hash, "#workflows/ecc%2FECC-plan/plan");
+  // New group… adds an empty group in this visit; it is stored once it holds a workflow.
+  await ui.run("New group…", ui.row("Ecc"));
+  assert.equal(ui.dialog().title, "New group");
+  ui.field("wf-group-name").value = "Plans";
+  await fire(ui.dialog().footer.find((b) => b.className === "primary"), "click");
+  assert.equal(ui.selectedRow(), "Plans");
+  assert.deepEqual(ui.names().slice(0, 4), ["Ecc", "Plans", "Review", "Code Review"]);
+  await ui.run("New workflow", ui.row("Plans"));
+  assert.equal(ui.field("wf-name-group").value, "Ecc / Plans");
+  await ui.submit({ "wf-name-name": "Q3 Plan" });
+  assert.equal(ui.selectedRow(), "Q3 Plan");
+  assert.equal(ui.context.location.hash, "#workflows/ecc%2Fplans%2Fq3-plan");
+  // The flat pickers name a grouped workflow with its groups.
+  assert.equal(vm.runInContext("titleCase", ui.context)("ecc/review/code-review"), "Ecc / Review / Code Review");
+  await fire(ui.row("Demo"), "click");
+  await ui.open("/demo/build");
+  const nested = find(ui.byId("inspector"), (n) => n.dataset.field === "workflow");
+  assert.deepEqual(nested.children.map((o) => o.textContent).sort(), ["Ecc / ECC Plan", "Ecc / Review / Code Review", "Inner", "Ops / Deploy"]);
 });
 
 test("the node panel of a workflow step has a Workflow and a Version select", async () => {

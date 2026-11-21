@@ -37,12 +37,17 @@ func main() {
 }
 
 func run() error {
-	configPath := flag.String("config", "/config/config.yaml", "workflow configuration file")
 	seedDir := flag.String("seed", "", "directory of workflow configurations to add when their names are missing")
 	addr := flag.String("addr", ":8080", "listen address")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	seeded, err := seedWorkflows(*configPath, *seedDir)
+	blobs := pipeline.NewHTTPStoreFromEnv()
+	blobs.Client = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
+	workflows, err := openWorkflowStoreWithRetry(context.Background(), blobs, logger, time.Minute)
+	if err != nil {
+		return fmt.Errorf("loading workflows: %w", err)
+	}
+	seeded, err := seedWorkflows(context.Background(), workflows, *seedDir)
 	if err != nil {
 		return fmt.Errorf("seeding workflows: %w", err)
 	}
@@ -60,9 +65,6 @@ func run() error {
 			logger.Warn("telemetry shutdown failed", "error", err)
 		}
 	}()
-	if _, err := loadConfig(*configPath); err != nil {
-		return fmt.Errorf("loading %s: %w", *configPath, err)
-	}
 	tracing, err := temporalotel.NewTracingInterceptor(temporalotel.TracerOptions{})
 	if err != nil {
 		return fmt.Errorf("creating tracing interceptor: %w", err)
@@ -72,14 +74,12 @@ func run() error {
 		return fmt.Errorf("connecting to Temporal: %w", err)
 	}
 	defer c.Close()
-	blobs := pipeline.NewHTTPStoreFromEnv()
-	blobs.Client = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
 	w := worker.New(c, pipeline.TaskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(pipeline.Pipeline, workflow.RegisterOptions{Name: pipeline.WorkflowName})
 	w.RegisterWorkflowWithOptions(pipeline.Team, workflow.RegisterOptions{Name: pipeline.TeamWorkflowName})
 	agents := newAgentRegistry(blobs.Client)
 	w.RegisterActivity(&pipeline.Activities{Store: blobs, LoadDefinitions: func() ([]pipeline.Definition, error) {
-		cfg, err := loadConfig(*configPath)
+		cfg, err := workflows.snapshot()
 		return cfg.Workflows, err
 	}, DescribeAgent: agentDescriber(agents, logger), Connectors: pipeline.NewHTTPConnectorsFromEnv(blobs.Client)})
 	if err = w.Start(); err != nil {
@@ -87,7 +87,7 @@ func run() error {
 	}
 	defer w.Stop()
 
-	s := &server{configPath: *configPath, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger}
+	s := &server{workflows: workflows, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger}
 	httpServer := &http.Server{Addr: *addr, Handler: otelhttp.NewHandler(s.routes(), "orchestrator.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

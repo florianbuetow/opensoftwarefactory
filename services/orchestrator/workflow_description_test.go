@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"os"
 	"reflect"
 	"testing"
 )
@@ -26,8 +25,8 @@ const describedVersions = `workflows:
 `
 
 func TestPatchWorkflowDescriptionChangesOnlySelectedVersion(t *testing.T) {
-	srv, _, _, path := serverWith(t, describedVersions, nil)
-	before, err := loadConfig(path)
+	srv, _, _, workflows := serverWith(t, describedVersions, nil)
+	before, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +40,7 @@ func TestPatchWorkflowDescriptionChangesOnlySelectedVersion(t *testing.T) {
 		t.Fatalf("updated view: %+v", updated)
 	}
 
-	after, err := loadConfig(path)
+	after, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +90,8 @@ func TestPatchWorkflowDescriptionRejectsInvalidRequestsWithoutWriting(t *testing
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, _, _, path := serverWith(t, describedVersions, nil)
-			before, err := os.ReadFile(path)
+			srv, _, _, workflows := serverWith(t, describedVersions, nil)
+			before, err := workflowObjects(workflows)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,7 +99,7 @@ func TestPatchWorkflowDescriptionRejectsInvalidRequestsWithoutWriting(t *testing
 			if code != http.StatusBadRequest && code != http.StatusNotFound {
 				t.Fatalf("status %d", code)
 			}
-			after, err := os.ReadFile(path)
+			after, err := workflowObjects(workflows)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,8 +111,8 @@ func TestPatchWorkflowDescriptionRejectsInvalidRequestsWithoutWriting(t *testing
 }
 
 func TestNewWorkflowVersionRejectsDescriptionLineBreaks(t *testing.T) {
-	srv, _, _, path := serverWith(t, describedVersions, nil)
-	before, err := os.ReadFile(path)
+	srv, _, _, workflows := serverWith(t, describedVersions, nil)
+	before, err := workflowObjects(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +120,7 @@ func TestNewWorkflowVersionRejectsDescriptionLineBreaks(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("status %d", code)
 	}
-	after, err := os.ReadFile(path)
+	after, err := workflowObjects(workflows)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("invalid description changed stored versions: %v", err)
 	}

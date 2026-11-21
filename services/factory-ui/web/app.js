@@ -446,8 +446,9 @@ setInterval(() => {
   }
 }, 30000);
 
-// titleCase shows an identifier such as "small-fix" or "step_1" as "Small Fix" / "Step 1".
-const titleCase = (id) => String(id || "").split(/[-_\s]+/).filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" ");
+// titleCase shows an identifier such as "small-fix" or "step_1" as "Small Fix" / "Step 1"; a
+// grouped name shows its groups before it ("ecc/ECC-plan" as "Ecc / ECC Plan").
+const titleCase = (id) => String(id || "").split("/").map((part) => part.split(/[-_\s]+/).filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" ")).filter(Boolean).join(" / ");
 
 // midTruncate shortens a long id in the middle, keeping its start and end readable.
 function midTruncate(text, max = 40) {
@@ -683,6 +684,37 @@ function createTree(container, { onSelect = () => {}, onContext = null } = {}) {
   return ctl;
 }
 
+
+// ---- Groups: names that are paths, such as "ecc/ECC-plan" (ECC-plan in the group ecc) ----
+// The sidebars of Workflows, Agents and Policies show them as a tree of groups.
+
+const groupOf = (path) => String(path).split("/").slice(0, -1).join("/");
+const leafOf = (path) => String(path).split("/").pop();
+
+// groupPaths returns every group that holds one of the names, at every depth, plus the extra ones.
+function groupPaths(names, extra = []) {
+  const out = new Set(extra);
+  for (const name of names) {
+    const parts = String(name).split("/");
+    for (let i = 1; i < parts.length; i++) out.add(parts.slice(0, i).join("/"));
+  }
+  return out;
+}
+
+// groupNodes nests named items in their groups for createTree: in every group its subgroups
+// first, then its items, each sorted by name. folder(path, children) and node(item) build them.
+function groupNodes(groups, items, nameOf, folder, node, parent = "") {
+  const depth = parent ? parent.split("/").length + 1 : 1;
+  const inParent = (path) => path.split("/").length === depth && groupOf(path) === parent;
+  return [
+    ...[...groups].filter(inParent).sort().map((g) => folder(g, groupNodes(groups, items, nameOf, folder, node, g))),
+    ...items.filter((item) => inParent(nameOf(item))).sort((a, b) => nameOf(a).localeCompare(nameOf(b))).map(node),
+  ];
+}
+
+// groupIds are the tree ids (prefix and path) of the groups that hold a name, outermost first,
+// in the order createTree's reveal opens them.
+const groupIds = (name, prefix) => String(name).split("/").slice(0, -1).map((_, i, parts) => `${prefix}${parts.slice(0, i + 1).join("/")}`);
 
 // openDialog shows a modal dialog: Escape and the backdrop close it, Tab stays inside,
 // and focus returns to where it was. body and footer are nodes; returns { close, box }.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,22 +40,19 @@ func refuse(status int, format string, args ...any) *statusError {
 	return &statusError{status: status, err: fmt.Errorf(format, args...)}
 }
 
-// change loads the configuration, applies edit, and saves the result, all under the lock.
-// An invalid result is refused with 422 and nothing is saved.
+// change applies edit to the stored workflows and stores the result. An invalid result is
+// refused with 422 and nothing is stored. The change is not tied to the request, so a client
+// that goes away does not leave it half stored.
 func (s *server) change(edit func(c *Config) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, err := loadConfig(s.configPath)
-	if err != nil {
-		return err
-	}
-	if err = edit(&c); err != nil {
-		return err
-	}
-	if err = c.validate(); err != nil {
-		return &statusError{status: http.StatusUnprocessableEntity, err: err}
-	}
-	return saveConfig(s.configPath, c)
+	return s.workflows.update(context.Background(), func(c *Config) error {
+		if err := edit(c); err != nil {
+			return err
+		}
+		if err := c.validate(); err != nil {
+			return &statusError{status: http.StatusUnprocessableEntity, err: err}
+		}
+		return nil
+	})
 }
 
 // failChange answers the error of a change.
@@ -244,17 +242,22 @@ func (s *server) renameWorkflow(w http.ResponseWriter, r *http.Request) {
 				if !member {
 					continue
 				}
-				// The workflow is a team member under its name, which channels and positions use.
+				// The workflow is a team member under the last segment of its name, which
+				// channels and positions use; moving it to another group leaves that alone.
+				from, to := pipeline.MemberName(old), pipeline.MemberName(renamed)
+				if from == to {
+					continue
+				}
 				for _, channel := range step.Channels {
 					for k := 0; k < len(channel) && k < 2; k++ {
-						if channel[k] == old {
-							channel[k] = renamed
+						if channel[k] == from {
+							channel[k] = to
 						}
 					}
 				}
-				if position, ok := step.MemberPositions[old]; ok {
-					delete(step.MemberPositions, old)
-					step.MemberPositions[renamed] = position
+				if position, ok := step.MemberPositions[from]; ok {
+					delete(step.MemberPositions, from)
+					step.MemberPositions[to] = position
 				}
 			}
 		}

@@ -161,6 +161,52 @@ test("a renamed workflow is followed by workflow nodes, teams, and channels", ()
   assert.deepEqual(plain(placed[0].steps[0].member_positions), { lead: { x: 50, y: 30 }, manual: { x: 20, y: 90 } }, "the member's place follows its name");
 });
 
+test("a grouped workflow member is named by the last part of its name, as the orchestrator names it", () => {
+  const { memberName, teamMembers, removeMember, teamProblems, defaultChannels } = logic();
+  assert.equal(memberName("ecc/ECC-plan@v1"), "ECC-plan");
+  assert.equal(memberName("ecc/review/code-review"), "code-review");
+  const s = { id: "team", service: "team", agent: "ecc/planner@v1", agents: ["ecc/coder@v1"], workflows: ["ecc/ECC-plan@v1", "ops/deploy@v3"] };
+  assert.deepEqual(plain(teamMembers(s).map((m) => [m.name, m.kind, m.ref])), [
+    ["planner", "agent", "ecc/planner@v1"], ["coder", "agent", "ecc/coder@v1"], ["ECC-plan", "workflow", "ecc/ECC-plan@v1"], ["deploy", "workflow", "ops/deploy@v3"],
+  ]);
+  assert.deepEqual(plain(defaultChannels(s)), [["planner", "coder"], ["planner", "ECC-plan"], ["planner", "deploy"]]);
+  assert.deepEqual(plain(removeMember(s, "ECC-plan")), { agents: ["ecc/coder@v1"], workflows: ["ops/deploy@v3"] });
+  // Two workflows of one name in different groups would be one member.
+  assert.deepEqual(plain(teamProblems({ ...s, workflows: ["ecc/deploy@v1", "ops/deploy@v3"] })), ["Two members would be named deploy: ecc/deploy@v1 and ops/deploy@v3"]);
+});
+
+test("a workflow moved to another group keeps its channels and places; a new last part renames them", () => {
+  const { renameWorkflowRefs } = logic();
+  const team = () => ({ id: "t", service: "team", agent: "demo/lead@v1", workflows: ["ecc/ECC-plan@v2"], channels: [["lead", "ECC-plan"]], member_positions: { "ECC-plan": { x: 20, y: 90 } } });
+  const moved = [{ name: "root", steps: [{ id: "n", service: "workflow", workflow: "ecc/ECC-plan@v2" }, team()] }];
+  renameWorkflowRefs(moved, "ecc/ECC-plan", "plans/ECC-plan");
+  assert.equal(moved[0].steps[0].workflow, "plans/ECC-plan@v2");
+  assert.deepEqual(plain(moved[0].steps[1].workflows), ["plans/ECC-plan@v2"]);
+  assert.deepEqual(plain(moved[0].steps[1].channels), [["lead", "ECC-plan"]], "the member keeps its name");
+  assert.deepEqual(plain(moved[0].steps[1].member_positions), { "ECC-plan": { x: 20, y: 90 } });
+  const renamed = [{ name: "root", steps: [team()] }];
+  renameWorkflowRefs(renamed, "ecc/ECC-plan", "ecc/plan");
+  assert.deepEqual(plain(renamed[0].steps[0].workflows), ["ecc/plan@v2"]);
+  assert.deepEqual(plain(renamed[0].steps[0].channels), [["lead", "plan"]]);
+  assert.deepEqual(plain(renamed[0].steps[0].member_positions), { plan: { x: 20, y: 90 } });
+});
+
+test("a grouped workflow travels in the hash as one part and comes back from it", () => {
+  const { parseHash, formatHash } = logic();
+  assert.equal(formatHash({ workflow: "ecc/ECC-plan", step: "plan" }), "#workflows/ecc%2FECC-plan/plan");
+  assert.equal(formatHash({ workflow: "ecc/ECC-plan", version: 2, path: ["ops/deploy@v1"] }), "#workflows/ecc%2FECC-plan?version=2&path=ops%2Fdeploy%40v1");
+  for (const value of [{ workflow: "ecc/review/code-review", step: "plan", version: 2, path: ["ecc/ECC-plan@v1", "root"] }, { workflow: "ecc/ECC-plan", step: "", version: 0, path: [] }]) {
+    assert.deepEqual(plain(parseHash(formatHash(value).slice("#workflows".length))), value);
+  }
+  // A link typed with plain slashes is read by the names there are.
+  const names = ["ecc/ECC-plan", "ecc/review/code-review", "demo"];
+  assert.deepEqual(plain(parseHash("/ecc/ECC-plan/plan", names)), { workflow: "ecc/ECC-plan", step: "plan", version: 0, path: [] });
+  assert.deepEqual(plain(parseHash("/ecc/review/code-review", names)), { workflow: "ecc/review/code-review", step: "", version: 0, path: [] });
+  assert.deepEqual(plain(parseHash("/demo/plan", names)), { workflow: "demo", step: "plan", version: 0, path: [] });
+  assert.deepEqual(plain(parseHash("/ecc%2FECC-plan/plan", names)), { workflow: "ecc/ECC-plan", step: "plan", version: 0, path: [] });
+  assert.deepEqual(plain(parseHash("/ecc/ECC-plan/plan")), { workflow: "ecc", step: "ECC-plan", version: 0, path: [] }, "without the names, the first part is the workflow");
+});
+
 test("a workflow reference pins a version; a bare name means the newest", () => {
   const { WorkflowRef, newestRef, versionWord } = logic();
   assert.deepEqual(plain(WorkflowRef.parse("team-build@v2")), { name: "team-build", version: 2 });
@@ -374,7 +420,7 @@ test("a workflow node stores its workflow and version as one pinned reference", 
   assert.match(source, /field\("Workflow", "workflow", nested,/);
   assert.match(source, /field\("Version", "workflow_version", nestedVersion,/);
   assert.match(source, /nestable\(\)\.filter\(\(name\) => !chosen\.some\(\(ref\) => WorkflowRef\.nameOf\(ref\) === name\)\)\.map\(pinNewest\)/);
-  assert.match(source, /nestable\(\)\.filter\(\(name\) => !members\.some\(\(m\) => m\.kind === "workflow" && m\.name === name\)\)\.map\(pinNewest\)/);
+  assert.match(source, /nestable\(\)\.filter\(\(name\) => !members\.some\(\(m\) => m\.kind === "workflow" && WorkflowRef\.nameOf\(m\.ref\) === name\)\)\.map\(pinNewest\)/, "a member is named by its last part, so the workflow is compared by its reference");
 });
 
 test("a team keeps its channels, places and problems by member name when workflows are pinned", () => {

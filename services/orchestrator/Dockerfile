@@ -11,4 +11,3 @@ COPY --from=build /out/ /
 USER 1000:1000
 EXPOSE 8080
 ENTRYPOINT ["/orchestrator"]
-CMD ["-config", "/config/config.yaml"]

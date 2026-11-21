@@ -8,7 +8,32 @@ import (
 
 // namePattern matches workflow names and step IDs: letters, digits, and dashes. A word may be in
 // capitals ("API-review" is shown as "API Review"); names differing only in case are duplicates.
-var namePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+var namePattern = regexp.MustCompile(`^` + nameSegmentExpr + `$`)
+
+const nameSegmentExpr = `[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?`
+
+// workflowNameExpr is a workflow name: a name in up to three groups, such as ecc/ECC-plan,
+// each segment as namePattern.
+const workflowNameExpr = nameSegmentExpr + `(/` + nameSegmentExpr + `){0,3}`
+
+var workflowNamePattern = regexp.MustCompile(`^` + workflowNameExpr + `$`)
+
+// versionSegment is a path segment the blobstore uses for a version, as in workflows/<name>/v2.
+var versionSegment = regexp.MustCompile(`^v[0-9]+$`)
+
+// ValidWorkflowName reports whether name is a valid workflow name. No segment may look like
+// a version, since the blobstore keeps the versions of a workflow under workflows/<name>/v<N>.
+func ValidWorkflowName(name string) bool {
+	if !workflowNamePattern.MatchString(name) {
+		return false
+	}
+	for _, segment := range strings.Split(name, "/") {
+		if versionSegment.MatchString(segment) {
+			return false
+		}
+	}
+	return true
+}
 
 // agentRefPattern matches a pinned agent reference such as intake@v3 or, for an
 // agent in a folder, translation/en-2-de@v1.
@@ -19,8 +44,8 @@ var agentRefPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(/[
 // depend on an interactive step, as on a gate: its output artifact is the
 // session file the person chose.
 func Validate(d Definition) error {
-	if !namePattern.MatchString(d.Name) {
-		return fmt.Errorf("workflow name %q must be letters, digits, and dashes", d.Name)
+	if !ValidWorkflowName(d.Name) {
+		return fmt.Errorf("workflow name %q must be letters, digits, and dashes, in up to three groups separated by /", d.Name)
 	}
 	if len(d.Steps) == 0 {
 		return fmt.Errorf("workflow %q needs at least one step", d.Name)

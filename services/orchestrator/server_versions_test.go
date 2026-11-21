@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,22 +34,19 @@ func send(t *testing.T, method, url, creator, body string, out any) int {
 	return resp.StatusCode
 }
 
-// serverWith starts a server whose configuration file holds the given YAML.
-func serverWith(t *testing.T, config string, agents func(context.Context, string) (AgentSettings, error)) (*httptest.Server, *fakeRunner, *memStore, string) {
+// serverWith starts a server whose stored workflows are the given YAML configuration.
+func serverWith(t *testing.T, config string, agents func(context.Context, string) (AgentSettings, error)) (*httptest.Server, *fakeRunner, *memStore, *workflowStore) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	workflows := storeWorkflows(t, config)
 	runner, store := &fakeRunner{}, newMemStore()
-	s := &server{configPath: path, blobs: store, runner: runner, agents: agents, logger: slog.New(slog.DiscardHandler)}
+	s := &server{workflows: workflows, blobs: store, runner: runner, agents: agents, logger: slog.New(slog.DiscardHandler)}
 	srv := httptest.NewServer(s.routes())
 	t.Cleanup(srv.Close)
-	return srv, runner, store, path
+	return srv, runner, store, workflows
 }
 
 func TestSaveStoresTheNextVersionAndKeepsEarlierOnes(t *testing.T) {
-	srv, _, _, path := newTestServer(t)
+	srv, _, _, workflows := newTestServer(t)
 	var v1, v2, got workflowView
 	// The client's name, version, time, and creator are ignored.
 	first := `{"name":"other","version":7,"created":"2001-01-01T00:00:00Z","created_by":"mallory","versions":[9],"description":"one","steps":[{"id":"a","service":"svc"}]}`
@@ -97,7 +92,7 @@ func TestSaveStoresTheNextVersionAndKeepsEarlierOnes(t *testing.T) {
 		t.Errorf("flow %+v", w)
 	}
 	// The file keeps every version.
-	saved, err := loadConfig(path)
+	saved, err := storedConfig(workflows)
 	if err != nil || len(saved.Workflows) != 3 {
 		t.Fatalf("saved %+v %v", saved, err)
 	}
@@ -228,14 +223,14 @@ func TestLoadTreatsUnversionedWorkflowsAsV1AndPinsReferences(t *testing.T) {
 	if mid, _ = bare.find("mid", 0); mid.Steps[0].Workflows[0] != "leaf@v2" {
 		t.Fatalf("bare reference pinned to %q", mid.Steps[0].Workflows[0])
 	}
-	// The next save writes versions and pinned references to the file.
-	srv, _, _, path := serverWith(t, nestedConfig, nil)
+	// The next save stores versions and pinned references in the blobstore.
+	srv, _, _, workflows := serverWith(t, nestedConfig, nil)
 	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/free/versions", "", `{"steps":[{"id":"a","service":"svc"}]}`, nil); code != http.StatusCreated {
 		t.Fatalf("status %d", code)
 	}
-	file, _ := os.ReadFile(path)
-	if !strings.Contains(string(file), "workflow: mid@v1") || strings.Count(string(file), "version: 1") != 4 || strings.Count(string(file), "version: 2") != 2 {
-		t.Fatalf("saved file:\n%s", file)
+	file, _ := workflowObjects(workflows)
+	if !strings.Contains(string(file), `"workflow": "mid@v1"`) || strings.Count(string(file), `"version": 1,`) != 4 || strings.Count(string(file), `"version": 2,`) != 2 {
+		t.Fatalf("stored objects:\n%s", file)
 	}
 	if _, err = parseConfig([]byte("workflows:\n  - name: a\n    steps: [{id: a, service: s}]\n  - name: a\n    steps: [{id: a, service: s}]\n")); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Errorf("the same version twice: %v", err)
@@ -243,7 +238,7 @@ func TestLoadTreatsUnversionedWorkflowsAsV1AndPinsReferences(t *testing.T) {
 }
 
 func TestRenameRenamesEveryVersionAndTheReferences(t *testing.T) {
-	srv, _, _, path := serverWith(t, nestedConfig, nil)
+	srv, _, _, workflows := serverWith(t, nestedConfig, nil)
 	var renamed workflowView
 	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/leaf/rename", "", `{"name":"sheet"}`, &renamed); code != http.StatusOK {
 		t.Fatalf("status %d", code)
@@ -251,7 +246,7 @@ func TestRenameRenamesEveryVersionAndTheReferences(t *testing.T) {
 	if renamed.Name != "sheet" || renamed.Version != 2 || len(renamed.Versions) != 2 {
 		t.Fatalf("renamed %+v", renamed)
 	}
-	c, err := loadConfig(path)
+	c, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,8 +279,53 @@ func TestRenameRenamesEveryVersionAndTheReferences(t *testing.T) {
 	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/sheet/rename", "", `{"name":"coder"}`, &refused); code != http.StatusUnprocessableEntity || !strings.Contains(refused["error"], "two members") {
 		t.Errorf("member name clash: %d %v", code, refused)
 	}
-	if after, _ := loadConfig(path); mustFind(t, after, "mid").Steps[0].Workflows[0] != "sheet@v1" {
+	if after, _ := storedConfig(workflows); mustFind(t, after, "mid").Steps[0].Workflows[0] != "sheet@v1" {
 		t.Error("a refused rename changed the file")
+	}
+}
+
+func TestRenameMovesAWorkflowBetweenGroups(t *testing.T) {
+	srv, _, _, workflows := serverWith(t, nestedConfig, nil)
+	var moved workflowView
+	// The UI sends the name with its group as one path segment.
+	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/leaf/rename", "", `{"name":"docs/leaf"}`, &moved); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/docs%2Fleaf/rename", "", `{"name":"lib/sheets/sheet"}`, &moved); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if moved.Name != "lib/sheets/sheet" || len(moved.Versions) != 2 {
+		t.Fatalf("moved %+v", moved)
+	}
+	blobs := workflows.blobs.(*memStore)
+	for _, id := range []string{"workflows/lib/sheets/sheet/v1/workflow.json", "workflows/lib/sheets/sheet/v2/workflow.json"} {
+		if _, ok := blobs.data[id]; !ok {
+			t.Errorf("%s is not stored", id)
+		}
+	}
+	for id := range blobs.data {
+		if strings.HasPrefix(id, "workflows/leaf/") || strings.HasPrefix(id, "workflows/docs/") {
+			t.Errorf("%s is still stored", id)
+		}
+	}
+	c, err := storedConfig(workflows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := mustFind(t, c, "mid").Steps[0]
+	if team.Workflows[0] != "lib/sheets/sheet@v1" || team.Channels[1][1] != "sheet" {
+		t.Errorf("team %+v", team)
+	}
+	if _, ok := team.MemberPositions["sheet"]; !ok || len(team.MemberPositions) != 1 {
+		t.Errorf("positions %+v", team.MemberPositions)
+	}
+	var view workflowView
+	if code := send(t, http.MethodGet, srv.URL+"/api/workflows/lib%2Fsheets%2Fsheet/versions/1", "", "", &view); code != http.StatusOK || view.Name != "lib/sheets/sheet" {
+		t.Errorf("read by grouped name: %d %+v", code, view)
+	}
+	var refused map[string]string
+	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/mid/rename", "", `{"name":"ecc/v2"}`, &refused); code != http.StatusUnprocessableEntity {
+		t.Errorf("a version-like segment: %d", code)
 	}
 }
 
@@ -299,7 +339,7 @@ func mustFind(t *testing.T, c Config, name string) pipeline.Definition {
 }
 
 func TestDeleteRemovesEveryVersionUnlessTheWorkflowIsUsed(t *testing.T) {
-	srv, _, _, path := serverWith(t, nestedConfig, nil)
+	srv, _, _, workflows := serverWith(t, nestedConfig, nil)
 	var refused struct {
 		Error     string   `json:"error"`
 		Workflows []string `json:"workflows"`
@@ -329,7 +369,7 @@ func TestDeleteRemovesEveryVersionUnlessTheWorkflowIsUsed(t *testing.T) {
 	if code, body := call(t, http.MethodDelete, srv.URL+"/api/workflows/leaf", ""); code != http.StatusNoContent {
 		t.Fatalf("delete: %d %s", code, body)
 	}
-	c, err := loadConfig(path)
+	c, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatalf("the configuration no longer loads: %v", err)
 	}

@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/name: orchestrator
 spec:
   replicas: 1
-  # The web UI writes config.yaml; keep a single writer.
+  # The orchestrator keeps the stored workflows in memory and is their only writer.
   strategy:
     type: Recreate
   selector:
@@ -28,9 +28,6 @@ spec:
         - name: orchestrator
           image: opensoftwarefactory-orchestrator:local
           imagePullPolicy: Never
-          args:
-            - -config
-            - /config/config.yaml
           env:
             - name: TEMPORAL_ADDRESS
               value: temporal:7233
@@ -67,11 +64,3 @@ spec:
             capabilities:
               drop:
                 - ALL
-          volumeMounts:
-            - name: config
-              mountPath: /config
-      volumes:
-        - name: config
-          hostPath:
-            path: /orchestrator/config
-            type: Directory

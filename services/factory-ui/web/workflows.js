@@ -1,10 +1,12 @@
 "use strict";
-// Workflows page: the list of workflows, the canvas with the selected workflow's graph,
-// and the inspector for the selected step (or the workflow when no step is selected).
-// Edits stay on the page until Save stores them as the next version of the workflow; stored
-// versions never change. Hash: #workflows/<workflow>/<step>, followed by ?version=<n> when the
-// version shown is not the newest and by path=<root>,<nested> when the workflow was opened
-// through workflow nodes. Workflow references pin a version (see workflowref.js).
+// Workflows page: a tree of groups and their workflows, the canvas with the selected workflow's
+// graph, and the inspector for the selected step (or the workflow when no step is selected).
+// Names are paths, as on Agents and Policies: "ecc/ECC-plan" is the workflow ECC-plan in the
+// group ecc. Edits stay on the page until Save stores them as the next version of the workflow;
+// stored versions never change. Hash: #workflows/<workflow>/<step>, the workflow encoded as one
+// part (ecc%2FECC-plan), followed by ?version=<n> when the version shown is not the newest and by
+// path=<root>,<nested> when the workflow was opened through workflow nodes. Workflow references
+// pin a version (see workflowref.js).
 
 // ---- Logic without the DOM (covered by teams_editor_test.mjs) ----
 
@@ -12,7 +14,8 @@ const WorkflowLogic = (() => {
   const RESERVED_MEMBER = "workflow"; // the orchestrator's own end of the lead's task channel
   const ONE_WAY = "one-way"; // third entry of a channel: only its first member sends
 
-  // memberName: the last path segment of an agent name without its version (demo/lead@v1 -> lead).
+  // memberName: the last path segment of an agent or workflow name without its version
+  // (demo/lead@v1 -> lead, ecc/ECC-plan@v1 -> ECC-plan), as the orchestrator names members.
   const memberName = (ref) => String(ref || "").split("@")[0].split("/").filter(Boolean).pop() || "";
 
   // teamMembers lists a team step's members: the lead first, then the agents, then the workflows.
@@ -20,8 +23,8 @@ const WorkflowLogic = (() => {
     const members = [];
     if (s.agent) members.push({ name: memberName(s.agent), kind: "agent", ref: s.agent, lead: true });
     for (const ref of s.agents || []) members.push({ name: memberName(ref), kind: "agent", ref, lead: false });
-    // A workflow member is named by its workflow, without the pinned version.
-    for (const ref of s.workflows || []) members.push({ name: WorkflowRef.nameOf(ref), kind: "workflow", ref, lead: false });
+    // A workflow member is named by its workflow without its groups and the pinned version.
+    for (const ref of s.workflows || []) members.push({ name: memberName(ref), kind: "workflow", ref, lead: false });
     return members;
   }
 
@@ -128,7 +131,7 @@ const WorkflowLogic = (() => {
   function removeMember(s, name) {
     return {
       agents: (s.agents || []).filter((ref) => memberName(ref) !== name),
-      workflows: (s.workflows || []).filter((ref) => WorkflowRef.nameOf(ref) !== name),
+      workflows: (s.workflows || []).filter((ref) => memberName(ref) !== name),
     };
   }
 
@@ -168,18 +171,21 @@ const WorkflowLogic = (() => {
   // versionWord is the pinned version of a reference as text ("v2"), or "" for a bare name.
   const versionWord = (ref) => { const { version } = WorkflowRef.parse(ref); return version ? `v${version}` : ""; };
 
-  // renameWorkflowRefs follows a renamed workflow in every workflow step, team, and channel. A
-  // reference keeps its pinned version; a channel names its member, the workflow without the version.
+  // renameWorkflowRefs follows a renamed (or moved) workflow in every workflow step, team, and
+  // channel. A reference keeps its pinned version; a channel names its member, the workflow
+  // without its groups and the version, so a move into another group leaves channels alone.
   function renameWorkflowRefs(workflows, from, to) {
     const follow = (ref) => { const { name, version } = WorkflowRef.parse(ref); return name === from ? WorkflowRef.format(to, version) : ref; };
+    const was = memberName(from), now = memberName(to);
     for (const w of workflows) for (const s of w.steps || []) {
       if (s.service === "workflow" && s.workflow) s.workflow = follow(s.workflow);
       if (s.service !== "team" || !(s.workflows || []).some((ref) => WorkflowRef.nameOf(ref) === from)) continue;
       s.workflows = s.workflows.map(follow);
-      if (Array.isArray(s.channels)) s.channels = s.channels.map((c) => (Array.isArray(c) ? c.map((name, i) => (i < 2 && name === from ? to : name)) : c));
+      if (was === now) continue;
+      if (Array.isArray(s.channels)) s.channels = s.channels.map((c) => (Array.isArray(c) ? c.map((name, i) => (i < 2 && name === was ? now : name)) : c));
       // The member's place follows its new name, as the orchestrator stores it.
-      if (s.member_positions && from in s.member_positions) {
-        s.member_positions = Object.fromEntries(Object.entries(s.member_positions).map(([name, at]) => [name === from ? to : name, at]));
+      if (s.member_positions && was in s.member_positions) {
+        s.member_positions = Object.fromEntries(Object.entries(s.member_positions).map(([name, at]) => [name === was ? now : name, at]));
       }
     }
   }
@@ -358,9 +364,14 @@ const WorkflowLogic = (() => {
   // /<workflow>/<step>?version=<n>&path=<root>,<nested>. version is given only when the version
   // shown is not the newest (0 means the newest); a part of the path is a workflow reference.
   const decode = (text) => { try { return decodeURIComponent(text); } catch { return text; } };
-  function parseHash(rest) {
+  // The workflow is one part, its slashes encoded (ecc%2FECC-plan); given the names, a grouped
+  // name typed with plain slashes (#workflows/ecc/ECC-plan/step) is found among them as well.
+  function parseHash(rest, names = []) {
     const [main, query = ""] = String(rest || "").split("?");
-    const [workflow = "", step = ""] = main.split("/").filter(Boolean).map(decode);
+    const parts = main.split("/").filter(Boolean).map(decode);
+    let take = 1;
+    if (parts.length > 1 && !names.includes(parts[0])) for (let n = Math.min(4, parts.length); n > 1; n--) if (names.includes(parts.slice(0, n).join("/"))) { take = n; break; }
+    const workflow = parts.slice(0, take).join("/"), step = parts[take] || "";
     const found = /(?:^|&)path=([^&]*)/.exec(query);
     const version = /(?:^|&)version=([1-9][0-9]*)(?:&|$)/.exec(query);
     return { workflow, step, version: version ? Number(version[1]) : 0, path: found ? found[1].split(",").filter(Boolean).map(decode) : [] };
@@ -951,41 +962,68 @@ const WorkflowLogic = (() => {
     syncHash();
   }
 
+  // ---- Sidebar: a tree of groups and their workflows, as on Agents and Policies ----
+
+  // Tree ids: "g:<group>" for a group, "w:<name>" for a workflow.
+  const groups = new Set(); // groups made with New group… in this visit; stored once they hold a workflow
+  const groupList = () => groupPaths(state.workflows.map((w) => w.name), groups);
+  const indexOf = (name) => state.workflows.findIndex((w) => w.name === name);
+  const tree = createTree($("wf-list"), {
+    // A click on a workflow opens it; when unsaved edits are kept instead, the tree marks the one on the canvas again.
+    onSelect(n) { if (n.id.startsWith("w:")) openTarget({ name: n.id.slice(2) }).then((shown) => { if (!shown) showSelection(); }); },
+    onContext(n, ev) { if (n.id.startsWith("g:")) groupMenu(n.id.slice(2), ev); else workflowMenu(n.id.slice(2), ev); },
+  });
+  let treeShows = null; // the workflow the tree last marked as the one on the canvas
+
+  // treeOrder lists the workflow names in the order the tree shows them.
+  const treeOrder = () => groupNodes(groupList(), state.workflows, (w) => w.name, (_g, children) => children, (w) => w.name).flat(Infinity);
+
   function renderList() {
-    const ul = $("wf-list");
-    if (state.loadError) { ul.replaceChildren(); return; } // the canvas shows the error once
-    if (!state.loaded) { ul.replaceChildren(); return; }
-    ul.replaceChildren(...state.workflows.map((w, i) => {
-      const editing = i === renaming;
-      const li = h("li", { role: "option", tabIndex: 0, "aria-selected": String(i === state.current) },
-        h("div", { className: "row-line" },
-          editing ? renameInput(w) : h("span", { className: "row-title" }, titleCase(w.name))));
-      const select = () => openWorkflow(i);
-      li.addEventListener("click", () => { if (i === state.current && renaming < 0) renameWorkflow(); else select(); });
-      // Right-click acts on this workflow without opening it, like every other sidebar.
-      li.addEventListener("contextmenu", (ev) => {
-        // Grouped by scope like every menu: this workflow, then its Delete, then New last.
-        openMenu(ev, [
-          ["Rename workflow", () => renameWorkflow(i), "", `Renames ${titleCase(w.name)} in place`],
-          ["Duplicate workflow", () => duplicateWorkflow(i), "", `Copies ${titleCase(w.name)} with all steps and positions`],
-          "-",
-          ["Delete workflow", () => deleteWorkflow(i), "danger", `Deletes ${titleCase(w.name)} with all its versions`],
-          "-",
-          ["New workflow", newWorkflow, "", "Adds an empty workflow"],
-        ]);
-      });
-      li.addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); select(); }
-        if (ev.key === "ArrowDown") li.nextElementSibling?.focus();
-        if (ev.key === "ArrowUp") li.previousElementSibling?.focus();
-      });
-      return li;
-    }));
+    if (state.loadError || !state.loaded) { tree.setRoots([]); treeShows = null; return; } // the canvas shows a load error once
+    const label = (path) => titleCase(leafOf(path));
+    tree.setRoots(groupNodes(groupList(), state.workflows, (w) => w.name,
+      (g, children) => ({ id: `g:${g}`, label: label(g), full: label(g), children }),
+      (w) => ({ id: `w:${w.name}`, label: label(w.name), full: label(w.name) })));
+    showSelection(false);
   }
 
-  function openWorkflow(i) {
-    const w = state.workflows[i];
-    if (w) openTarget({ name: w.name }); // opened from the list, not through a workflow node
+  // showSelection marks the workflow on the canvas in the tree and opens the groups that hold it.
+  // Unforced, it does so once per workflow shown, so a group picked since keeps the selection.
+  function showSelection(force = true) {
+    const name = entry()?.name || null;
+    if (!force && name === treeShows) return;
+    treeShows = name;
+    tree.select(name ? `w:${name}` : null);
+    if (name) tree.reveal(groupIds(name, "g:"));
+  }
+
+  // newItems are the New actions inside a group ("" is the top level); every menu ends with them.
+  const newItems = (group) => [
+    ["New workflow", () => newWorkflow(group), "", group ? `Adds an empty workflow to ${titleCase(group)}` : "Adds an empty workflow"],
+    ["New group…", () => newGroup(group), "", group ? `Adds a group inside ${titleCase(group)}` : "Adds a group"],
+  ];
+
+  // Right-click acts on a workflow without opening it, like every other sidebar, grouped by
+  // scope: this workflow, then its Delete, then New last.
+  function workflowMenu(name, ev) {
+    const shown = titleCase(name);
+    openMenu(ev, [
+      ["Rename workflow…", () => renameWorkflow(indexOf(name)), "", "Renames it with every version, or moves it into another group"],
+      ["Duplicate workflow", () => duplicateWorkflow(indexOf(name)), "", `Copies ${shown} with all steps and positions`],
+      "-",
+      ["Delete workflow", () => deleteWorkflow(indexOf(name)), "danger", `Deletes ${shown} with all its versions`],
+      "-",
+      ...newItems(groupOf(name)),
+    ]);
+  }
+
+  function groupMenu(group, ev) {
+    const count = state.workflows.filter((w) => w.name.startsWith(`${group}/`)).length;
+    openMenu(ev, [
+      ["Delete group", () => deleteGroup(group), "danger", count ? `Deletes ${titleCase(group)} with its ${count} workflow${count === 1 ? "" : "s"}` : `Deletes ${titleCase(group)}`],
+      "-",
+      ...newItems(group),
+    ]);
   }
 
   // openTarget shows a workflow version on the canvas: { name, version, step, path }; version 0
@@ -1216,62 +1254,115 @@ const WorkflowLogic = (() => {
 
   $("wf-new-slot").append(iconButton("plus", "New workflow", () => newWorkflow()));
   $("wf-list").parentElement.addEventListener("contextmenu", (ev) => {
-    if (ev.target.closest("li")) return;
-    openMenu(ev, [["New workflow", newWorkflow, "", "Adds an empty workflow"]]);
+    if (ev.target.closest?.(".tree-row")) return;
+    openMenu(ev, newItems(""));
   });
 
-  // Rename edits the name in its list row. Names are stored as lowercase-with-dashes ids
-  // and shown in title case.
-  let renaming = -1; // index of the workflow whose name is being edited in the sidebar
+  // Names are stored as lowercase-with-dashes IDs and shown in title case.
   // slug turns a typed name into an ID: words joined by dashes, lowercase except a word typed in
   // capitals ("API Review" becomes API-review and shows as API Review).
   const slug = (text) => text.split(/[^A-Za-z0-9]+/).filter(Boolean)
     .map((w) => (!/[a-z]/.test(w) && /[A-Z].*[A-Z]/.test(w) ? w : w.toLowerCase())).join("-").slice(0, 63).replace(/-+$/, "");
   const sameName = (a, b) => a.toLowerCase() === b.toLowerCase(); // names differing only in case are one name
+  // groupSlug turns a typed group into its ID, part by part: "Ecc / Code Review" becomes ecc/code-review.
+  const groupSlug = (text) => text.split("/").map(slug).filter(Boolean).join("/");
 
-  function renameWorkflow(i = state.current) {
-    if (!state.workflows[i]) return;
-    if (descriptionActionBlocked("renamed")) return;
-    renaming = i;
-    renderList();
-    const input = $("wf-list").querySelector("input.rename");
-    input?.focus();
-    input?.select();
-  }
-
-  function renameInput(w) {
-    const input = h("input", { className: "rename", value: titleCase(w.name), "aria-label": "Workflow name", autocomplete: "off", spellcheck: false });
-    const commit = (keep) => {
-      if (renaming < 0) return;
-      renaming = -1;
-      const v = slug(input.value);
-      if (keep && v && v !== w.name) {
-        if (state.workflows.some((x) => x !== w && sameName(x.name, v))) setStatus(`There is already a workflow named ${titleCase(v)}`, "error");
-        else renameTo(w, v);
-      }
-      render();
+  // nameFields asks for a group and a name, as on Agents and Policies: the group is required
+  // (nested groups separated with /, suggested from the existing ones), the name has no slash.
+  // Both show in title case and are saved as IDs. check returns the full ID, or "" after showing
+  // under the field what is wrong; except is the current name of the workflow being renamed.
+  function nameFields(idPrefix, value) {
+    const group = h("input", { autocomplete: "off", spellcheck: false, id: `${idPrefix}-group`, value: titleCase(groupOf(value)), list: `${idPrefix}-groups` });
+    const name = h("input", { autocomplete: "off", spellcheck: false, id: `${idPrefix}-name`, value: titleCase(leafOf(value)) });
+    const initial = [group.value, name.value];
+    const groupProblem = h("p", { className: "error-text", role: "alert" });
+    const nameProblem = h("p", { className: "error-text", role: "alert" });
+    const row = h("div", { className: "name-fields" },
+      h("div", { className: "field" }, h("label", { htmlFor: group.id, title: "Nested groups are separated with /" }, "Group"), group, groupProblem,
+        h("datalist", { id: `${idPrefix}-groups` }, ...[...groupList()].sort().map((g) => h("option", { value: titleCase(g) })))),
+      h("div", { className: "field" }, h("label", { htmlFor: name.id }, "Name"), name, nameProblem));
+    const check = (except = "") => {
+      groupProblem.textContent = nameProblem.textContent = "";
+      const fail = (p, field, text) => { p.textContent = text; field.focus(); return ""; };
+      const g = groupSlug(group.value), n = slug(name.value), full = `${g}/${n}`;
+      if (!g) return fail(groupProblem, group, group.value.trim() ? "Use letters, digits, and dashes; separate nested groups with /." : "Enter a group.");
+      if (g.split("/").length > 3) return fail(groupProblem, group, "Groups nest at most three deep.");
+      if (!n) return fail(nameProblem, name, name.value.trim() ? "Use letters, digits, and dashes." : "Enter a name.");
+      // A draft never stands in the way: it is the one renamed, or the one a new workflow replaces.
+      const taken = state.workflows.find((w) => w.name !== except && !isDraft(w) && sameName(w.name, full));
+      if (taken) return fail(nameProblem, name, `There is already a workflow named ${titleCase(taken.name)}.`);
+      const folder = [...groupList()].find((x) => sameName(x, full));
+      if (folder) return fail(nameProblem, name, `${titleCase(folder)} is a group.`);
+      return full;
     };
-    input.addEventListener("keydown", (ev) => {
-      ev.stopPropagation();
-      if (ev.key === "Enter") commit(true);
-      if (ev.key === "Escape") commit(false);
-    });
-    input.addEventListener("blur", () => commit(true));
-    for (const type of ["click", "pointerdown", "contextmenu"]) input.addEventListener(type, (ev) => ev.stopPropagation());
-    // The field is as wide as the name, also while typing.
-    input.addEventListener("input", () => fitWidth(input));
-    requestAnimationFrame(() => { if (input.isConnected) fitWidth(input); });
-    return input;
+    const unchanged = () => group.value === initial[0] && name.value === initial[1];
+    return { row, group, name, check, unchanged };
   }
 
-  // renameTo renames a workflow: the orchestrator renames every version and follows the name in
-  // the other workflows; the page does the same with what it shows. A draft has only its name here.
-  async function renameTo(e, to) {
+  // nameDialog opens a dialog with the Group and Name fields; submit gets the fields and closes
+  // it by resolving true. A submit on its way ignores further clicks and Enter.
+  function nameDialog(title, action, value, submit) {
+    const id = nameFields("wf-name", value);
+    const button = h("button", { type: "button", className: "primary" }, action);
+    const dlg = openDialog({ title, body: id.row, footer: [h("button", { type: "button", onclick: () => dlg.close() }, "Cancel"), button] });
+    const run = async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      try { if (await submit(id)) dlg.close(); } finally { button.disabled = false; }
+    };
+    button.onclick = run;
+    for (const c of [id.group, id.name]) c.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); run(); } });
+    return id;
+  }
+
+  // renameWorkflow renames a workflow with every version, or moves it into another group.
+  function renameWorkflow(i = state.current) {
+    const e = state.workflows[i];
+    if (!e) return;
     if (descriptionActionBlocked("renamed")) return;
+    const id = nameDialog("Rename workflow", "Rename", e.name, async (fields) => {
+      if (fields.unchanged()) return true;
+      const to = fields.check(e.name);
+      return !!to && (to === e.name || await renameTo(e, to));
+    });
+    // Renaming starts in the name with it selected (after the dialog focuses its first field).
+    requestAnimationFrame(() => { id.name.focus(); id.name.select(); });
+  }
+
+  // newGroup asks for a name and adds the group; it is stored once it holds a workflow.
+  function newGroup(parent) {
+    const input = h("input", { autocomplete: "off", spellcheck: false, id: "wf-group-name" });
+    const problem = h("p", { className: "error-text", role: "alert" });
+    const create = h("button", { type: "button", className: "primary" }, "Create group");
+    const dlg = openDialog({
+      title: "New group",
+      body: h("div", { className: "field" }, h("label", { htmlFor: input.id }, "Name"), input, problem),
+      footer: [h("button", { type: "button", onclick: () => dlg.close() }, "Cancel"), create],
+    });
+    const submit = () => {
+      const n = slug(input.value), path = [parent, n].filter(Boolean).join("/");
+      const fail = (text) => { problem.textContent = text; input.focus(); };
+      if (!n) return fail(input.value.trim() ? "Use letters, digits, and dashes." : "Enter a name.");
+      if (path.split("/").length > 3) return fail("Groups nest at most three deep.");
+      if (state.workflows.some((w) => sameName(w.name, path))) return fail(`${titleCase(path)} is a workflow.`);
+      const known = [...groupList()].find((g) => sameName(g, path));
+      groups.add(known || path);
+      dlg.close();
+      renderList();
+      tree.reveal([...groupIds(known || path, "g:"), `g:${known || path}`]).then(() => tree.select(`g:${known || path}`));
+    };
+    create.onclick = submit;
+    input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); submit(); } });
+  }
+
+  // renameTo renames (or moves) a workflow: the orchestrator renames every version and follows
+  // the name in the other workflows; the page does the same with what it shows. A draft has only
+  // its name here. It resolves false when the orchestrator refused.
+  async function renameTo(e, to) {
     const from = e.name;
     if (!isDraft(e)) {
       try { await api("POST", `${API}/workflows/${encodeURIComponent(from)}/rename`, { name: to }, creatorHeaders()); }
-      catch (err) { setStatus(`Not renamed: ${namedError(err)}`, "error"); return; }
+      catch (err) { setStatus(`Not renamed: ${namedError(err)}`, "error"); return false; }
     }
     const shown = e === entry();
     e.name = to;
@@ -1287,6 +1378,7 @@ const WorkflowLogic = (() => {
     try { localStorage.removeItem(viewKey(from)); } catch { /* storage unavailable */ }
     if (!isDraft(e)) setSaveState("Renamed");
     render();
+    return true;
   }
 
   // renderCanvasMessage explains an empty canvas: no workflows, no steps, or a load error.
@@ -1296,7 +1388,7 @@ const WorkflowLogic = (() => {
     let content = null;
     if (state.loadError) content = errorPanel(state.loadError, load);
     else if (!state.loaded) content = null;
-    else if (!w) content = emptyPanel("No workflows yet", { label: "New workflow", primary: true, run: newWorkflow });
+    else if (!w) content = emptyPanel("No workflows yet", { label: "New workflow", primary: true, run: () => newWorkflow() });
     else if (!w.steps.length) content = emptyPanel("No steps yet", { label: "Add step", run: () => addStep() });
     box.hidden = !content;
     box.replaceChildren(content || "");
@@ -2013,7 +2105,7 @@ const WorkflowLogic = (() => {
       const gone = m.kind === "agent" ? state.agentsLoaded && !state.agentRefs.includes(m.ref) : missingWorkflow(m.ref);
       // A workflow member is named by its workflow; its second line names the pinned version.
       const word = gone ? "Missing" : m.lead ? "Lead" : m.kind === "workflow" ? `Workflow ${L.versionWord(m.ref)}`.trim() : "";
-      const newer = m.kind === "workflow" && !gone ? pinNewest(m.name) : "";
+      const newer = m.kind === "workflow" && !gone ? pinNewest(WorkflowRef.nameOf(m.ref)) : "";
       const on = picked === m;
       const tile = h("button", {
         type: "button", className: `team-member${on ? " picked" : ""}${m.lead ? " lead" : ""}${gone ? " missing" : ""}`,
@@ -2150,7 +2242,7 @@ const WorkflowLogic = (() => {
       const refs = new Set(members.map((m) => m.ref));
       const agents = state.agentRefs.filter((ref) => !refs.has(ref)).map((ref) => [ref, () => add("agents", ref), "", `Adds the agent ${ref} to the team`]);
       // A workflow joins pinned to its newest version, once: a member is named by its workflow.
-      const flows = nestable().filter((name) => !members.some((m) => m.kind === "workflow" && m.name === name)).map(pinNewest)
+      const flows = nestable().filter((name) => !members.some((m) => m.kind === "workflow" && WorkflowRef.nameOf(m.ref) === name)).map(pinNewest)
         .map((ref) => [`${refLabel(ref)} (workflow)`, () => add("workflows", ref), "", `Adds the workflow ${refLabel(ref)} as a member`]);
       const items = [...agents, ...(agents.length && flows.length ? ["-"] : []), ...flows];
       openMenu(ev, items.length ? items : [["Nothing left to add", () => {}, "", "Every agent and workflow is a member already", true]]);
@@ -2409,13 +2501,13 @@ const WorkflowLogic = (() => {
       );
     }
     if (w) items.push(
-      ["Rename workflow", () => renameWorkflow(), "", `Renames ${titleCase(w.name)} in place`],
+      ["Rename workflow…", () => renameWorkflow(), "", "Renames it with every version, or moves it into another group"],
       ["Duplicate workflow", () => duplicateWorkflow(), "", `Copies ${titleCase(w.name)} with all steps and positions`],
       "-",
       ["Delete workflow", () => deleteWorkflow(), "danger", `Deletes ${titleCase(w.name)} with all its versions`],
       "-",
     );
-    items.push(["New workflow", newWorkflow, "", "Adds an empty workflow"]);
+    items.push(...newItems(w ? groupOf(w.name) : ""));
     return items;
   }
 
@@ -2514,26 +2606,33 @@ const WorkflowLogic = (() => {
     });
   }
 
-  // newWorkflow starts a draft: it is on the page only, and its first Save stores it as v1.
-  async function newWorkflow() {
+  // newWorkflow asks for a group and a name, then starts a draft: it is on the page only, and its
+  // first Save stores it as v1.
+  async function newWorkflow(group = "") {
     if (!(await confirmLeave())) return;
-    // There is one draft at a time: an earlier one that was left without a step gives way.
-    state.workflows = state.workflows.filter((w) => !isDraft(w));
-    let n = 1; // the lowest free number, as for steps
-    while (state.workflows.some((w) => sameName(w.name, `workflow-${n}`))) n++;
-    state.workflows.push({ name: `workflow-${n}`, steps: [] });
-    state.current = state.workflows.length - 1;
-    state.selected = null;
-    state.path = [];
-    showDefinition(entry());
-    dropUndo();
-    resetView();
-    render();
-    renameWorkflow();
+    const inGroup = (leaf) => [group, leaf].filter(Boolean).join("/");
+    let n = 1; // the lowest free number in the group, as for steps
+    while (state.workflows.some((w) => !isDraft(w) && sameName(w.name, inGroup(`workflow-${n}`)))) n++;
+    nameDialog("New workflow", "Create", inGroup(`workflow-${n}`), (fields) => {
+      const name = fields.check();
+      if (!name) return false;
+      // There is one draft at a time: an earlier one that was left without a step gives way.
+      state.workflows = state.workflows.filter((w) => !isDraft(w));
+      state.workflows.push({ name, steps: [] });
+      state.current = state.workflows.length - 1;
+      state.selected = null;
+      state.path = [];
+      showDefinition(entry());
+      dropUndo();
+      resetView();
+      render();
+      return true;
+    });
   }
 
-  // duplicateWorkflow stores a copy at once, as v1 of a new name, and opens it. The copy of the
-  // workflow on the canvas holds what the canvas shows; any other, its newest version.
+  // duplicateWorkflow stores a copy at once, as v1 of a new name beside the original (in its
+  // group), and opens it. The copy of the workflow on the canvas holds what the canvas shows;
+  // any other, its newest version.
   async function duplicateWorkflow(i = state.current) {
     const e = state.workflows[i];
     if (!e) return;
@@ -2561,20 +2660,49 @@ const WorkflowLogic = (() => {
       try { await api("DELETE", `${API}/workflows/${encodeURIComponent(e.name)}`, undefined, creatorHeaders()); }
       catch (err) { setStatus(`Not deleted: ${namedError(err)}`, "error"); return; }
     }
-    const at = state.workflows.indexOf(e);
-    if (at < 0) return;
-    state.workflows.splice(at, 1);
+    removeWorkflows([e]);
+    setSaveState("Deleted");
+  }
+
+  // deleteGroup deletes a group with every workflow in it. It cannot be undone, so it asks first.
+  async function deleteGroup(group) {
+    if (descriptionActionBlocked("deleted")) return;
+    const inside = state.workflows.filter((w) => w.name.startsWith(`${group}/`));
+    if (inside.length && !(await confirmAction(`Delete ${titleCase(group)} with its ${inside.length} workflow${inside.length === 1 ? "" : "s"} and all their versions?`, "Delete"))) return;
+    const gone = [];
+    try {
+      for (const e of inside) {
+        if (!isDraft(e)) await api("DELETE", `${API}/workflows/${encodeURIComponent(e.name)}`, undefined, creatorHeaders());
+        gone.push(e);
+      }
+    } catch (err) { setStatus(`Not deleted: ${namedError(err)}`, "error"); removeWorkflows(gone); return; }
+    for (const g of [...groups]) if (g === group || g.startsWith(`${group}/`)) groups.delete(g);
+    removeWorkflows(gone);
+    setSaveState("Deleted");
+  }
+
+  // removeWorkflows takes deleted workflows off the page. When the one on the canvas is among
+  // them, its neighbour in the tree takes its place: the next one, else the previous one, in the
+  // same group when there is one; a deleted group hands over to the workflow after it.
+  function removeWorkflows(gone) {
+    if (!gone.length) { render(); return; }
+    const order = treeOrder(), names = new Set(gone.map((e) => e.name));
+    const first = order.findIndex((n) => names.has(n)), last = order.findLastIndex((n) => names.has(n));
+    const after = order.slice(last + 1).filter((n) => !names.has(n)), before = order.slice(0, Math.max(0, first)).filter((n) => !names.has(n)).reverse();
+    const same = gone.length === 1 ? (n) => groupOf(n) === groupOf(gone[0].name) : () => false;
+    const next = after.find(same) || before.find(same) || after[0] || before[0] || "";
+    const shown = entry();
+    state.workflows = state.workflows.filter((w) => !gone.includes(w));
     versionCache.clear();
-    if (at === state.current) {
-      state.current = state.workflows.length ? Math.min(at, state.workflows.length - 1) : -1; // the neighbour takes its place
+    if (shown && gone.includes(shown)) {
+      state.current = indexOf(next);
       state.selected = null;
       state.path = [];
       showDefinition(entry() || null);
       dropUndo();
       resetView();
-    } else if (at < state.current) state.current--;
+    } else state.current = state.workflows.indexOf(shown);
     render();
-    setSaveState("Deleted");
   }
 
   // ---- Deep links: #workflows/<workflow>/<step>; selecting pushes history so Back works. ----
@@ -2606,12 +2734,12 @@ const WorkflowLogic = (() => {
   // there. A workflow that is gone gives way to the one shown, else to the first. When unsaved
   // edits are kept instead, the hash returns to what the canvas shows.
   async function followHash(rest, remembered = false) {
-    const target = L.parseHash(rest);
+    const target = L.parseHash(rest, state.workflows.map((w) => w.name));
     let name = target.workflow;
     if (!name || !state.workflows.some((w) => w.name === name)) {
       if (name && !remembered) setStatus(`There is no workflow named ${titleCase(name)}`, "error");
       if (state.edit || !state.workflows.length) { render(); return; } // what is shown stays
-      name = state.workflows[0].name;
+      name = treeOrder()[0];
       target.version = 0;
     }
     const shown = await openTarget({ name, version: target.version, step: target.step, path: target.path });

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -115,13 +114,12 @@ type runObjects interface {
 }
 
 type server struct {
-	configPath string
-	blobs      pipeline.Store
-	runner     Runner
+	workflows *workflowStore
+	blobs     pipeline.Store
+	runner    Runner
 	// agents reads the settings of a pinned agent for the run metadata. It may be nil.
 	agents func(ctx context.Context, ref string) (AgentSettings, error)
 	logger *slog.Logger
-	mu     sync.Mutex
 }
 
 func (s *server) routes() http.Handler {
@@ -148,9 +146,7 @@ func (s *server) routes() http.Handler {
 }
 
 func (s *server) config() (Config, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return loadConfig(s.configPath)
+	return s.workflows.snapshot()
 }
 
 // startRun stores the request body as the run input, assigns a new trace ID,

@@ -17,7 +17,7 @@ async function fixture(options = {}) {
   await cp(path.join(sourceRoot, "justfile"), path.join(root, "justfile"));
   for (const directory of [
     "scripts", "infra/kubernetes/overlays/local", "services/factory-ui/web",
-    "services/orchestrator/config", "services/blobstore/data/objects", "services/blobstore/data/meta",
+    "services/blobstore/data/objects", "services/blobstore/data/meta",
     "services/openobserve/data",
   ]) await mkdir(path.join(root, directory), { recursive: true });
   await writeFile(path.join(root, "services/factory-ui/web/app.js"), "'use strict';\n");
@@ -193,14 +193,12 @@ test("reset refuses to partially delete data when Temporal history is unreachabl
 
 test("reset deletes disposable factory data and restores original replica counts", async () => {
   const f = await fixture({ node: "running", temporalReplicas: 1, blobstoreReplicas: 0 });
-  const object = path.join(f.root, "services/blobstore/data/objects/remove");
-  const config = path.join(f.root, "services/orchestrator/config/config.yaml");
+  const object = path.join(f.root, "services/blobstore/data/objects/workflows/remove");
   try {
+    await mkdir(path.dirname(object), { recursive: true });
     await writeFile(object, "remove");
-    await writeFile(config, "remove");
     f.run(["reset"]);
     await assert.rejects(readFile(object), { code: "ENOENT" });
-    await assert.rejects(readFile(config), { code: "ENOENT" });
     const calls = await f.calls();
     assert.match(calls, /docker exec opensoftwarefactory-control-plane find \/var\/lib\/opensoftwarefactory\/temporal -mindepth 1 -delete/);
     assert.match(calls, /scale deployment temporal --replicas=1/);

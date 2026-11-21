@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 
@@ -54,15 +53,15 @@ func TestRejectionAtAGateWithOnRejectNeedsAComment(t *testing.T) {
 }
 
 func TestSaveRefusesAVersionThatReachesItself(t *testing.T) {
-	srv, _, _, path := newTestServer(t)
-	before, _ := os.ReadFile(path)
+	srv, _, _, workflows := newTestServer(t)
+	before, _ := workflowObjects(workflows)
 	// The first version of a workflow that names itself would run itself.
 	body := `{"steps":[{"id":"n","service":"workflow","workflow":"a"}]}`
 	code, out := call(t, http.MethodPost, srv.URL+"/api/workflows/a/versions", body)
 	if code != http.StatusUnprocessableEntity || !strings.Contains(out, "a@v1 -\\u003e a@v1") {
 		t.Fatalf("%d %s", code, out)
 	}
-	if after, _ := os.ReadFile(path); string(before) != string(after) {
+	if after, _ := workflowObjects(workflows); string(before) != string(after) {
 		t.Fatal("an invalid version changed config.yaml")
 	}
 }

@@ -30,6 +30,9 @@ test("a run from the editor names the version on the canvas; without one it runs
   assert.deepEqual({ ...calls[0][3] }, { "X-Creator": "ada" });
   await Inputs.runAgain("team demo");
   assert.equal(calls[1][1], "/api/orchestrator/workflows/team%20demo/runs");
+  // A grouped name is one part of the path.
+  await Inputs.runAgain("ecc/ECC-plan", 3);
+  assert.equal(calls[2][1], "/api/orchestrator/workflows/ecc%2FECC-plan/runs?version=3");
 });
 
 test("a run is refused while the editor has unsaved edits", async () => {

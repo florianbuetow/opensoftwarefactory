@@ -105,6 +105,43 @@ func (s HTTPStore) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// List returns the immediate child directories and object IDs of a prefix. A missing prefix
+// has no children.
+func (s HTTPStore) List(ctx context.Context, prefix string) (dirs []string, objects []string, err error) {
+	if !ValidID(prefix) {
+		return nil, nil, fmt.Errorf("invalid prefix %q", prefix)
+	}
+	root := strings.TrimSuffix(s.BaseURL, "/blobs")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/list/"+prefix, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := s.Client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, nil, fmt.Errorf("GET list %s: %s", prefix, resp.Status)
+	}
+	var listing struct {
+		Directories []string `json:"directories"`
+		Objects     []struct {
+			ID string `json:"id"`
+		} `json:"objects"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		return nil, nil, err
+	}
+	for _, o := range listing.Objects {
+		objects = append(objects, o.ID)
+	}
+	return listing.Directories, objects, nil
+}
+
 // Creator returns the creator recorded for an object, or "" when none is recorded.
 func (s HTTPStore) Creator(ctx context.Context, id string) (string, error) {
 	if !ValidID(id) {

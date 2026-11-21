@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 
@@ -79,7 +78,7 @@ func TestDecisionsListPublishRequests(t *testing.T) {
 }
 
 func TestSavingDevPodStepsAndBackEdges(t *testing.T) {
-	srv, _, _, path := newTestServer(t)
+	srv, _, _, workflows := newTestServer(t)
 	def := `{"steps":[` +
 		`{"id":"pod","service":"devpod","repository":"claims-build","source_branch":"main","work_branch":"agent/payment-date-{run}","name":"payment",` +
 		`"protected":["tests/**","verify.sh"],"rules":[{"tool":"write_file","path":"src/panel/**","matches":"rejection ?reason","message":"Blocked by CL-7: fix it."}]},` +
@@ -102,7 +101,7 @@ func TestSavingDevPodStepsAndBackEdges(t *testing.T) {
 		}
 	}
 	// The stored YAML reads back to the same steps.
-	saved, err := loadConfig(path)
+	saved, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,14 +117,14 @@ func TestSavingDevPodStepsAndBackEdges(t *testing.T) {
 	if baseline.Command != "./verify.sh" || !baseline.AllowFailure || decide.OnReject != "build" || decide.MaxRejections != 3 {
 		t.Errorf("stored steps %+v %+v", baseline, decide)
 	}
-	yaml, _ := os.ReadFile(path)
-	for _, line := range []string{"repository: claims-build", "work_branch: agent/payment-date-{run}", "allow_failure: true", "on_reject: build", "max_rejections: 3", "service: devpod-stop"} {
-		if !strings.Contains(string(yaml), line) {
-			t.Errorf("config.yaml lacks %q", line)
+	objects, _ := workflowObjects(workflows)
+	for _, line := range []string{`"repository": "claims-build"`, `"work_branch": "agent/payment-date-{run}"`, `"allow_failure": true`, `"on_reject": "build"`, `"max_rejections": 3`, `"service": "devpod-stop"`} {
+		if !strings.Contains(string(objects), line) {
+			t.Errorf("the stored workflow lacks %s", line)
 		}
 	}
 	// Each of these is refused on save, and nothing is stored.
-	before, _ := os.ReadFile(path)
+	before, _ := workflowObjects(workflows)
 	podStep := `{"id":"pod","service":"devpod","repository":"claims-build","source_branch":"main","work_branch":"agent/x"}`
 	for name, tc := range map[string]struct{ steps, want string }{
 		"two pods":        {podStep + `,{"id":"pod2","service":"devpod","repository":"claims-build","source_branch":"main","work_branch":"agent/y"}`, "only one"},
@@ -141,7 +140,7 @@ func TestSavingDevPodStepsAndBackEdges(t *testing.T) {
 			t.Errorf("%s: %d %s", name, code, body)
 		}
 	}
-	if after, _ := os.ReadFile(path); string(before) != string(after) {
+	if after, _ := workflowObjects(workflows); string(before) != string(after) {
 		t.Fatal("a refused version changed config.yaml")
 	}
 }

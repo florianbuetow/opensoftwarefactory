@@ -7,8 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -126,17 +125,79 @@ const sampleConfig = `workflows:
         depends_on: [draft]
 `
 
-func newTestServer(t *testing.T) (*httptest.Server, *fakeRunner, *memStore, string) {
+// List returns the immediate child directories and object IDs of a prefix.
+func (m *memStore) List(_ context.Context, prefix string) ([]string, []string, error) {
+	seen := map[string]bool{}
+	dirs, objects := []string{}, []string{}
+	for id := range m.data {
+		rest, ok := strings.CutPrefix(id, prefix+"/")
+		if !ok {
+			continue
+		}
+		if dir, _, nested := strings.Cut(rest, "/"); nested {
+			if !seen[dir] {
+				seen[dir] = true
+				dirs = append(dirs, dir)
+			}
+			continue
+		}
+		objects = append(objects, id)
+	}
+	sort.Strings(dirs)
+	sort.Strings(objects)
+	return dirs, objects, nil
+}
+
+// storeWorkflows stores the YAML configuration in a blobstore of its own and opens the
+// workflow store on it.
+func storeWorkflows(t *testing.T, config string) *workflowStore {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(sampleConfig), 0o644); err != nil {
+	c, err := parseConfig([]byte(config))
+	if err != nil {
 		t.Fatal(err)
 	}
+	s := &workflowStore{blobs: newMemStore(), config: Config{Workflows: []pipeline.Definition{}}}
+	if err = s.update(context.Background(), func(next *Config) error { *next = c; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// storedConfig reads the workflows back from the blobstore, as the orchestrator does when it
+// starts.
+func storedConfig(s *workflowStore) (Config, error) {
+	reopened, err := openWorkflowStore(context.Background(), s.blobs)
+	if err != nil {
+		return Config{}, err
+	}
+	return reopened.config, nil
+}
+
+// workflowObjects returns every stored workflow object, in ID order, so a test can tell
+// whether anything was written.
+func workflowObjects(s *workflowStore) ([]byte, error) {
+	m := s.blobs.(*memStore)
+	ids := make([]string, 0, len(m.data))
+	for id := range m.data {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var out []byte
+	for _, id := range ids {
+		out = append(out, id+"\n"...)
+		out = append(out, m.data[id]...)
+	}
+	return out, nil
+}
+
+func newTestServer(t *testing.T) (*httptest.Server, *fakeRunner, *memStore, *workflowStore) {
+	t.Helper()
+	workflows := storeWorkflows(t, sampleConfig)
 	runner, store := &fakeRunner{}, newMemStore()
-	s := &server{configPath: path, blobs: store, runner: runner, logger: slog.New(slog.DiscardHandler)}
+	s := &server{workflows: workflows, blobs: store, runner: runner, logger: slog.New(slog.DiscardHandler)}
 	srv := httptest.NewServer(s.routes())
 	t.Cleanup(srv.Close)
-	return srv, runner, store, path
+	return srv, runner, store, workflows
 }
 
 func call(t *testing.T, method, url, body string) (int, string) {
@@ -191,12 +252,12 @@ func TestStartRunAssignsTraceIDAndStoresInput(t *testing.T) {
 }
 
 func TestSaveVersionWritesYAML(t *testing.T) {
-	srv, _, _, path := newTestServer(t)
+	srv, _, _, workflows := newTestServer(t)
 	def := `{"name":"two","steps":[{"id":"a","service":"agent","agent":"intake@v1","position":{"x":10,"y":20}},{"id":"g","service":"gate","question":"ok?","depends_on":["a"]},{"id":"b","service":"svc","depends_on":["g"],"timeout":"30s"}]}`
 	if code, body := call(t, http.MethodPost, srv.URL+"/api/workflows/two/versions", def); code != http.StatusCreated {
 		t.Fatalf("%d %s", code, body)
 	}
-	saved, err := loadConfig(path)
+	saved, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +276,8 @@ func TestSaveVersionWritesYAML(t *testing.T) {
 }
 
 func TestSaveVersionRejectsInvalidGraph(t *testing.T) {
-	srv, _, _, path := newTestServer(t)
-	before, _ := os.ReadFile(path)
+	srv, _, _, workflows := newTestServer(t)
+	before, _ := workflowObjects(workflows)
 	cyc := `{"steps":[{"id":"a","service":"s","depends_on":["b"]},{"id":"b","service":"s","depends_on":["a"]}]}`
 	if code, body := call(t, http.MethodPost, srv.URL+"/api/workflows/w/versions", cyc); code != http.StatusUnprocessableEntity || !strings.Contains(body, "cycle") {
 		t.Fatalf("%d %s", code, body)
@@ -228,7 +289,7 @@ func TestSaveVersionRejectsInvalidGraph(t *testing.T) {
 	if code, _ := call(t, http.MethodPost, srv.URL+"/api/workflows/w/versions", `{"steps":[],"extra":1}`); code != http.StatusBadRequest {
 		t.Fatalf("unknown field accepted: %d", code)
 	}
-	after, _ := os.ReadFile(path)
+	after, _ := workflowObjects(workflows)
 	if string(before) != string(after) {
 		t.Fatal("invalid configuration overwrote config.yaml")
 	}
@@ -334,12 +395,12 @@ func TestSessions(t *testing.T) {
 }
 
 func TestInteractiveStepRoundTripsThroughTheConfiguration(t *testing.T) {
-	srv, _, _, path := newTestServer(t)
+	srv, _, _, workflows := newTestServer(t)
 	def := `{"steps":[{"id":"chat","service":"interactive","agent":"triage@v1","agents":["plain@v2","folder/helper@v3"]},{"id":"use","service":"agent","agent":"intake@v1","depends_on":["chat"]}]}`
 	if code, body := call(t, http.MethodPost, srv.URL+"/api/workflows/talk/versions", def); code != http.StatusCreated {
 		t.Fatalf("%d %s", code, body)
 	}
-	saved, err := loadConfig(path)
+	saved, err := storedConfig(workflows)
 	if err != nil {
 		t.Fatal(err)
 	}

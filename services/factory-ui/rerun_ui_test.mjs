@@ -24,6 +24,8 @@ test("re-run uses the version the run recorded, else the newest",async()=>{
  assert.equal(calls[0][1],"/api/orchestrator/workflows/demo/runs?input=runs%2Fa%2Finput&version=2");
  await ctx.rerun({trace_id:"b",workflow:"demo",input_artifact:"runs/b/input"});
  assert.equal(calls[1][1],"/api/orchestrator/workflows/demo/runs?input=runs%2Fb%2Finput","a run without a recorded version runs the newest");
+ await ctx.rerun({trace_id:"c",workflow:"ecc/ECC-plan",workflow_version:1,input_artifact:"runs/c/input"});
+ assert.equal(calls[2][1],"/api/orchestrator/workflows/ecc%2FECC-plan/runs?input=runs%2Fc%2Finput&version=1","a grouped name is one part of the path");
  const runVersion=vm.runInContext("runVersion",ctx);
  assert.equal(runVersion({workflow_version:2},{workflow:{name:"demo",version:3}}),3,"the metadata names the version that ran");
  assert.equal(runVersion({workflow_version:2},null),2);assert.equal(runVersion({},null),0);assert.equal(runVersion(undefined,{}),0);

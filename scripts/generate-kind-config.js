@@ -26,8 +26,6 @@ const mounts = [
   "        readOnly: true",
   `      - hostPath: ${JSON.stringify(path.join(root, "services", "openobserve", "data"))}`,
   "        containerPath: /openobserve/data",
-  `      - hostPath: ${JSON.stringify(path.join(root, "services", "orchestrator", "config"))}`,
-  "        containerPath: /orchestrator/config",
   `      - hostPath: ${JSON.stringify(path.join(root, "services", "blobstore", "data"))}`,
   "        containerPath: /blobstore/data",
   `      - hostPath: ${JSON.stringify(path.join(root, "services", "tool-gateway", "tools"))}`,

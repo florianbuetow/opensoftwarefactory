@@ -14,14 +14,18 @@ func TestParseWorkflowRef(t *testing.T) {
 		version int
 		ok      bool
 	}{
-		"team-build@v2": {"team-build", 2, true},
-		"team-build":    {"team-build", 0, true},
-		"API-review@v1": {"API-review", 1, true},
-		"x@v0":          {"", 0, false},
-		"x@2":           {"", 0, false},
-		"x@v":           {"", 0, false},
-		"folder/x@v1":   {"", 0, false},
-		"":              {"", 0, false},
+		"team-build@v2":   {"team-build", 2, true},
+		"team-build":      {"team-build", 0, true},
+		"API-review@v1":   {"API-review", 1, true},
+		"x@v0":            {"", 0, false},
+		"x@2":             {"", 0, false},
+		"x@v":             {"", 0, false},
+		"ecc/ECC-plan@v1": {"ecc/ECC-plan", 1, true},
+		"a/b/c/d":         {"a/b/c/d", 0, true},
+		"a/b/c/d/e@v1":    {"", 0, false},
+		"a//b@v1":         {"", 0, false},
+		"/a@v1":           {"", 0, false},
+		"":                {"", 0, false},
 	} {
 		name, version, ok := ParseWorkflowRef(ref)
 		if name != want.name || version != want.version || ok != want.ok {
@@ -30,6 +34,17 @@ func TestParseWorkflowRef(t *testing.T) {
 	}
 	if WorkflowRef("a", 3) != "a@v3" || WorkflowRef("a", 0) != "a" {
 		t.Error("WorkflowRef")
+	}
+}
+
+func TestValidWorkflowName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"sample": true, "ecc/ECC-plan": true, "a/b/c/d": true,
+		"a/b/c/d/e": false, "a//b": false, "a/": false, "/a": false, "ecc/v2": false, "v1": false, "a b": false,
+	} {
+		if got := ValidWorkflowName(name); got != want {
+			t.Errorf("%q: %v", name, got)
+		}
 	}
 }
 
@@ -137,7 +152,7 @@ func TestTeamWorkflowMemberRunsThePinnedVersionUnderItsPlainName(t *testing.T) {
 
 func TestValidatePinnedReferences(t *testing.T) {
 	node := func(id, ref string) Step { return Step{ID: id, Service: WorkflowService, Workflow: ref} }
-	for _, bad := range []string{"inner@1", "inner@v0", "inner@", "a/b@v1"} {
+	for _, bad := range []string{"inner@1", "inner@v0", "inner@", "a//b@v1", "a/b/c/d/e@v1"} {
 		if err := Validate(Definition{Name: "w", Steps: []Step{node("n", bad)}}); err == nil {
 			t.Errorf("workflow step accepted %q", bad)
 		}

@@ -8,8 +8,8 @@ import (
 )
 
 // workflowRefPattern matches a workflow reference: a workflow name, or a name pinned to a
-// version such as team-build@v2.
-var workflowRefPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(@v[1-9][0-9]*)?$`)
+// version such as team-build@v2 or ecc/ECC-plan@v1.
+var workflowRefPattern = regexp.MustCompile(`^` + workflowNameExpr + `(@v[1-9][0-9]*)?$`)
 
 // ParseWorkflowRef splits a workflow reference into name and version: "team-build@v2" is
 // ("team-build", 2). A bare name has version 0, which means the newest version. ok is false

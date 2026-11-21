@@ -561,7 +561,6 @@ pre.logs.wrap { white-space: pre-wrap; }
 /* Registry pages (Agents, Policies) */
 .row-line { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
 .row-line .row-title { flex: 1; min-width: 0; }
-.rows input.rename { height: 26px; min-height: 26px; padding: 0 6px; margin-left: -7px; max-width: calc(100% + 7px); } /* the name stays where it was */
 .registry-detail { padding: 0 0 24px; } /* the last block or the Save row keeps the 24 px inset */
 .registry-detail .section { padding: 24px; }
 .registry-detail textarea.file { display: block; width: 100%; min-height: 96px; resize: none; overflow: hidden; background: var(--canvas); }

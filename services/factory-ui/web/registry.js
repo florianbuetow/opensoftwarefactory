@@ -119,8 +119,6 @@ function registryTab({ tab, base, noun, files }) {
   const remember = (name) => { try { localStorage.setItem(LAST_KEY, name); } catch { /* storage unavailable */ } };
   const lastUsed = () => { try { return localStorage.getItem(LAST_KEY) || ""; } catch { return ""; } };
   const enc = (name) => name.split("/").map(encodeURIComponent).join("/");
-  const folderOf = (name) => name.split("/").slice(0, -1).join("/");
-  const leaf = (path) => path.split("/").pop();
   const isVersion = (s) => /^v[1-9][0-9]*$/.test(s);
   const SEGMENT = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
   const validName = (n) => new RegExp(`^${SEGMENT}(/${SEGMENT}){0,3}$`).test(n) && !n.split("/").some((s) => isVersion(s) || s === "latest");
@@ -141,33 +139,18 @@ function registryTab({ tab, base, noun, files }) {
   });
 
   // folderPaths returns every folder that holds an entry, plus folders created in this session.
-  function folderPaths() {
-    const out = new Set(state.folders);
-    for (const e of state.entries) {
-      const parts = e.name.split("/");
-      for (let i = 1; i < parts.length; i++) out.add(parts.slice(0, i).join("/"));
-    }
-    return out;
-  }
+  const folderPaths = () => groupPaths(state.entries.map((e) => e.name), state.folders);
 
   function renderTree() {
-    const folders = folderPaths();
-    const nodesIn = (parent) => {
-      const depth = parent ? parent.split("/").length + 1 : 1;
-      const inParent = (path) => path.split("/").length === depth && folderOf(path) === parent;
-      const folderNodes = [...folders].filter(inParent).sort()
-        .map((f) => ({ id: `f:${f}`, label: leaf(f), children: nodesIn(f) }));
-      const entryNodes = state.entries.filter((e) => inParent(e.name)).sort((a, b) => a.name.localeCompare(b.name))
-        .map((e) => ({
-          id: `n:${e.name}`, label: leaf(e.name),
-          children: [
-            ...(state.draft?.name === e.name ? [{ id: `d:${e.name}`, label: state.draft.version, title: "Not stored until saved", className: "draft" }] : []),
-            ...(state.versions.get(e.name) || []).map((v) => ({ id: `v:${e.name}@${v.version}`, label: v.version, title: fullTime(v.created) })),
-          ],
-        }));
-      return [...folderNodes, ...entryNodes];
-    };
-    tree.setRoots(nodesIn(""));
+    tree.setRoots(groupNodes(folderPaths(), state.entries, (e) => e.name,
+      (f, children) => ({ id: `f:${f}`, label: leafOf(f), children }),
+      (e) => ({
+        id: `n:${e.name}`, label: leafOf(e.name),
+        children: [
+          ...(state.draft?.name === e.name ? [{ id: `d:${e.name}`, label: state.draft.version, title: "Not stored until saved", className: "draft" }] : []),
+          ...(state.versions.get(e.name) || []).map((v) => ({ id: `v:${e.name}@${v.version}`, label: v.version, title: fullTime(v.created) })),
+        ],
+      })));
   }
 
   // createItems are the "New" actions inside a group ("" is the top level). Every menu ends
@@ -200,7 +183,7 @@ function registryTab({ tab, base, noun, files }) {
       ...(version && (state.versions.get(name) || []).length > 1 ? [["Delete version", () => removeVersion(name, version), "danger", `Deletes ${version} of ${name}; the other versions stay`]] : []),
       [`Delete ${noun}`, () => remove(name), "danger", `Deletes ${name} with every version`],
       "-",
-      ...createItems(folderOf(name)),
+      ...createItems(groupOf(name)),
     ]);
   }
 

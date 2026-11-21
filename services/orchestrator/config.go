@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,7 @@ import (
 	"opensoftwarefactory/orchestrator/pipeline"
 )
 
-// Config is the content of config.yaml: every stored version of every workflow.
+// Config is every stored version of every workflow. A seed file holds one as YAML or JSON.
 type Config struct {
 	Workflows []pipeline.Definition `yaml:"workflows" json:"workflows"`
 }
@@ -49,37 +50,16 @@ func loadConfig(path string) (Config, error) {
 	return parseConfig(data)
 }
 
-func saveConfig(path string, c Config) error {
-	if err := c.validate(); err != nil {
-		return err
-	}
-	var buf bytes.Buffer
-	buf.WriteString("# Workflow configuration. Saved by the orchestrator web UI, which does not keep comments.\n")
-	e := yaml.NewEncoder(&buf)
-	e.SetIndent(2)
-	if err := e.Encode(c); err != nil {
-		return err
-	}
-	if err := e.Close(); err != nil {
-		return err
-	}
-	return pipeline.WriteFileAtomic(path, buf.Bytes(), 0o644)
-}
-
 // seedWorkflows adds bundled workflow names that are wholly absent from the stored
-// configuration. Existing names, including all their versions, always win. Seed files are
-// read in name order and must each contain a valid workflow configuration.
-func seedWorkflows(configPath, seedDir string) (int, error) {
+// workflows. Existing names, including all their versions, always win. Seed files are read
+// in name order and must each contain a valid workflow configuration.
+func seedWorkflows(ctx context.Context, store *workflowStore, seedDir string) (int, error) {
 	if seedDir == "" {
 		return 0, nil
 	}
 	entries, err := os.ReadDir(seedDir)
 	if err != nil {
 		return 0, fmt.Errorf("reading workflow seed directory: %w", err)
-	}
-	stored, err := loadConfig(configPath)
-	if err != nil {
-		return 0, err
 	}
 	seeded := []pipeline.Definition{}
 	for _, entry := range entries {
@@ -102,32 +82,25 @@ func seedWorkflows(configPath, seedDir string) (int, error) {
 		seeded = append(seeded, config.Workflows...)
 	}
 
-	existing := make(map[string]bool, len(stored.Workflows))
-	for _, workflow := range stored.Workflows {
-		existing[strings.ToLower(workflow.Name)] = true
-	}
-	addNames := map[string]bool{}
-	for _, workflow := range seeded {
-		key := strings.ToLower(workflow.Name)
-		if !existing[key] {
-			addNames[key] = true
-		}
-	}
 	added := 0
-	for _, workflow := range seeded {
-		if addNames[strings.ToLower(workflow.Name)] {
-			stored.Workflows = append(stored.Workflows, workflow)
-			added++
+	err = store.update(ctx, func(stored *Config) error {
+		existing := make(map[string]bool, len(stored.Workflows))
+		for _, workflow := range stored.Workflows {
+			existing[strings.ToLower(workflow.Name)] = true
 		}
-	}
-	if added == 0 {
-		return 0, nil
-	}
-	if err := stored.validate(); err != nil {
-		return 0, fmt.Errorf("merging workflow seeds: %w", err)
-	}
-	if err := saveConfig(configPath, stored); err != nil {
-		return 0, fmt.Errorf("saving workflow seeds: %w", err)
+		for _, workflow := range seeded {
+			if !existing[strings.ToLower(workflow.Name)] {
+				stored.Workflows = append(stored.Workflows, workflow)
+				added++
+			}
+		}
+		if err := stored.validate(); err != nil {
+			return fmt.Errorf("merging workflow seeds: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return added, nil
 }
