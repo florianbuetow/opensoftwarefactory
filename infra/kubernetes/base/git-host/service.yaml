@@ -4,6 +4,8 @@ metadata:
   name: git-host
   labels:
     app.kubernetes.io/name: git-host
+  annotations:
+    opensoftwarefactory.dev/url: http://localhost:8082/git/
 spec:
   selector:
     app.kubernetes.io/name: git-host

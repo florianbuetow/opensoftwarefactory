@@ -43,6 +43,8 @@ spec:
               value: http://evaluation:8080
             - name: CONNECTORS_URL
               value: http://connectors:8080
+            - name: GIT_HOST_URL
+              value: http://git-host:8080
             - name: AGENT_URL
               value: http://agent:8080
             - name: OBSERVABILITY_URL

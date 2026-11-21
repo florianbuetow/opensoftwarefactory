@@ -33,7 +33,7 @@ func newTestUI(t *testing.T) (*httptest.Server, chan seen) {
 	t.Helper()
 	got := make(chan seen, 1)
 	b := fakeBackend(t, got)
-	h, err := newHandler(backends{orchestrator: b.URL, agents: b.URL, policies: b.URL, blobs: b.URL, llm: b.URL, mcp: b.URL, evaluations: b.URL, connectors: b.URL, agent: b.URL}, slog.New(slog.DiscardHandler))
+	h, err := newHandler(backends{orchestrator: b.URL, agents: b.URL, policies: b.URL, blobs: b.URL, llm: b.URL, mcp: b.URL, evaluations: b.URL, connectors: b.URL, gitHost: b.URL, agent: b.URL}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +75,9 @@ func TestProxyRewritesPaths(t *testing.T) {
 		{"POST", "/api/mcp-gateway/api/services/context7/test-connection", "/api/services/context7/test-connection", ""},
 		{"POST", "/api/mcp-gateway/mcp/context7", "/mcp/context7", `{"jsonrpc":"2.0"}`},
 		{"DELETE", "/api/mcp-gateway/mcp/context7", "/mcp/context7", ""},
+		{"GET", "/git/", "/", ""},
+		{"GET", "/git/claims-review.git/info/refs", "/claims-review.git/info/refs", ""},
+		{"POST", "/git/claims-review.git/git-receive-pack", "/claims-review.git/git-receive-pack", "pack data"},
 	}
 	for _, c := range cases {
 		req, _ := http.NewRequest(c.method, ui.URL+c.path+"?x=1", strings.NewReader(c.body))

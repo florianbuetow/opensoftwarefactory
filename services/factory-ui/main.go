@@ -11,6 +11,7 @@
 //	/api/cluster/*       the Kubernetes API, read-only, see clusterProxy
 //	/api/llm/v1/models   LLM_GATEWAY_URL      /v1/models (the model list only; the UI never calls a model)
 //	/api/mcp-gateway/*   MCP_GATEWAY_URL      /*
+//	/git/*               GIT_HOST_URL         /*  (clone, fetch, and push)
 //
 // Everything else is served from the embedded web directory.
 package main
@@ -42,6 +43,7 @@ var webFiles embed.FS
 type backends struct {
 	orchestrator, agents, policies, blobs, llm, mcp, evaluations string
 	connectors                                                   string // the connector service: repositories and dev pods
+	gitHost                                                      string // the demo Git server
 	agent                                                        string // the agent service, for interactive chat
 	cluster                                                      *clusterProxy
 	observability                                                *observabilityClient
@@ -67,6 +69,7 @@ func run() error {
 		mcp:          env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"),
 		evaluations:  env("EVALUATION_URL", "http://evaluation:8080"),
 		connectors:   env("CONNECTORS_URL", "http://connectors:8080"),
+		gitHost:      env("GIT_HOST_URL", "http://git-host:8080"),
 		agent:        env("AGENT_URL", "http://agent:8080"),
 		cluster:      &clusterProxy{apiBase: inClusterAPI(), dir: serviceAccountDir, logger: logger},
 		observability: loadObservability(validateObservabilityURL(env("OBSERVABILITY_URL", "http://openobserve:5080")),
@@ -141,6 +144,13 @@ func newHandler(b backends, logger *slog.Logger) (http.Handler, error) {
 			return nil, err
 		}
 		mux.Handle("/api/connectors/", p)
+	}
+	if b.gitHost != "" {
+		p, err := newProxy("/git", b.gitHost, "", logger)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/git/", p)
 	}
 	if b.mcp != "" {
 		p, err := newProxy("/api/mcp-gateway", b.mcp, "", logger)
