@@ -157,7 +157,7 @@ test("an unfinished checkpoint in a failed attempt is shown as interrupted with 
   const button = nodes(timeline, "timeline-select")[0];
   button.onclick();
   await new Promise(setImmediate);
-  assert.ok(nodes(timeline, "evidence-warning").some((item) => String(item.children[0]).includes("no completion checkpoint")));
+  assert.ok(nodes(timeline, "evidence-warning").some((item) => String(item.children[0]).includes("its end was never recorded")));
   assert.ok(nodes(timeline, "evidence-warning").some((item) => String(item.children[0]).includes("No matching logs")));
 });
 
@@ -183,7 +183,7 @@ test("missing logs beyond configured retention are identified as possibly expire
   ] }] }], { trace: "11111111-1111-1111-1111-111111111111", artifacts: {}, retentionDays: 7 });
   nodes(timeline, "timeline-select")[0].onclick();
   await new Promise(setImmediate);
-  assert.ok(nodes(timeline, "evidence-warning").some((item) => String(item.children[0]).includes("configured for 7 days")));
+  assert.ok(nodes(timeline, "evidence-warning").some((item) => String(item.children[0]).includes("kept for 7 days")));
 });
 
 test("telemetry failures produce a visible warning while healthy telemetry stays quiet", async () => {

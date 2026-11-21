@@ -83,6 +83,18 @@ test("channels of a member that left are dropped", () => {
   assert.equal(pruneChannels(team()), undefined);
 });
 
+test("team channels cannot connect two workflow members, but an existing invalid channel can be removed", () => {
+  const { toggleChannel, teamProblems } = logic();
+  const s = { ...team(), workflows: ["docs-team@v2", "review-flow@v3"] };
+  assert.equal(toggleChannel(s, "docs-team", "review-flow"), undefined, "refuses adding a workflow-to-workflow channel");
+  assert.equal(toggleChannel(s, "review-flow", "docs-team"), undefined);
+  for (const channel of [["docs-team", "review-flow"], ["docs-team", "review-flow", "one-way"], ["review-flow", "docs-team", "one-way"]]) {
+    assert.match(teamProblems({ ...s, channels: [channel] }).join(" "), /Two workflows cannot/);
+    assert.equal(toggleChannel({ ...s, channels: [channel] }, "docs-team", "review-flow"), undefined, "allows removing invalid stored channels");
+  }
+  assert.deepEqual(plain(teamProblems({ ...s, channels: [["coder", "docs-team"], ["review-flow", "tester"], ["coder", "tester"]] })), []);
+});
+
 test("a team with two members of one name, a reserved name, or a stray channel is refused with the reason", () => {
   const { teamProblems } = logic();
   assert.deepEqual(plain(teamProblems(team())), []);
@@ -204,7 +216,7 @@ test("Save sends the definition without the orchestrator's fields, and edits are
   assert.notEqual(fingerprint(copy), fingerprint(stored), "a moved node");
   copy.steps[0].position.x = 0;
   assert.equal(fingerprint(copy), fingerprint(stored), "moved back");
-  assert.notEqual(fingerprint({ ...stored, description: "Another" }), fingerprint(stored));
+  assert.equal(fingerprint({ ...stored, description: "Another" }), fingerprint(stored), "description changes have an in-place save path");
   assert.notEqual(fingerprint({ ...stored, steps: [...stored.steps, { id: "b", service: "gate" }] }), fingerprint(stored));
 });
 
@@ -214,7 +226,7 @@ test("the canvas head: Save only with unsaved edits, an older version read-only 
   assert.deepEqual(plain(headState({ version: 3, newest: 3, steps: 2 })), { next: 4, note: "", canSave: false, saveTip: "No unsaved edits" });
   assert.deepEqual(plain(headState({ version: 3, newest: 3, steps: 2, dirty: true })), { next: 4, note: "", canSave: true, saveTip: "Stores the workflow as v4" });
   // An older version is read-only until edited; Save then stores the next version, not a new v2.
-  assert.deepEqual(plain(headState({ version: 2, newest: 3, steps: 2 })), { next: 4, note: "Read-only: v2", canSave: false, saveTip: "No unsaved edits" });
+  assert.deepEqual(plain(headState({ version: 2, newest: 3, steps: 2 })), { next: 4, note: "Viewing v2", canSave: false, saveTip: "No unsaved edits" });
   assert.deepEqual(plain(headState({ version: 2, newest: 3, steps: 2, dirty: true })), { next: 4, note: "Edited v2: saves as v4", canSave: true, saveTip: "Stores the workflow as v4" });
   // A new workflow is a draft until its first Save, which stores v1; it needs a step.
   assert.deepEqual(plain(headState({ draft: true })), { next: 1, note: "Not saved yet", canSave: false, saveTip: "Needs a step" });
@@ -411,7 +423,7 @@ test("a member tile's tooltip says what a click does; the panel shows no instruc
   const { memberTip, teamMembers, teamChannels } = logic();
   const [lead, coder, , reviewer] = teamMembers(team());
   const { pairs } = teamChannels({ ...team(), channels: [["lead", "coder"], ["reviewer", "coder"]] });
-  assert.equal(memberTip(coder, null, pairs), "Picks demo/coder@v1 to make it the lead, remove it, or draw a channel to the member picked next");
+  assert.equal(memberTip(coder, null, pairs), "Picks demo/coder@v1 to draw a channel to the member picked next");
   assert.equal(memberTip(coder, coder, pairs), "Ends the pick of coder");
   assert.equal(memberTip(reviewer, lead, pairs), "Adds a channel between lead and reviewer");
   assert.equal(memberTip(lead, coder, pairs), "Removes the channel between coder and lead");
@@ -424,6 +436,17 @@ test("a member tile's tooltip says what a click does; the panel shows no instruc
 test("Make lead and Remove end the pick, so the next click picks a member", () => {
   assert.match(source, /const makeLead = \(m\) => \{ teamPick = null; edit\(/);
   assert.match(source, /const remove = \(m\) => \{ teamPick = null; edit\(/);
+});
+
+test("a pick shows in the team opened on the canvas too, so its next click draws a channel there", () => {
+  assert.match(source, /teamPick = on \? null : \{ step: s\.id, name: m\.name \};\s+renderTeams\(\);/);
+  assert.match(source, /const renderTeams = \(\) => \{ renderInspector\(\); if \(state\.teamOpen\) renderCanvas\(\); \};/);
+});
+
+test("every member tile has a port; a drag from it onto another member adds their channel", () => {
+  assert.match(source, /className: "team-port"/);
+  assert.match(source, /closest\("\.team-member"\)[\s\S]{0,400}toggle\(m\.name, to\)/);
+  assert.match(style, /\.team-port \{/);
 });
 
 test("an arrow to a step beside its source runs from side to side, and under the tiles in between", () => {

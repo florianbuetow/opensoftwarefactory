@@ -10,6 +10,17 @@ import (
 	"testing"
 )
 
+func TestDevPodNoteOnlyRequestsAllowedCommits(t *testing.T) {
+	for _, commands := range [][]string{nil, {"./verify.sh"}, {"git add *"}, {"git commit *"}} {
+		if strings.Contains(devPodNote(commands), "Commit your work") {
+			t.Errorf("requested commits without both permissions: %v", commands)
+		}
+	}
+	if !strings.Contains(devPodNote([]string{"git add *", "git commit *"}), "Commit your work") {
+		t.Error("agents with both permissions lost commit instructions")
+	}
+}
+
 const devPodAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_retries":5,
 	"tools":["devpod/read_file","devpod/push_branch","devpod/report_blocked","factory/send_message"],
 	"commands":["./verify.sh","git add *","git commit *"]}`

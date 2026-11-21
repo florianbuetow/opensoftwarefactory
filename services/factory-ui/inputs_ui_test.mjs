@@ -39,3 +39,12 @@ test("a run is refused while the editor has unsaved edits", async () => {
   assert.equal(calls.length, 0);
   assert.match(context.error, /saved first/);
 });
+
+test("the Text input takes a file from the file dialog or a drop, and only a text file", () => {
+  assert.match(source, /textUpload = h\("button", \{ type: "button", title: "[^"]+" \}, icon\("upload"\), " Upload file"\)/);
+  assert.match(source, /textUpload\.onclick = \(\) => textPicker\.click\(\)/, "the button opens the file dialog");
+  assert.match(source, /text\.addEventListener\("drop", \(ev\) => \{\s*if \(!dragsFile\(ev\)\) return;\s*ev\.preventDefault\(\);/, "a dropped file is taken, dragged text is left alone");
+  assert.match(source, /takeFile = async \(file\) => \{\s*if \(!file\) return;\s*if \(!isText\(file\)\) \{ setStatus\(`Not added: \$\{file\.name\} \(not a text file\)`, "error"\); return; \}/);
+  const css = fs.readFileSync(new URL("web/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.inputs-text\.drop \{ outline: 2px dashed var\(--accent\)/);
+});

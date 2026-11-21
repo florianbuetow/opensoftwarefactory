@@ -53,24 +53,6 @@ func TestRejectionAtAGateWithOnRejectNeedsAComment(t *testing.T) {
 	}
 }
 
-func TestConfigTemplateSeedsTheInteractiveExercise(t *testing.T) {
-	c, err := loadConfig("config.template")
-	if err != nil {
-		t.Fatal(err)
-	}
-	standing, ok := c.find("ex01-team-standing", 0)
-	if !ok || len(standing.Steps) != 2 || standing.Version != 1 {
-		t.Fatalf("standing %+v", standing)
-	}
-	worksheet, summary := standing.Steps[0], standing.Steps[1]
-	if worksheet.Service != pipeline.InteractiveService || worksheet.Agent != "course/standing-coach@v1" || len(worksheet.DependsOn) != 0 {
-		t.Errorf("interactive step %+v", worksheet)
-	}
-	if summary.Service != pipeline.AgentService || summary.Agent != "course/standing-summary@v1" || strings.Join(summary.DependsOn, ",") != "worksheet" {
-		t.Errorf("summary step %+v", summary)
-	}
-}
-
 func TestSaveRefusesAVersionThatReachesItself(t *testing.T) {
 	srv, _, _, path := newTestServer(t)
 	before, _ := os.ReadFile(path)

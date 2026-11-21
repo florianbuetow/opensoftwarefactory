@@ -171,3 +171,14 @@ test("an underscore inside a word is part of a name, never emphasis", () => {
   assert.deepEqual(all(root, "strong").map(text), ["init", "that"]);
   assert.match(text(root), /list_session_files/);
 });
+
+test("the reduced-motion rules are the last rules of the stylesheet, so they win", () => {
+  const css = fs.readFileSync(new URL("web/style.css", import.meta.url), "utf8");
+  const query = "@media (prefers-reduced-motion: reduce)";
+  const at = css.lastIndexOf(query);
+  assert.ok(at > 0);
+  assert.equal(css.indexOf(query), at, "one block only");
+  const block = css.slice(at);
+  for (const selector of [".chip-running .dot", ".ctx-menu", ".dialog", ".panel-reveal", ".caret .icon"]) assert.ok(block.includes(selector), selector);
+  assert.doesNotMatch(block.slice(block.indexOf("}\n}") + 3), /\S/, "nothing follows the block");
+});

@@ -1,5 +1,6 @@
 """Read-only repository browser checks against a real bare Git repository."""
 import importlib.util
+import os
 import subprocess
 import tempfile
 import unittest
@@ -57,6 +58,20 @@ class BrowserTest(unittest.TestCase):
             server.repository_page(str(self.repo), "demo", {"ref": ["missing"]})
         with self.assertRaises(ValueError):
             server.repository_page(str(self.repo), "demo", {"view": ["file"], "path": ["../secret"]})
+
+    def test_external_seed_script_is_optional(self):
+        root = Path(self.work.name)
+        self.assertFalse(server.run_seed(str(root / "missing.sh")))
+        script = root / "seed.sh"
+        marker = root / "seeded"
+        script.write_text(f'#!/bin/sh\nprintf "%s" "$GIT_HOST_SEED" > "{marker}"\n')
+        old = os.environ.pop("GIT_HOST_SEED", None)
+        try:
+            self.assertTrue(server.run_seed(str(script)))
+        finally:
+            if old is not None:
+                os.environ["GIT_HOST_SEED"] = old
+        self.assertEqual(marker.read_text(), str(root / "assets"))
 
 
 if __name__ == "__main__":

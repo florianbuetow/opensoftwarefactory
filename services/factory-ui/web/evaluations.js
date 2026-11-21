@@ -104,7 +104,7 @@
       row.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } };
       return row;
     }));
-    if (!state.sets.length) list.replaceChildren(h("li", { className: "evaluation-summary" }, "No evaluation sets"));
+    if (!state.sets.length) list.replaceChildren(h("li", { className: "evaluation-summary" }, "No evaluation sets yet"));
   }
 
   async function loadAgentOptions() {
@@ -132,7 +132,7 @@
   function renderSet() {
     const set = state.set;
     title.textContent = set?.name || "";
-    if (!set) { detail.replaceChildren(emptyPanel("Select an evaluation set")); return; }
+    if (!set) { detail.replaceChildren(); return; }
     const runs = set.runs || [];
     fill(detail, set.description ? h("p", { className: "evaluation-summary" }, set.description) : null,
       h("p", { className: "evaluation-summary" }, `${runs.length} run${runs.length === 1 ? "" : "s"} · saved ${formatTime(set.updated)}`),

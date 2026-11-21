@@ -34,8 +34,6 @@ spec:
             - policies
             - -files
             - policy.md
-            - -seed
-            - /seed/policies
           env:
             - name: OTEL_SERVICE_NAME
               value: policy-registry

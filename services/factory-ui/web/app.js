@@ -1181,6 +1181,17 @@ function reserveToggles() {
   }
 }
 
+// revealPanel plays the panel reveal on a column its toggle has just shown: it arrives from
+// its own edge of the window. Hiding a column is immediate.
+function revealPanel(panel, fromRight = false) {
+  if (!panel) return;
+  panel.classList.remove("panel-reveal", "from-right");
+  void panel.offsetWidth; // restart the animation
+  panel.classList.add("panel-reveal");
+  if (fromRight) panel.classList.add("from-right");
+  panel.addEventListener("animationend", () => panel.classList.remove("panel-reveal", "from-right"), { once: true });
+}
+
 function setupPanels() {
   const watch = new ResizeObserver(() => reserveToggles());
   for (const p of document.querySelectorAll(".page > .panel, .page > .canvas-area")) watch.observe(p);
@@ -1194,6 +1205,7 @@ function setupPanels() {
         open = !open;
         try { localStorage.setItem(key, open ? "open" : "closed"); } catch { /* storage unavailable */ }
         apply();
+        if (open) revealPanel(grid.querySelector(":scope > .list-panel"));
       });
       const apply = () => { grid.classList.toggle("no-list", !open); b.classList.toggle("on", open); b.setAttribute("aria-pressed", String(open)); };
       apply();
@@ -1207,6 +1219,7 @@ function setupPanels() {
         open = !open;
         try { localStorage.setItem(key, open ? "open" : "closed"); } catch { /* storage unavailable */ }
         apply();
+        if (open) revealPanel(grid.querySelector(`:scope > ${DETAIL_PANELS[tab]}`), true);
       });
       const apply = () => { grid.classList.toggle("no-detail", !open); b.classList.toggle("on", open); b.setAttribute("aria-pressed", String(open)); };
       apply();

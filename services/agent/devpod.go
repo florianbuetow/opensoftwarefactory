@@ -98,9 +98,12 @@ func devPodNote(commands []string) string {
 	b.WriteString("- Use the tools to list, read, search, write and edit files and to run commands. Tool names may carry a prefix such as `devpod__`.\n")
 	b.WriteString("- All paths are relative to the project folder.\n")
 	var allowed []string
+	canAdd, canCommit := false, false
 	for _, c := range commands {
 		if c = strings.TrimSpace(c); c != "" {
 			allowed = append(allowed, "`"+c+"`")
+			canAdd = canAdd || c == "git add *" || c == "*"
+			canCommit = canCommit || c == "git commit *" || c == "*"
 		}
 	}
 	if len(allowed) == 0 {
@@ -108,7 +111,9 @@ func devPodNote(commands []string) string {
 	} else {
 		fmt.Fprintf(&b, "- You can only run these commands (`*` stands for any text): %s. Every other command is refused.\n", strings.Join(allowed, ", "))
 	}
-	b.WriteString("- Commit your work with the command tool: first `git add <files>`, then `git commit -m \"<what you changed>\"`.\n")
+	if canAdd && canCommit {
+		b.WriteString("- Commit your work with the command tool: first `git add <files>`, then `git commit -m \"<what you changed>\"`.\n")
+	}
 	b.WriteString("- Never try to push or to switch branches.\n")
 	b.WriteString("- If you cannot go on, call the tool report_blocked with the reason.")
 	return b.String()

@@ -1,7 +1,7 @@
-"""Demo Git host: serves bare repositories over HTTP with git http-backend.
+"""Git host: serves bare repositories over HTTP with git http-backend.
 
-Standard library only. At start it seeds the course repositories that do not
-exist (seed.sh), then it serves /<name>.git/... for clone, fetch and push.
+Standard library only. At start it optionally runs a seed script mounted outside
+the service image, then it serves /<name>.git/... for clone, fetch and push.
 Push needs no credential: this host is for the course exercises only.
 
 GET /healthz answers "ok"; GET / and /browse/<name>.git provide a read-only
@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlencode
 
 DATA = os.environ.get("GIT_HOST_DATA", "/data")
-SEED_SCRIPT = os.environ.get("GIT_HOST_SEED_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed.sh"))
+SEED_SCRIPT = os.environ.get("GIT_HOST_SEED_SCRIPT", os.path.join(os.environ.get("SEED_DIR", "/seed"), "seed.sh"))
 MAX_BODY = 256 * 1024 * 1024
 REPOSITORY_PATH = re.compile(r"/[A-Za-z0-9][A-Za-z0-9._-]*\.git/[A-Za-z0-9._/-]+")
 BROWSE_PATH = re.compile(r"/browse/([A-Za-z0-9][A-Za-z0-9._-]*)\.git")
@@ -254,8 +254,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
+def run_seed(script=SEED_SCRIPT):
+    """Run an optional externally mounted seed script. Return whether one existed."""
+    if os.path.isfile(script):
+        seed_env = os.environ.copy()
+        seed_env.setdefault("GIT_HOST_SEED", os.path.dirname(script) + "/assets")
+        subprocess.run(["bash", script], check=True, env=seed_env)
+        return True
+    return False
+
+
 def main():
-    subprocess.run(["bash", SEED_SCRIPT], check=True)
+    if not run_seed():
+        sys.stderr.write("git-host starts without seed data; %s is not mounted\n" % SEED_SCRIPT)
     server = ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler)
     server.daemon_threads = True
     sys.stderr.write("git-host serves %s on port %d\n" % (DATA, server.server_address[1]))

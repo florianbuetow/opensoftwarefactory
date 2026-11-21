@@ -104,7 +104,8 @@ type Point struct {
 }
 
 // Definition is one version of a named workflow graph. The orchestrator sets Version,
-// Created, and CreatedBy when it stores the version; a stored version never changes.
+// Created, and CreatedBy when it stores the version. Its graph stays fixed; the version's
+// descriptive text can be edited in place without creating a new version.
 type Definition struct {
 	Name        string `yaml:"name" json:"name"`
 	Version     int    `yaml:"version,omitempty" json:"version"`

@@ -3,31 +3,26 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
-// defaultTemplate is the task template the factory always provides: it
-// inserts each task unchanged.
-const (
-	defaultTemplateID   = "templates/tasks/default.md"
-	defaultTemplateBody = "{{task}}\n"
-)
-
-// seedDefaults stores the objects the UI relies on when they do not exist,
-// retrying while the blobstore starts. It runs in the background so the UI
-// comes up even if the blobstore is late.
-func seedDefaults(ctx context.Context, blobs string, logger *slog.Logger) {
+// seedDefaults stores every regular file below dir at its relative object ID,
+// retrying while the blobstore starts. Missing and empty directories are valid.
+func seedDefaults(ctx context.Context, blobs, dir string, logger *slog.Logger) {
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		err := ensureObject(ctx, blobs, defaultTemplateID, defaultTemplateBody)
+		err := seedDirectory(ctx, blobs, dir)
 		if err == nil {
 			return
 		}
 		if time.Now().After(deadline) {
-			logger.Error("seeding default template failed", "error", err)
+			logger.Error("seeding factory objects failed", "directory", dir, "error", err)
 			return
 		}
 		select {
@@ -36,6 +31,32 @@ func seedDefaults(ctx context.Context, blobs string, logger *slog.Logger) {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// seedDirectory stores every regular file below dir without overwriting an
+// existing object. Object IDs always use slash-separated paths.
+func seedDirectory(ctx context.Context, blobs, dir string) error {
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		id, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return ensureObject(ctx, blobs, filepath.ToSlash(id), string(body))
+	})
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // ensureObject PUTs an object unless it already exists.

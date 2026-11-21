@@ -342,7 +342,7 @@
       state.tools = [];
       const message = timedOut ? "Discovery timed out" : e.message;
       renderTest(message);
-      if (report) setStatus(`Connection failed: ${message}`, "error");
+      if (report) setStatus(`Cannot connect: ${message}`, "error");
     } finally {
       clearTimeout(timeout);
       if (state.discovery === controller) state.discovery = null;
@@ -364,7 +364,7 @@
         await loadTools(service, seq, true);
       } catch (e) {
         if (seq !== state.seq || service !== state.selected) return;
-        setStatus(`Connection failed: ${e.message}`, "error");
+        setStatus(`Cannot connect: ${e.message}`, "error");
       } finally { connection.disabled = false; send.disabled = !state.tools.length || !!state.call || state.session?.service !== state.selected; }
     } }, "Test connection");
     const select = h("select", { id: "mcp-test-tool" },
@@ -378,7 +378,7 @@
     const args = h("textarea", { id: "mcp-test-arguments", className: "code", spellcheck: false, value: values.args });
     args.addEventListener("input", () => { values.args = args.value; });
     const result = h("pre", { className: "file-block code mcp-result" }, values.result);
-    const send = h("button", { type: "button", disabled: !state.tools.length || !!state.call || state.session?.service !== state.selected, title: state.tools.length ? "Invokes the selected tool through the gateway" : "No allowed tools available", onclick: async () => {
+    const send = h("button", { type: "button", disabled: !state.tools.length || !!state.call || state.session?.service !== state.selected, title: state.tools.length ? "Invokes the selected tool through the gateway" : "Needs an allowed tool", onclick: async () => {
       const service = state.selected, seq = state.seq;
       values.args = args.value; values.tool = select.value;
       send.disabled = true;

@@ -1,4 +1,48 @@
 "use strict";
+
+// Workflow descriptions belong to one stored version, but unlike the graph they may change
+// in place. Runs therefore load the exact version on demand instead of keeping definitions as
+// an immutable source for hover text. A run that did not record a version has no safe
+// description to show: using the newest one would describe something other than what ran.
+const RunDescriptions = (() => {
+  const values = new Map(); // "name@vN" -> description
+  const pending = new Map(); // concurrent hover/focus events share one request
+  const revisions = new Map(); // an editor update wins over an older request still in flight
+  const refOf = (run) => {
+    const name = String(run?.workflow || "");
+    const version = Number(run?.workflow_version) || 0;
+    return name && version > 0 ? WorkflowRef.format(name, version) : "";
+  };
+  const current = (run) => values.get(refOf(run)) || "";
+  async function refresh(run) {
+    const ref = refOf(run);
+    if (!ref) return "";
+    if (pending.has(ref)) return pending.get(ref);
+    const { name, version } = WorkflowRef.parse(ref);
+    const revision = revisions.get(ref) || 0;
+    const request = api("GET", `/api/orchestrator/workflows/${encodeURIComponent(name)}/versions/${version}`)
+      .then((definition) => String(definition?.description || ""))
+      .catch(() => "")
+      .then((description) => {
+        if ((revisions.get(ref) || 0) !== revision) return values.get(ref) || "";
+        values.set(ref, description);
+        return description;
+      })
+      .finally(() => pending.delete(ref));
+    pending.set(ref, request);
+    return request;
+  }
+  function update(detail) {
+    const name = String(detail?.name || "");
+    const version = Number(detail?.version) || 0;
+    if (!name || version < 1 || typeof detail?.description !== "string") return false;
+    const ref = WorkflowRef.format(name, version);
+    revisions.set(ref, (revisions.get(ref) || 0) + 1);
+    values.set(ref, detail.description);
+    return true;
+  }
+  return { current, refresh, update, refOf };
+})();
 // Runs page: every run from runs/<trace>/run.json, newest first, filtered by workflow and
 // status, with a detail panel for the selected run. Hash: #runs/<trace>?workflow=&status=.
 
@@ -306,11 +350,26 @@ const RunsLogic = (() => {
       const st = runIndex.statuses.get(r.trace_id);
       const failed = stateOf(r.trace_id) === "failed";
       const failure = failed ? rootError(st?.error || "Run failed", r.trace_id) : "";
+      const workflowName = showWorkflow ? h("span", {
+        className: "run-workflow-name",
+        title: RunDescriptions.current(r) || undefined,
+        "aria-description": RunDescriptions.current(r) || undefined,
+      }, runIndex.name(r.trace_id)) : null;
       const tr = h("tr", { "aria-selected": String(r.trace_id === state.selected), className: failed ? "run-failed" : "", title: failure || undefined },
         h("td", {}, runChip(r.trace_id, st)),
-        showWorkflow ? h("td", { className: "name-cell", dataset: { full: runIndex.name(r.trace_id) } }, runIndex.name(r.trace_id)) : null,
+        showWorkflow ? h("td", { className: "name-cell", dataset: { full: runIndex.name(r.trace_id) } }, workflowName) : null,
         h("td", { className: "fit" }, timeEl(r.started)),
         h("td", { className: "run-failure opt", dataset: { full: failure } }, failure));
+      const describe = async () => {
+        if (!RunDescriptions.refOf(r)) return;
+        const description = await RunDescriptions.refresh(r);
+        const target = workflowName || tr;
+        target.title = workflowName ? description : [description, failure].filter(Boolean).join("\n\n");
+        if (description) target.setAttribute("aria-description", description);
+        else target.removeAttribute("aria-description");
+      };
+      (workflowName || tr).addEventListener("mouseenter", describe);
+      tr.addEventListener("focus", describe);
       // Worked out when the menu opens, since the definitions may arrive after the table is drawn.
       // A team step that runs in passes has one team per pass, named by its pass.
       const teamItems = () => TeamsLogic.teamSteps(state.definitions || [], WorkflowRef.format(r.workflow || st?.workflow || "", runVersion(r)))
@@ -331,12 +390,19 @@ const RunsLogic = (() => {
     }), { name: showWorkflow ? 1 : -1, optional: [showWorkflow ? 3 : 2] })); // Failure gives way as a column, header included
   }
 
+  // The Workflows editor dispatches this after changing one stored version's description in
+  // place. Update visible Runs immediately; a later hover still refetches to catch edits from
+  // another browser tab.
+  document.addEventListener("workflowdescriptionchange", (ev) => {
+    if (RunDescriptions.update(ev.detail)) renderTable();
+  });
+
   const rerunning = new Set();
   // runVersion is the workflow version a run used: from its metadata, else from run.json; 0 when unknown.
   const runVersion = (record, metadata) => Number(metadata?.workflow?.version) || Number(record?.workflow_version) || 0;
   async function rerun(run) {
     if (rerunning.has(run.trace_id)) return;
-    if (!run.workflow) { setStatus("Cannot re-run: the workflow is unknown.", "error"); return; }
+    if (!run.workflow) { setStatus("Not started: the run names no workflow", "error"); return; }
     rerunning.add(run.trace_id);
     try {
       const input = run.input_artifact || `runs/${run.trace_id}/input`;
@@ -597,12 +663,12 @@ const RunsLogic = (() => {
     const heading = event.kind === "tool_call" ? `Tool call · ${event.name || "unknown"}`
       : event.kind === "model_call" ? `Model call${event.model ? ` · ${event.model}` : ""}`
         : event.kind === "tool_discovery" ? `Tool discovery${event.service ? ` · ${event.service}` : ""}` : titleCase(event.name || event.kind || "Event");
-    const logs = h("div", { className: "evidence-logs" }, h("p", { className: "evidence-note" }, "Loading correlated logs…"));
-    const spans = h("div", { className: "evidence-spans" }, h("p", { className: "evidence-note" }, "Loading distributed trace…"));
+    const logs = h("div", { className: "evidence-logs" }, h("p", { className: "evidence-note" }, "Loading logs…"));
+    const spans = h("div", { className: "evidence-spans" }, h("p", { className: "evidence-note" }, "Loading trace…"));
     fill(panel,
       h("div", { className: "file-head" }, h("h3", { className: "section-title" }, heading), links.length ? h("span", { className: "evidence-links" }, ...links) : null),
-      interrupted ? h("p", { className: "evidence-warning" }, "This operation started but no completion checkpoint was stored.") : null,
-      !inputs.length ? h("p", { className: "evidence-warning" }, "This execution record has no input artifact reference.") : null,
+      interrupted ? h("p", { className: "evidence-warning" }, "This event started, but its end was never recorded.") : null,
+      !inputs.length ? h("p", { className: "evidence-warning" }, "This record names no input artifact.") : null,
       event.error ? h("p", { className: "error-line" }, event.error) : null,
       metricEvidence(record, event),
       promptEvidence(record, event, context.trace),
@@ -621,34 +687,34 @@ const RunsLogic = (() => {
         const started = new Date(record.started || 0).getTime();
         const expired = context.retentionDays && started && Date.now() - started > context.retentionDays * 86400000;
         logs.replaceChildren(h("p", { className: "evidence-warning" }, expired
-          ? `No matching logs remain. Collected logs are configured for ${context.retentionDays} days.`
-          : "No matching logs were collected for this operation."));
+          ? `No matching logs remain. Logs are kept for ${context.retentionDays} days.`
+          : "No matching logs were collected for this event."));
         return;
       }
-      fill(logs, result.partial || result.truncated ? h("p", { className: "evidence-warning" }, "Only part of the matching log evidence was returned.") : null,
-        h("h4", {}, "Correlated logs"), h("ul", { className: "evidence-log-list" }, ...result.logs.map((entry) =>
+      fill(logs, result.partial || result.truncated ? h("p", { className: "evidence-warning" }, "Only part of the matching logs was returned.") : null,
+        h("h4", {}, "Logs"), h("ul", { className: "evidence-log-list" }, ...result.logs.map((entry) =>
         h("li", {}, h("span", { className: "evidence-log-source" }, entry.container || "service"),
           h("span", { className: `evidence-log-level ${String(entry.level || "").toLowerCase()}` }, entry.level || ""),
           h("span", { className: "evidence-log-message", title: entry.error || entry.message }, entry.message || entry.error || "Log event")))));
-    })().catch((error) => logs.replaceChildren(h("p", { className: "evidence-warning" }, `Correlated logs unavailable: ${error.message}`)));
+    })().catch((error) => logs.replaceChildren(h("p", { className: "evidence-warning" }, `Cannot load the logs: ${error.message}`)));
     const spansPromise = (async () => {
       if (!traceID) {
-        spans.replaceChildren(h("p", { className: "evidence-warning" }, "This legacy execution record has no distributed trace ID."));
+        spans.replaceChildren(h("p", { className: "evidence-warning" }, "This older record has no trace ID."));
         return;
       }
       const result = await api("GET", `/api/observability/spans?trace_id=${encodeURIComponent(traceID)}`);
       if (!result.spans?.length) {
-        spans.replaceChildren(h("p", { className: "evidence-warning" }, "No distributed spans were found for this execution."));
+        spans.replaceChildren(h("p", { className: "evidence-warning" }, "No spans were found for this trace."));
         return;
       }
       const byID = new Map(result.spans.map((span) => [span.span_id, span]));
       const depth = (span) => { let count = 0, parent = byID.get(span.parent_span_id); while (parent && count < 8) { count++; parent = byID.get(parent.parent_span_id); } return count; };
-      fill(spans, result.partial || result.truncated ? h("p", { className: "evidence-warning" }, "Only part of the distributed trace was returned.") : null,
-        h("h4", {}, "Distributed trace"), h("ul", { className: "evidence-span-list" }, ...result.spans.map((span) =>
+      fill(spans, result.partial || result.truncated ? h("p", { className: "evidence-warning" }, "Only part of the trace was returned.") : null,
+        h("h4", {}, "Trace"), h("ul", { className: "evidence-span-list" }, ...result.spans.map((span) =>
           h("li", { className: span.span_id === event.span_id ? "selected" : "", style: `padding-left:${depth(span) * 16}px` },
             h("span", { className: "evidence-span-service" }, span.service || "service"), h("span", { className: "evidence-span-operation" }, span.operation || span.span_id),
             span.duration != null ? h("span", { className: "timeline-duration" }, formatDurationMs(Number(span.duration) / 1000)) : null))));
-    })().catch((error) => spans.replaceChildren(h("p", { className: "evidence-warning" }, `Distributed trace unavailable: ${error.message}`)));
+    })().catch((error) => spans.replaceChildren(h("p", { className: "evidence-warning" }, `Cannot load the trace: ${error.message}`)));
     await Promise.allSettled([logsPromise, spansPromise]);
   }
 

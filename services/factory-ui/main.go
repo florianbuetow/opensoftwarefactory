@@ -84,7 +84,7 @@ func run() error {
 	server := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go seedDefaults(ctx, env("BLOBSTORE_URL", "http://blobstore:8080"), logger)
+	go seedDefaults(ctx, env("BLOBSTORE_URL", "http://blobstore:8080"), env("FACTORY_SEED_DIR", "/seed"), logger)
 	result := make(chan error, 1)
 	go func() {
 		logger.Info("factory-ui listening", "address", server.Addr)

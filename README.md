@@ -71,6 +71,14 @@ justfile              The commands below and the list of services
 package.json          Node settings for scripts/ (ES modules, Node 24+)
 ```
 
+## Local seed data
+
+Runtime seed data is local-only under `scratch/seeds/`, which Git ignores. Never commit agent or policy definitions, workflow bundles, demo repositories, connector records, or default task templates as seed data in service directories or image layers.
+
+The optional subdirectories are `registry/agents`, `registry/policies`, `orchestrator`, `git-host`, `connectors`, and `factory-ui`. Services contain generic loaders and start without seed data. Existing stored entries take precedence over seeds.
+
+`just sync-seeds` snapshots this directory into the local KIND node; services receive read-only `/seed` mounts. `just deploy` and `just update` sync it before restarting services. This works with an existing cluster and does not require cluster recreation. A clean checkout has no sample content until local seeds are supplied or entries are created through the UI.
+
 ## Prerequisites
 
 Colima, the Docker CLI, KIND, kubectl, Node.js 24+, Go 1.26+, `uv`, and `just`.
@@ -96,8 +104,8 @@ default Docker socket automatically.
 
 ### 2. Configure a local model
 
-Start LM Studio and load a model. The seeded agents expect
-`qwen3.5-9b-mlx`; if you choose another model, update the model mapping in
+Start LM Studio and load a model. The sample gateway configuration expects
+`qwen3.5-9b-mlx`. If you choose another model, update the model mapping in
 `services/llm-gateway/config/config.yaml` after initialization and select it
 for the relevant agents in the Factory UI.
 
@@ -137,6 +145,12 @@ reset-observe` deletes OpenObserve data. Do not use either if you need to keep
 local factory data.
 
 ## Usage
+
+### Local seed data
+
+Keep any local agent, policy, workflow, and demo repository seed files in
+`scratch/seeds/`. This directory is ignored by Git. The standard build,
+deployment, and test commands run without these files.
 
 ### The UI
 

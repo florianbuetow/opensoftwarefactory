@@ -33,8 +33,6 @@ spec:
             - agents
             - -files
             - systemprompt.md,agent.json
-            - -seed
-            - /seed/agents
           env:
             - name: OTEL_SERVICE_NAME
               value: agent-registry

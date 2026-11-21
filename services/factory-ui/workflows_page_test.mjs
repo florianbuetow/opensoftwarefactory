@@ -35,6 +35,7 @@ class FakeNode {
   querySelector() { return null; }
   querySelectorAll() { return []; }
   closest() { return null; }
+  contains(node) { return node === this || this.children.some((child) => child instanceof FakeNode && child.contains(node)); }
   focus() {} select() {} setPointerCapture() {}
   getBoundingClientRect() { return { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 }; }
   get parentElement() { return this.parentNode || (this.auto ||= new FakeNode("div")); }
@@ -86,6 +87,13 @@ function orchestrator() {
       if (!def) throw fail(404, "not found");
       return withList(name, def);
     }
+    if (method === "PATCH" && kind === "versions" && rest.endsWith("/description")) {
+      if (serverDescriptionFailure) throw fail(503, "description store unavailable");
+      const def = store[name]?.find((d) => d.version === Number(n));
+      if (!def) throw fail(404, "not found");
+      def.description = body.description;
+      return withList(name, def);
+    }
     if (method === "POST" && kind === "versions") {
       if (!body.steps?.length) throw fail(422, `workflow "${name}" has no steps`);
       const list = (store[name] ||= []);
@@ -101,7 +109,8 @@ function orchestrator() {
     if (method === "DELETE" && name && !kind) { delete store[name]; return {}; }
     throw fail(404, `${method} ${path}`);
   }
-  return { api, calls, store, crew };
+  let serverDescriptionFailure = false;
+  return { api, calls, store, crew, failDescriptions(value) { serverDescriptionFailure = value; } };
 }
 
 function page() {
@@ -126,7 +135,8 @@ function page() {
     console, setTimeout, clearTimeout, structuredClone, h, $: byId,
     document: {
       querySelector: (selector) => { if (!selectors.has(selector)) selectors.set(selector, new FakeNode("div")); return selectors.get(selector); },
-      createElementNS: (_ns, name) => new FakeNode(name), addEventListener() {}, activeElement: null,
+      createElementNS: (_ns, name) => new FakeNode(name), addEventListener() {}, dispatchEvent() {}, activeElement: null,
+      createDocumentFragment: () => new FakeNode("fragment"),
     },
     window: { addEventListener(type, fn) { (windowListeners[type] ||= []).push(fn); } },
     location: { hash: "#workflows" },
@@ -134,6 +144,7 @@ function page() {
     localStorage: { getItem: (key) => (storage.has(key) ? storage.get(key) : null), setItem: (key, value) => storage.set(key, String(value)), removeItem: (key) => storage.delete(key) },
     ResizeObserver: class { observe() {} },
     requestAnimationFrame: (fn) => fn(),
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options?.detail; } },
     ICONS: new Proxy({}, { get: () => "" }),
     tabs: {}, pageToggles: {}, activeTab: "workflows",
     menu: { hidden: true }, closeMenu() {}, openMenu: (_ev, items) => menus.push(items),
@@ -153,7 +164,9 @@ function page() {
   };
   // index.html loads connectors.js before workflows.js; the page needs its logic only.
   const connectors = read("connectors.js");
-  vm.runInNewContext(`${read("workflowref.js")}\n${connectors.slice(0, connectors.indexOf("// ---- Connectors page ----"))}\n${read("workflows.js")}`, context);
+  const app = read("app.js");
+  const markdown = app.slice(app.indexOf("function markdownInline("), app.indexOf("function renderMarkdown("));
+  vm.runInNewContext(`${read("workflowref.js")}\n${markdown}\n${connectors.slice(0, connectors.indexOf("// ---- Connectors page ----"))}\n${read("workflows.js")}`, context);
   const head = selectors.get("#tab-workflows .canvas-head");
   const ui = {
     context, server, notices, questions, inputs, answers, byId,
@@ -175,6 +188,11 @@ function page() {
     },
     async run(label, node) { const item = await ui.menu(label, node); assert.ok(!item[4], `${label} is enabled`); await item[1](); await settle(); },
     posts: () => server.calls.filter((c) => c.method !== "GET"),
+    unloadPrevented() {
+      let prevented = false;
+      for (const fn of windowListeners.beforeunload || []) fn({ preventDefault() { prevented = true; } });
+      return prevented;
+    },
     menus,
     // release ends a drag at a point of the graph (in the graph's own coordinates).
     async release(x, y) {
@@ -186,6 +204,162 @@ function page() {
   };
   return ui;
 }
+
+test("an older version's description saves in place without dirtying the graph", async () => {
+  const ui = page();
+  ui.server.store.demo[0].description = "Original first version";
+  ui.server.store.demo[2].description = "Newest version";
+  const before = plain(ui.server.store.demo);
+  await ui.open("/demo?version=1");
+  const box = ui.byId("wf-description");
+  assert.match(box.textContent, /Original first version/);
+  assert.equal(box.textContent, "Original first version");
+  assert.equal(find(box, (n) => n.tag === "button" || /^h[1-6]$/.test(n.tag)), undefined, "read view is text only");
+  await fire(find(box, (n) => n.className === "wf-description-text"), "dblclick");
+  const area = find(box, (n) => n.tag === "textarea");
+  assert.equal(area.rows, 1);
+  assert.equal(area.value, "Original first version", "editable value excludes the Description prefix");
+  area.value = "Revised first version\nWith another line";
+  await fire(area, "input");
+  assert.equal(area.value, "Revised first version With another line", "line breaks become spaces");
+  assert.equal(ui.save().disabled, true);
+  await fire(find(box, (n) => n.tag === "textarea"), "keydown", { key: "Enter" });
+  assert.equal(ui.posts().length, 1);
+  assert.equal(ui.posts()[0].method, "PATCH");
+  assert.equal(ui.posts()[0].path, "/api/orchestrator/workflows/demo/versions/1/description");
+  assert.equal(ui.server.store.demo.length, 3);
+  assert.deepEqual(ui.server.store.demo[0], { ...before[0], description: area.value });
+  assert.deepEqual(ui.server.store.demo.slice(1), before.slice(1));
+  assert.equal(ui.shownVersion(), "v1");
+  assert.equal(ui.save().disabled, true, "description does not enable a new-version save");
+  assert.match(box.textContent, /Revised first version/);
+});
+
+test("saving a description preserves unsaved graph edits", async () => {
+  const ui = page();
+  await ui.open("/demo");
+  await ui.run("Add agent");
+  const box = ui.byId("wf-description");
+  await fire(find(box, (n) => n.className === "wf-description-text"), "dblclick");
+  const area = find(box, (n) => n.tag === "textarea");
+  area.value = "Description only";
+  await fire(area, "input");
+  await fire(find(box, (n) => n.tag === "textarea"), "keydown", { key: "Enter" });
+  assert.deepEqual(ui.tiles(), ["plan", "build", "step-1"]);
+  assert.equal(ui.save().disabled, false, "graph edit still needs its own save");
+  assert.equal(ui.server.store.demo.length, 3);
+  assert.equal(ui.server.store.demo[2].steps.length, 2, "description save does not persist graph edits");
+  await ui.save().onclick();
+  await settle();
+  assert.equal(ui.server.store.demo[3].description, "Description only");
+  assert.equal(ui.server.store.demo[3].steps.length, 3);
+});
+
+test("description failures retain the edit for retry, and clearing needs no new version", async () => {
+  const ui = page();
+  ui.server.store.demo[2].description = "Clear me";
+  await ui.open("/demo");
+  const box = ui.byId("wf-description");
+  await fire(find(box, (n) => n.className === "wf-description-text"), "dblclick");
+  const area = find(box, (n) => n.tag === "textarea");
+  area.value = "";
+  await fire(area, "input");
+  ui.server.failDescriptions(true);
+  await fire(find(box, (n) => n.tag === "textarea"), "keydown", { key: "Enter" });
+  assert.match(box.textContent, /Not saved: description store unavailable/);
+  assert.equal(find(box, (n) => n.tag === "textarea").value, "");
+  assert.equal(ui.server.store.demo[2].description, "Clear me");
+  ui.server.failDescriptions(false);
+  await fire(find(box, (n) => n.tag === "textarea"), "keydown", { key: "Enter" });
+  assert.equal(ui.server.store.demo[2].description, "");
+  assert.equal(ui.server.store.demo.length, 3);
+  assert.match(box.textContent, /No description/);
+});
+
+test("the description footer saves on blur and Escape cancels without saving", async () => {
+  const ui = page();
+  await ui.open("/demo");
+  const box = ui.byId("wf-description");
+  await fire(find(box, (n) => n.className === "wf-description-text"), "dblclick");
+  let area = find(box, (n) => n.tag === "textarea");
+  area.value = "Single paragraph";
+  await fire(area, "input");
+  await fire(area.parentNode, "focusout", { relatedTarget: null });
+  assert.equal(ui.server.store.demo[2].description, "Single paragraph");
+  assert.equal(ui.server.store.demo.length, 3);
+  await fire(find(box, (n) => n.className === "wf-description-text"), "dblclick");
+  area = find(box, (n) => n.tag === "textarea");
+  area.value = "Discard this edit";
+  await fire(area, "input");
+  await fire(area, "keydown", { key: "Escape" });
+  await fire(area.parentNode, "focusout", { relatedTarget: null });
+  assert.equal(ui.posts().length, 1);
+  assert.equal(box.textContent, "Single paragraph");
+});
+
+test("descriptions always render Markdown, and the edit-only TXT/MD toggle preserves unsaved text", async () => {
+  const ui = page();
+  ui.context.localStorage.setItem("factory.text-view-mode", "text");
+  ui.server.store.demo[2].description = "**Clear** [guide](https://example.test/guide)";
+  await ui.open("/demo");
+  const box = ui.byId("wf-description");
+  assert.equal(find(box, (n) => n.tag === "strong").textContent, "Clear");
+  const link = find(box, (n) => n.tag === "a");
+  assert.equal(link.href, "https://example.test/guide");
+  assert.equal(find(box, (n) => n.className === "text-format-toggle"), undefined);
+  const text = find(box, (n) => n.className === "wf-description-text");
+  link.closest = (selector) => selector === "a" ? link : null;
+  await fire(text, "keydown", { key: "Enter", target: link });
+  await fire(text, "dblclick", { target: link });
+  assert.equal(find(box, (n) => n.tag === "textarea"), undefined, "links keep normal navigation behavior");
+  await fire(text, "dblclick");
+  const area = find(box, (n) => n.tag === "textarea");
+  const editor = find(box, (n) => n.className === "wf-description-editor");
+  const toggle = find(box, (n) => n.className === "text-format-toggle");
+  const preview = find(box, (n) => n.className === "wf-description-preview");
+  assert.equal(area.hidden, false);
+  assert.equal(toggle.textContent, "MD");
+  area.value = "**Changed** [guide](https://example.test/guide)";
+  await fire(area, "input");
+  await fire(editor, "focusout", { relatedTarget: toggle });
+  await fire(toggle, "click");
+  assert.equal(area.hidden, true);
+  assert.equal(preview.hidden, false);
+  assert.equal(find(preview, (n) => n.tag === "strong").textContent, "Changed");
+  assert.equal(toggle.textContent, "TXT");
+  assert.deepEqual(ui.posts(), [], "preview toggles never save or discard the draft");
+  await fire(toggle, "click");
+  assert.equal(area.hidden, false);
+  assert.equal(area.value, "**Changed** [guide](https://example.test/guide)");
+  await fire(editor, "focusout", { relatedTarget: null });
+  assert.equal(ui.posts().length, 1);
+  assert.equal(ui.posts()[0].method, "PATCH");
+  assert.equal(ui.server.store.demo.length, 3);
+  assert.equal(find(box, (n) => n.tag === "strong").textContent, "Changed");
+  assert.equal(find(box, (n) => n.className === "text-format-toggle"), undefined);
+});
+
+test("description edits survive page visits and prevent unload and workflow-wide mutations", async () => {
+  const ui = page();
+  await ui.open("/demo");
+  const box = ui.byId("wf-description");
+  await fire(find(box, (n) => n.className === "wf-description-text"), "dblclick");
+  const area = find(box, (n) => n.tag === "textarea");
+  area.value = "Unfinished description";
+  await fire(area, "input");
+  assert.equal(ui.unloadPrevented(), true);
+  ui.context.tabs.workflows.hide();
+  await ui.open("/demo");
+  assert.equal(find(box, (n) => n.tag === "textarea").value, "Unfinished description");
+  for (const action of ["Rename workflow", "Duplicate workflow", "Delete workflow"]) await ui.run(action);
+  assert.deepEqual(ui.posts(), [], "editing a description blocks conflicting workflow mutations");
+  ui.answers.confirm = false;
+  await ui.open("/demo?version=1");
+  assert.equal(ui.shownVersion(), "v3 (newest)");
+  assert.equal(find(box, (n) => n.tag === "textarea").value, "Unfinished description");
+  await fire(find(box, (n) => n.tag === "textarea"), "keydown", { key: "Escape" });
+  assert.equal(ui.unloadPrevented(), false);
+});
 
 test("typed canvas additions have no dependencies or automatically drawn input arrows", async () => {
   const ui = page();
@@ -284,7 +458,7 @@ test("an older version is read-only until edited and is then saved as the next v
   assert.ok(ui.server.calls.some((c) => c.method === "GET" && c.path === "/api/orchestrator/workflows/demo/versions/2"));
   assert.equal(ui.shownVersion(), "v2");
   assert.equal(ui.note().hidden, false);
-  assert.equal(ui.note().textContent, "Read-only: v2");
+  assert.equal(ui.note().textContent, "Viewing v2");
   assert.equal(ui.save().disabled, true);
   assert.equal(ui.context.location.hash, "#workflows/demo/plan?version=2", "a reload returns to this version");
   // A run from here uses v2.
@@ -307,7 +481,7 @@ test("a reload returns to the version in the hash; one that is gone gives way to
   await ui.open("/demo/plan?version=1");
   assert.equal(ui.shownVersion(), "v1");
   assert.deepEqual(ui.tiles(), ["plan"]);
-  assert.equal(ui.note().textContent, "Read-only: v1");
+  assert.equal(ui.note().textContent, "Viewing v1");
   const other = page();
   await other.open("/demo?version=9");
   assert.equal(other.shownVersion(), "v3 (newest)");
@@ -477,10 +651,41 @@ test("the node panel of a workflow step has a Workflow and a Version select", as
   assert.equal(ui.posts()[0].body.steps[1].workflow, "inner@v2");
 });
 
+test("clicking or dragging between team workflows is refused without dirtying the graph", async () => {
+  const ui = page();
+  ui.server.crew.steps[0].workflows = ["inner@v1", "demo@v3"];
+  ui.server.crew.steps[0].channels = [["coder", "inner"], ["coder", "demo"]];
+  ui.server.store.crew = [ui.server.crew];
+  await ui.open("/crew/team");
+  const member = (name) => find(ui.byId("inspector"), (n) => n.dataset.member === name);
+  await fire(member("inner"), "click");
+  assert.match(member("demo").title, /Two workflows cannot/);
+  await fire(member("demo"), "click");
+  assert.match(ui.notices.at(-1).text, /Two workflows cannot/);
+  assert.equal(ui.save().disabled, true);
+  const target = member("demo");
+  target.closest = () => target;
+  ui.context.document.elementFromPoint = () => target;
+  const port = find(member("inner"), (n) => n.className === "team-port");
+  await fire(port, "pointerdown", { clientX: 10, clientY: 10, pointerId: 1 });
+  await fire(port, "pointerup", { clientX: 20, clientY: 20, pointerId: 1 });
+  assert.match(ui.notices.at(-1).text, /Two workflows cannot/);
+  assert.equal(ui.save().disabled, true);
+  assert.deepEqual(ui.posts(), []);
+  // An agent/workflow channel is still editable.
+  await fire(member("coder"), "click");
+  await fire(member("demo"), "click");
+  assert.equal(ui.save().disabled, false);
+  await ui.save().onclick();
+  await settle();
+  assert.deepEqual(ui.posts()[0].body.steps[0].channels, [["coder", "inner"]]);
+});
+
 test("a team's workflow member is pinned, named by its workflow, and can move to the newest version", async () => {
   const ui = page();
   ui.server.store.crew = [ui.server.crew];
   await ui.open("/crew/team");
+  assert.equal(find(ui.byId("inspector"), (n) => n.tag === "button" && ["Make lead", "Remove"].includes(n.textContent)), undefined, "member actions stay in the context menu only");
   const member = () => find(ui.byId("inspector"), (n) => n.dataset.member === "inner");
   assert.equal(member().textContent, "innerWorkflow v1", "the name without the version, then the pinned version");
   assert.equal(find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "team").attrs["aria-label"], "Step team: demo/coder@v1 · 2 members");

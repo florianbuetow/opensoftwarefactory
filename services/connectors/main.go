@@ -89,14 +89,18 @@ func run() error {
 	s.registry = strings.TrimRight(env("AGENT_REGISTRY_URL", "http://agent-registry:8080"), "/")
 	s.mcpGateway = strings.TrimRight(env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"), "/")
 	s.githubAPI = strings.TrimRight(env("GITHUB_API_URL", "https://api.github.com"), "/")
+	seedRepositories, err := readRepositorySeeds(env("CONNECTOR_SEED_FILE", "/seed/repositories.json"))
+	if err != nil {
+		return fmt.Errorf("reading repository seeds: %w", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go s.loadUntilDone(ctx)
 	go s.registerUntilDone(ctx)
 	go s.sweepLoop(ctx)
-	if host := os.Getenv("DEMO_GIT_HOST"); host != "" {
-		go s.seedUntilDone(ctx, host)
+	if len(seedRepositories) > 0 {
+		go s.seedUntilDone(ctx, seedRepositories)
 	}
 
 	server := &http.Server{Addr: ":8080", Handler: otelhttp.NewHandler(s.routes(), "connectors"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}

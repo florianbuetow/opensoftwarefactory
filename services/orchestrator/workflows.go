@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -100,6 +101,60 @@ func (s *server) getWorkflowVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c.view(def))
 }
 
+func descriptionHasLineBreaks(description string) bool {
+	return strings.ContainsAny(description, "\r\n\v\f\u0085\u2028\u2029")
+}
+
+// patchWorkflowDescription updates only the description of one stored workflow version.
+// Descriptions are version-specific, but editing one does not create a new workflow version.
+func (s *server) patchWorkflowDescription(w http.ResponseWriter, r *http.Request) {
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil || version < 1 {
+		s.fail(w, http.StatusNotFound, errors.New("unknown workflow version"))
+		return
+	}
+	var body struct {
+		Description *string `json:"description"`
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	d.DisallowUnknownFields()
+	if err = d.Decode(&body); err != nil {
+		s.fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if err = d.Decode(&struct{}{}); err != io.EOF {
+		s.fail(w, http.StatusBadRequest, errors.New("request body must contain one JSON object"))
+		return
+	}
+	if body.Description == nil {
+		s.fail(w, http.StatusBadRequest, errors.New("description is required"))
+		return
+	}
+	if descriptionHasLineBreaks(*body.Description) {
+		s.fail(w, http.StatusBadRequest, errors.New("description must not contain line breaks"))
+		return
+	}
+
+	var stored workflowView
+	err = s.change(func(c *Config) error {
+		for i := range c.Workflows {
+			def := &c.Workflows[i]
+			if def.Name == r.PathValue("name") && def.Version == version {
+				def.Description = *body.Description
+				stored = c.view(*def)
+				return nil
+			}
+		}
+		return refuse(http.StatusNotFound, "unknown workflow version")
+	})
+	if err != nil {
+		s.failChange(w, err)
+		return
+	}
+	s.logger.Info("workflow description updated", "workflow", stored.Name, "version", stored.Version)
+	writeJSON(w, http.StatusOK, stored)
+}
+
 // postWorkflowVersion stores the body as the next version of the workflow in the path. The
 // orchestrator sets the name, version, time, and creator; the body's values are ignored.
 func (s *server) postWorkflowVersion(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +166,10 @@ func (s *server) postWorkflowVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	def := body.Definition
+	if descriptionHasLineBreaks(def.Description) {
+		s.fail(w, http.StatusBadRequest, errors.New("description must not contain line breaks"))
+		return
+	}
 	def.Name = r.PathValue("name")
 	def.Created = time.Now().UTC().Format(time.RFC3339)
 	def.CreatedBy = strings.TrimSpace(r.Header.Get("X-Creator"))

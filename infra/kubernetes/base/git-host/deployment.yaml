@@ -62,7 +62,6 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            # The demo repositories. They are seeded again when the pod restarts.
             - name: data
               mountPath: /data
             - name: tmp

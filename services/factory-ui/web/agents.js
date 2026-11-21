@@ -220,8 +220,8 @@ function agentFields(area, areas = {}) {
           check, h("span", { className: "agent-tool-picker-name" }, tool.ref));
       }));
       status.textContent = toolErrors.length ? `Cannot list tools from ${toolErrors.join(", ")}`
-        : catalog === null ? "Loading tools…" : !options.length ? "No tools are available from configured MCP services."
-          : !visible.length ? "No matching tools." : "";
+        : catalog === null ? "Loading tools…" : !options.length ? "No tools from the MCP services"
+          : !visible.length ? "No matching tools" : "";
       reload.disabled = catalog === null;
     };
     search.addEventListener("input", () => renderPicker());
@@ -260,7 +260,7 @@ function agentFields(area, areas = {}) {
         return h("label", { className: "agent-tool-picker-item", title: missing ? "This referenced policy no longer exists" : id },
           check, h("span", { className: "agent-tool-picker-name" }, missing ? `${id} (missing)` : id));
       }));
-      status.textContent = options.length ? "" : "No policies are available.";
+      status.textContent = options.length ? "" : "No policies yet";
       apply.disabled = !catalog.length && !selected.size;
     };
     apply.onclick = () => {

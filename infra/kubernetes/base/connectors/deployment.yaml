@@ -40,9 +40,6 @@ spec:
               value: opensoftwarefactory-devpods
             - name: DEVPOD_IMAGE
               value: opensoftwarefactory-devpod:local
-            # The demo Git host; its repositories are added as entries at start when missing.
-            - name: DEMO_GIT_HOST
-              value: http://git-host:8080
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
           ports:

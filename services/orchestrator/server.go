@@ -131,6 +131,7 @@ func (s *server) routes() http.Handler {
 	})
 	mux.HandleFunc("GET /api/workflows", s.getWorkflows)
 	mux.HandleFunc("GET /api/workflows/{name}/versions/{version}", s.getWorkflowVersion)
+	mux.HandleFunc("PATCH /api/workflows/{name}/versions/{version}/description", s.patchWorkflowDescription)
 	mux.HandleFunc("POST /api/workflows/{name}/versions", s.postWorkflowVersion)
 	mux.HandleFunc("POST /api/workflows/{name}/rename", s.renameWorkflow)
 	mux.HandleFunc("DELETE /api/workflows/{name}", s.deleteWorkflow)

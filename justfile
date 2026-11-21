@@ -84,7 +84,6 @@ reset:
     trap 'printf "\033[0;31m✗ reset failed\033[0m\n" >&2' ERR
     printf "\033[0;34m=== Resetting factory data ===\033[0m\n"
     printf "\033[0;33mThis deletes every workflow, stored artifact, and run history on this host.\033[0m\n"
-    # The registries restart too, so they seed their agents and policies again.
     just _reset-data "temporal blobstore orchestrator agent-registry policy-registry" \
         "services/orchestrator/config/config.yaml services/blobstore/data/objects services/blobstore/data/meta" \
         "/var/lib/opensoftwarefactory/temporal"
@@ -183,7 +182,6 @@ help:
     @printf "  %-38s %s\n" "just deploy" "Deploy existing images to the running cluster"
     @printf "  %-38s %s\n" "just update" "Build images and deploy them"
     @printf "  %-38s %s\n" "just update-ui" "Build and deploy only the factory UI"
-    @printf "  %-38s %s\n" "just update-git-host" "Build the Git browser and preserve repository refs"
     @printf "  %-38s %s\n" "just status" "Show project pods and services"
     @printf "  %-38s %s\n" "just info" "Show each service's URLs and whether it is up"
     @echo ""
@@ -344,24 +342,6 @@ update-ui:
     kubectl --context {{context}} --namespace {{namespace}} apply -f infra/kubernetes/base/git-host/service.yaml
     kubectl --context {{context}} --namespace {{namespace}} rollout restart deployment/factory-ui
     kubectl --context {{context}} --namespace {{namespace}} rollout status deployment/factory-ui --timeout=300s
-
-# The demo Git host has pod-local storage; keep its refs while replacing the pod.
-update-git-host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    backup=$(mktemp -d)
-    export DOCKER_CONFIG=$(mktemp -d)
-    trap 'rm -rf "$backup" "$DOCKER_CONFIG"' EXIT
-    for name in claims-build claims-review claims-portal; do
-        git clone --quiet --mirror "http://localhost:8082/git/$name.git" "$backup/$name.git"
-    done
-    docker build --tag opensoftwarefactory-git-host:local services/git-host
-    kind load docker-image opensoftwarefactory-git-host:local --name {{cluster}}
-    kubectl --context {{context}} --namespace {{namespace}} rollout restart deployment/git-host
-    kubectl --context {{context}} --namespace {{namespace}} rollout status deployment/git-host --timeout=300s
-    for name in claims-build claims-review claims-portal; do
-        git -C "$backup/$name.git" push --quiet --mirror "http://localhost:8082/git/$name.git"
-    done
 
 # Wait until every deployment in the service list has rolled out.
 _wait:

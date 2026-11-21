@@ -38,9 +38,17 @@ func main() {
 
 func run() error {
 	configPath := flag.String("config", "/config/config.yaml", "workflow configuration file")
+	seedDir := flag.String("seed", "", "directory of workflow configurations to add when their names are missing")
 	addr := flag.String("addr", ":8080", "listen address")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	seeded, err := seedWorkflows(*configPath, *seedDir)
+	if err != nil {
+		return fmt.Errorf("seeding workflows: %w", err)
+	}
+	if seeded > 0 {
+		logger.Info("seeded workflows", "versions", seeded)
+	}
 	shutdownTelemetry, err := initTelemetry(context.Background(), "orchestrator")
 	if err != nil {
 		return fmt.Errorf("initializing telemetry: %w", err)

@@ -221,7 +221,6 @@ label { display: block; margin: 12px 0 4px; font-size: .75rem; font-weight: 500;
 .chip-waiting { background: rgb(124 58 237 / .12); } .chip-waiting .dot { background: var(--waiting); }
 .chip-idle { background: var(--hover); } .chip-idle .dot { background: var(--muted); }
 @keyframes pulse { 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .chip-running .dot, .ctx-menu, .dialog { animation: none; } .caret .icon, .product:hover .logo-leaf { transition: none; } }
 
 /* Rows (list panels) */
 .rows { list-style: none; margin: 0; padding: 0; }
@@ -325,8 +324,19 @@ ul.tree:focus-visible .tree-row.active { outline: 2px solid var(--accent); outli
 body.resizing { cursor: col-resize; user-select: none; }
 
 /* Workflows: list, toolbar, canvas, strip, inspector */
-.canvas-area { display: grid; grid-template-rows: 48px minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--canvas); }
-.canvas-head { background: var(--panel); }
+.canvas-area { display: grid; grid-template-rows: 48px minmax(0, 1fr) auto auto; min-width: 0; min-height: 0; background: var(--canvas); }
+.canvas-head { grid-row: 1; background: var(--panel); }
+.canvas-area > .canvas-scroll { grid-row: 2; }
+.canvas-area > .recent-strip { grid-row: 3; }
+.wf-description { grid-row: 4; min-width: 0; padding: 8px 16px; background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: .8125rem; }
+.wf-description[hidden] { display: none; }
+.wf-description-text { margin: 0; white-space: normal; overflow-wrap: break-word; line-height: 1.45; cursor: text; }
+.wf-description-editor { display: flex; align-items: flex-start; gap: 8px; }
+.wf-description-editor > [hidden] { display: none; }
+.wf-description-editor .text-format-toggle { flex: none; }
+.wf-description-editor textarea, .wf-description-preview { flex: 1; min-width: 0; }
+.wf-description-preview { margin: 0; white-space: normal; overflow-wrap: break-word; line-height: 1.45; }
+.wf-description textarea { display: block; width: 100%; min-height: 32px; padding: 4px 8px; resize: none; overflow: hidden; font: inherit; line-height: 1.45; }
 .canvas-scroll { position: relative; overflow: hidden; min-height: 0; }
 #canvas { display: block; width: 100%; height: 100%; user-select: none; touch-action: none; cursor: grab; } /* a drag pans it, or moves a node */
 #canvas.panning, #canvas.panning * { cursor: grabbing; }
@@ -424,6 +434,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ctx-menu .picker-actions button { display: inline-flex; width: auto; align-items: center; border: 1px solid var(--line); padding: 0 12px; }
 .ctx-menu .picker-actions button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-fg); }
 @keyframes reveal { from { opacity: 0; transform: translateY(-4px); } }
+/* A column shown by its toggle arrives from its own edge of the window; hiding it is immediate. */
+.panel-reveal { --reveal-from: -8px; animation: panel-reveal .18s ease-out; }
+.panel-reveal.from-right { --reveal-from: 8px; }
+@keyframes panel-reveal { from { opacity: 0; transform: translateX(var(--reveal-from)); } }
 
 /* Dialog */
 .dialog-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; /* anchored at the top: a dialog that changes height grows downwards instead of jumping */ background: rgb(10 14 20 / .45); }
@@ -446,7 +460,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pick-list li.muted { cursor: default; }
 .pick-list li.muted:hover { background: none; }
 .pane-actions { margin-top: 8px; }
-.pick-list.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.pick-list.drop, .inputs-text.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .pick-files { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: .75rem; }
 .inputs-text { min-height: 220px; }
 .template-section { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
@@ -792,7 +806,6 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .team-member-kind { font-size: .75rem; font-weight: 500; color: var(--muted); }
 .team-member.missing .team-member-kind { color: var(--danger-text); }
 .team-problem { margin: 16px 0 0; overflow-wrap: anywhere; }
-.team-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 /* The steps of the workflow a workflow node runs. */
 .nested-steps { list-style: none; margin: 0; padding: 0; }
 .nested-steps li { display: flex; align-items: center; gap: 12px; min-height: 32px; border-bottom: 1px solid var(--line); }
@@ -833,6 +846,10 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .team-canvas[hidden] { display: none; }
 .team-canvas .team-panel { max-width: 760px; margin: 0 auto; }
 .team-member { touch-action: none; }
+/* A member's port, like a canvas port: a drag from it onto another member draws a channel. */
+.team-port { position: absolute; left: 50%; bottom: -6px; width: 10px; height: 10px; margin-left: -5px; box-sizing: border-box; border: 2px solid var(--muted); border-radius: 50%; background: var(--panel); cursor: crosshair; touch-action: none; }
+.team-port:hover { border-color: var(--accent); }
+.team-channel-draft { stroke: var(--accent); stroke-dasharray: none; }
 /* workflow editor: merge and batch nodes */
 .tile .tray-line { stroke: var(--muted); stroke-width: 1; pointer-events: none; }
 /* Their sources are shown, not edited: arrows change them. */
@@ -901,3 +918,10 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 /* Agents: the commands an agent may run in a dev pod, one pattern per line. */
 .file-fields .agent-commands { flex-basis: 100%; }
 .file-fields #agent-commands { display: block; width: min(100%, 480px); min-height: 56px; font-family: var(--mono); font-size: .8125rem; }
+
+/* Reduced motion: nothing animates except the notice fading. These rules stay last in the file:
+   a media query adds no weight, so a rule after them with the same selector would win. */
+@media (prefers-reduced-motion: reduce) {
+  .chip-running .dot, .ctx-menu, .dialog, .panel-reveal { animation: none; }
+  .caret .icon, .template-toggle .icon, .product:hover .logo-leaf { transition: none; }
+}

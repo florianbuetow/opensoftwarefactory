@@ -52,7 +52,7 @@ case "$name" in
 esac
 exit 0
 `;
-  for (const name of ["clear", "colima", "curl", "docker", "git", "gofmt", "go", "kind", "kubectl", "node", "open", "uv"]) {
+  for (const name of ["clear", "colima", "curl", "docker", "gofmt", "go", "kind", "kubectl", "node", "open", "uv"]) {
     const file = path.join(bin, name);
     await writeFile(file, command);
     await chmod(file, 0o755);
@@ -98,7 +98,7 @@ test("help lists every public target and does not mutate state", async () => {
   const f = await fixture();
   try {
     const output = f.run(["help"]);
-    for (const target of ["cluster-create", "cluster-delete", "start", "stop", "deploy", "update", "update-ui", "update-git-host", "reset", "reset-observe", "status", "info", "ui", "gateway", "observe", "temporal", "render", "check"])
+    for (const target of ["cluster-create", "cluster-delete", "start", "stop", "deploy", "update", "update-ui", "reset", "reset-observe", "status", "info", "ui", "gateway", "observe", "temporal", "render", "check"])
       assert.match(output, new RegExp(`just ${target}\\b`));
     assert.doesNotMatch(await f.calls(), /docker |kind |kubectl |node /);
   } finally { await rm(f.root, { recursive: true, force: true }); }
@@ -178,21 +178,6 @@ test("update-ui deploys the Git route without restarting other services", async 
     assert.match(calls, /kubectl .* apply -f infra\/kubernetes\/base\/git-host\/service.yaml/);
     assert.match(calls, /kubectl .* rollout restart deployment\/factory-ui/);
     assert.doesNotMatch(calls, /rollout restart deployment\/(?!factory-ui)/);
-  } finally { await rm(f.root, { recursive: true, force: true }); }
-});
-
-test("update-git-host backs up refs before replacing its pod", async () => {
-  const f = await fixture();
-  try {
-    f.run(["update-git-host"]);
-    const calls = await f.calls();
-    for (const name of ["claims-build", "claims-review", "claims-portal"]) {
-      const clone = calls.indexOf(`git clone --quiet --mirror http://localhost:8082/git/${name}.git`);
-      const restart = calls.indexOf("rollout restart deployment/git-host");
-      const restore = calls.indexOf(`push --quiet --mirror http://localhost:8082/git/${name}.git`);
-      assert.ok(clone >= 0 && clone < restart && restore > restart, `${name} refs surround restart`);
-    }
-    assert.match(calls, /docker build --tag opensoftwarefactory-git-host:local services\/git-host/);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 

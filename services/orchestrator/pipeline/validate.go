@@ -342,7 +342,8 @@ func validateNode(workflow string, s Step) error {
 }
 
 // validateTeam checks a team step: a lead agent, members with unique names that are not the
-// reserved "workflow", and channels between two different members.
+// reserved "workflow", and useful channels between two different members. Workflow members
+// reply to the channel that invoked them; neither can initiate a workflow-to-workflow channel.
 func validateTeam(workflow string, s Step) error {
 	if !agentRefPattern.MatchString(s.Agent) {
 		return fmt.Errorf("workflow %q: team step %q needs a lead agent such as lead@v1", workflow, s.ID)
@@ -362,6 +363,7 @@ func validateTeam(workflow string, s Step) error {
 	}
 	names := map[string]bool{}
 	exact := map[string]string{}
+	kinds := map[string]string{}
 	for _, m := range s.TeamMembers() {
 		key := strings.ToLower(m.Name)
 		if key == WorkflowSender {
@@ -372,6 +374,7 @@ func validateTeam(workflow string, s Step) error {
 		}
 		names[key] = true
 		exact[key] = m.Name
+		kinds[key] = m.Kind
 	}
 	channels := map[string]bool{}
 	for _, pair := range s.Channels {
@@ -389,6 +392,9 @@ func validateTeam(workflow string, s Step) error {
 			if member != name {
 				return fmt.Errorf("workflow %q: team step %q has a channel to %q, but the member is named %q", workflow, s.ID, name, member)
 			}
+		}
+		if kinds[strings.ToLower(pair[0])] == WorkflowMember && kinds[strings.ToLower(pair[1])] == WorkflowMember {
+			return fmt.Errorf("workflow %q: team step %q: a channel cannot connect workflow members %q and %q", workflow, s.ID, pair[0], pair[1])
 		}
 		id := ChannelID(pair[0], pair[1])
 		if channels[id] {

@@ -51,10 +51,16 @@ const WorkflowLogic = (() => {
 
   // toggleChannel adds the channel between two members, or removes it when it exists. The first
   // edit turns the default into stored channels. Returns the list to store; undefined is the default.
+  function channelProblem(s, a, b) {
+    const workflows = new Set((s.workflows || []).map(WorkflowRef.nameOf));
+    return workflows.has(a) && workflows.has(b) ? "Two workflows cannot share a communication channel; connect each to an agent" : "";
+  }
+
   function toggleChannel(s, a, b) {
     if (!a || !b || a === b) return s.channels;
     const { pairs } = teamChannels(s);
     const id = channelId(a, b);
+    if (!pairs.some(([x, y]) => channelId(x, y) === id) && channelProblem(s, a, b)) return s.channels;
     const next = pairs.some(([x, y]) => channelId(x, y) === id) ? pairs.filter(([x, y]) => channelId(x, y) !== id) : [...pairs, [a, b]];
     return next.length ? next : undefined;
   }
@@ -94,6 +100,8 @@ const WorkflowLogic = (() => {
       if (c.length === 3 && c[2] !== ONE_WAY) problems.push(`A channel is two-way or ${ONE_WAY}, not ${c[2]}`);
       if (c[0] === c[1]) problems.push(`A channel connects two different members, not ${c[0]} with itself`);
       for (const name of new Set(c.slice(0, 2))) if (!byName.has(name)) problems.push(`A channel names ${name}, who is not a member`);
+      const problem = channelProblem(s, c[0], c[1]);
+      if (problem) problems.push(problem);
     }
     return problems;
   }
@@ -101,9 +109,10 @@ const WorkflowLogic = (() => {
   // memberTip: what a click on a member tile does, given the member picked before it (if any) and
   // the team's channels. Tooltips carry the guidance; the panel shows no instructions.
   function memberTip(m, picked, pairs) {
-    if (!picked) return `Picks ${m.ref} to make it the lead, remove it, or draw a channel to the member picked next`;
+    if (!picked) return `Picks ${m.ref} to draw a channel to the member picked next`;
     if (picked.name === m.name) return `Ends the pick of ${m.name}`;
     const id = channelId(picked.name, m.name);
+    if (m.kind === "workflow" && picked.kind === "workflow" && !pairs.some(([a, b]) => channelId(a, b) === id)) return "Two workflows cannot share a communication channel; connect each to an agent";
     return `${pairs.some(([a, b]) => channelId(a, b) === id) ? "Removes the" : "Adds a"} channel between ${picked.name} and ${m.name}`;
   }
 
@@ -189,12 +198,13 @@ const WorkflowLogic = (() => {
   // storable is what Save sends: the definition without the fields the orchestrator sets.
   function storable(w) {
     const { version, versions, created, created_by, ...rest } = w || {};
+    // Older definitions may contain line breaks; new writes store a single paragraph.
+    if (typeof rest.description === "string") rest.description = rest.description.replace(/\s+/g, " ");
     return rest;
   }
 
-  // fingerprint tells whether a workflow differs from its stored version: its steps and
-  // description as text. The name is left out, since Rename stores it on its own.
-  const fingerprint = (w) => { const { name, ...rest } = storable(w); return JSON.stringify(rest); };
+  // Names and descriptions have their own in-place save paths; only graph edits need a new version.
+  const fingerprint = (w) => { const { name, description, ...rest } = storable(w); return JSON.stringify(rest); };
 
   // headState is what the canvas head shows for the workflow on the canvas: the note beside the
   // version select, whether Save is enabled, its tooltip, and the version Save would store.
@@ -202,7 +212,7 @@ const WorkflowLogic = (() => {
   function headState({ draft = false, version = 0, newest = 0, dirty = false, steps = 0, saving = false } = {}) {
     const next = draft ? 1 : newest + 1;
     const older = !draft && version > 0 && version < newest;
-    const note = draft ? "Not saved yet" : !older ? "" : dirty ? `Edited v${version}: saves as v${next}` : `Read-only: v${version}`;
+    const note = draft ? "Not saved yet" : !older ? "" : dirty ? `Edited v${version}: saves as v${next}` : `Viewing v${version}`;
     const blocked = saving ? "Stores the workflow now" : !steps ? "Needs a step" : !dirty ? "No unsaved edits" : "";
     return { next, note, canSave: !blocked, saveTip: blocked || `Stores the workflow as v${next}` };
   }
@@ -546,7 +556,7 @@ const WorkflowLogic = (() => {
     NODE_KINDS, isNode, NODE_PARAMS, nodeSubtitle, dropForeignFields, paramValue, stepProblems, tileOutline,
     POD_KINDS, isPodKind, DEFAULT_WORK_BRANCH, RULE_TOOLS, podSubtitle, linesOf, ruleWith,
     REJECT_KINDS, ancestors, dependents, rejectRefusal, backEdgeTip, backEdgeRoute, REJECT_PORT_Y,
-    RESERVED_MEMBER, memberName, teamMembers, channelId, defaultChannels, teamChannels, toggleChannel, pruneChannels, MEMBER_H, ONE_WAY, channelSender, setChannelDirection,
+    RESERVED_MEMBER, memberName, teamMembers, channelId, channelProblem, defaultChannels, teamChannels, toggleChannel, pruneChannels, MEMBER_H, ONE_WAY, channelSender, setChannelDirection,
     teamProblems, memberTip, setLead, removeMember, nestedRefs, nestedNames, reachesWorkflow, nestableWorkflows, renameWorkflowRefs,
     newestRef, versionWord, versionOptions, storable, fingerprint, headState, runBlocker,
     rejectTargets, parseHash, formatHash, teamLayout, edgeRoute,
@@ -597,6 +607,13 @@ const WorkflowLogic = (() => {
   state.inspectorOpen = true;
   try { state.inspectorOpen = localStorage.getItem("factory.inspector") !== "closed"; } catch { /* storage unavailable */ }
   let drag = null;
+  let descriptionEdit = null;
+  const descriptionDirty = () => !!descriptionEdit && descriptionEdit.value !== descriptionEdit.original;
+  const descriptionActionBlocked = (action) => {
+    if (!descriptionEdit) return false;
+    setStatus(`Not ${action}: the description is being edited`, "error");
+    return true;
+  };
 
   // workflow is what the canvas shows and every edit changes; entry is its row in the list.
   const workflow = () => state.edit;
@@ -622,6 +639,7 @@ const WorkflowLogic = (() => {
 
   // showDefinition puts a stored version (or a draft) on the canvas as the copy that edits change.
   function showDefinition(def) {
+    descriptionEdit = null;
     state.edit = def ? structuredClone(def) : null;
     if (state.edit) {
       if (!Array.isArray(state.edit.steps)) state.edit.steps = [];
@@ -634,7 +652,7 @@ const WorkflowLogic = (() => {
   // refreshDirty compares the canvas with the stored version. A draft has unsaved work once it has a step.
   function refreshDirty() {
     const w = workflow();
-    state.dirty = !!w && (isDraft(entry()) ? w.steps.length > 0 : L.fingerprint(w) !== state.baseline);
+    state.dirty = !!w && (isDraft(entry()) ? w.steps.length > 0 || !!w.description : L.fingerprint(w) !== state.baseline);
   }
 
   function markDirty() {
@@ -662,7 +680,7 @@ const WorkflowLogic = (() => {
   // save stores the workflow on the canvas as its next version and shows that version.
   async function save() {
     const w = workflow(), e = entry();
-    if (!w || !e || !headState().canSave) return;
+    if (!w || !e || !headState().canSave || descriptionEdit) return;
     const sent = L.fingerprint(w);
     state.saving = true;
     renderHead();
@@ -687,7 +705,7 @@ const WorkflowLogic = (() => {
   }
 
   // confirmLeave asks before unsaved edits are discarded, as on Agents and Policies.
-  const confirmLeave = async () => !state.dirty || confirmAction("Discard your unsaved changes?", "Discard");
+  const confirmLeave = async () => descriptionEdit?.saving ? false : !(state.dirty || descriptionDirty()) || confirmAction("Discard your unsaved changes?", "Discard");
 
   // runBlocker explains why runs cannot start now, or returns "".
   const runBlocker = () => L.runBlocker({ draft: isDraft(entry()), dirty: state.dirty, steps: workflow()?.steps.length || 0, saving: state.saving });
@@ -926,6 +944,7 @@ const WorkflowLogic = (() => {
     renderPath();
     renderHead();
     renderList();
+    renderDescription();
     renderInspector();
     renderCanvas();
     renderToggles();
@@ -1075,8 +1094,124 @@ const WorkflowLogic = (() => {
     versionNote.hidden = !w || !head.note;
     versionNote.textContent = w ? head.note : "";
     saveButton.hidden = !w;
-    saveButton.disabled = !head.canSave;
-    saveButton.title = head.saveTip;
+    saveButton.disabled = !head.canSave || !!descriptionEdit;
+    saveButton.title = descriptionEdit?.saving ? "Stores the description now" : descriptionEdit ? "Needs the description saved or cancelled first" : head.saveTip;
+  }
+
+  // The selected version's description is editable independently of its execution graph.
+  const singleLineDescription = (value) => String(value || "").replace(/\s+/g, " ");
+  function growDescription(area) {
+    if (!area) return;
+    area.style.height = "auto";
+    area.style.height = `${area.scrollHeight + 2}px`;
+  }
+
+  function renderDescription() {
+    const box = $("wf-description"), w = workflow();
+    box.hidden = !w;
+    if (!w) { box.replaceChildren(); return; }
+    if (!descriptionEdit) {
+      const beginEdit = () => {
+        if (state.saving) return;
+        descriptionEdit = { name: w.name, version: shownVersion(), original: w.description || "", value: singleLineDescription(w.description), mode: "text", saving: false, error: "" };
+        renderDescription(); renderHead();
+        box.querySelector("textarea")?.focus();
+      };
+      const text = h("p", { className: "wf-description-text", tabIndex: 0,
+        title: "Double-click to edit this version's description" }, markdownInline(singleLineDescription(w.description) || "No description"));
+      text.addEventListener("dblclick", (ev) => { if (!ev.target.closest?.("a")) beginEdit(); });
+      text.addEventListener("keydown", (ev) => {
+        if (ev.target === text && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); beginEdit(); }
+      });
+      box.replaceChildren(text);
+      return;
+    }
+    const draft = descriptionEdit;
+    const area = h("textarea", { id: "wf-description-input", "aria-label": "Description", value: draft.value, rows: 1,
+      disabled: draft.saving, placeholder: "No description", title: "Enter saves this version's description; Escape cancels" });
+    const preview = h("p", { className: "wf-description-preview", tabIndex: 0 }, markdownInline(draft.value || "No description"));
+    const toggle = h("button", { type: "button", className: "text-format-toggle", disabled: draft.saving });
+    const editor = h("div", { className: "wf-description-editor" }, area, preview, toggle);
+    const renderMode = () => {
+      const markdown = draft.mode === "markdown";
+      area.hidden = markdown;
+      preview.hidden = !markdown;
+      toggle.textContent = markdown ? "TXT" : "MD";
+      toggle.title = markdown ? "Switch to plain text" : "Switch to Markdown";
+      toggle.setAttribute("aria-label", toggle.title);
+      if (!markdown) requestAnimationFrame(() => growDescription(area));
+    };
+    toggle.addEventListener("click", () => {
+      draft.mode = draft.mode === "markdown" ? "text" : "markdown";
+      renderMode();
+      if (draft.mode === "text") area.focus();
+    });
+    const error = h("p", { className: "error-text", role: "alert", hidden: !draft.error }, draft.error);
+    area.addEventListener("input", () => {
+      const value = singleLineDescription(area.value);
+      if (area.value !== value) area.value = value;
+      draft.value = value;
+      preview.replaceChildren(markdownInline(value || "No description"));
+      growDescription(area); renderHead();
+    });
+    area.addEventListener("keydown", (ev) => {
+      if (ev.isComposing) return;
+      if (ev.key === "Enter") { ev.preventDefault(); storeDescription(draft); }
+      if (ev.key === "Escape") {
+        ev.preventDefault(); descriptionEdit = null; renderDescription(); renderHead();
+      }
+    });
+    area.addEventListener("beforeinput", (ev) => {
+      if (ev.inputType === "insertParagraph" || ev.inputType === "insertLineBreak") ev.preventDefault();
+    });
+    editor.addEventListener("focusout", (ev) => {
+      if (!editor.contains(ev.relatedTarget) && descriptionEdit === draft) storeDescription(draft);
+    });
+    editor.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && !ev.isComposing) {
+        ev.preventDefault(); descriptionEdit = null; renderDescription(); renderHead();
+      } else if (ev.target === preview && ev.key === "Enter") { ev.preventDefault(); storeDescription(draft); }
+    });
+    box.replaceChildren(editor, error);
+    renderMode();
+  }
+
+  let descriptionWidth = 0;
+  new ResizeObserver(() => {
+    const box = $("wf-description");
+    if (box.clientWidth === descriptionWidth) return;
+    descriptionWidth = box.clientWidth;
+    growDescription(box.querySelector("textarea"));
+  }).observe($("wf-description"));
+
+  async function storeDescription(draft) {
+    if (draft !== descriptionEdit || draft.saving) return;
+    if (!descriptionDirty()) { descriptionEdit = null; renderDescription(); renderHead(); return; }
+    if (!draft.version) {
+      workflow().description = draft.value;
+      descriptionEdit = null;
+      markDirty(); renderDescription();
+      return;
+    }
+    draft.saving = true;
+    draft.error = "";
+    renderDescription(); renderHead();
+    try {
+      const result = await api("PATCH", `${API}/workflows/${encodeURIComponent(draft.name)}/versions/${draft.version}/description`, { description: draft.value }, creatorHeaders());
+      const description = result.description || "";
+      const listed = state.workflows.find((item) => item.name === draft.name && Number(item.version) === draft.version);
+      if (listed) listed.description = description;
+      versionCache.delete(WorkflowRef.format(draft.name, draft.version));
+      if (workflow()?.name === draft.name && shownVersion() === draft.version) workflow().description = description;
+      if (descriptionEdit === draft) descriptionEdit = null;
+      document.dispatchEvent(new CustomEvent("workflowdescriptionchange", { detail: { name: draft.name, version: draft.version, description } }));
+      setSaveState("Saved");
+    } catch (err) {
+      draft.error = `Not saved: ${namedError(err)}`;
+    } finally {
+      draft.saving = false;
+      renderDescription(); renderHead();
+    }
   }
 
   $("wf-new-slot").append(iconButton("plus", "New workflow", () => newWorkflow()));
@@ -1096,6 +1231,7 @@ const WorkflowLogic = (() => {
 
   function renameWorkflow(i = state.current) {
     if (!state.workflows[i]) return;
+    if (descriptionActionBlocked("renamed")) return;
     renaming = i;
     renderList();
     const input = $("wf-list").querySelector("input.rename");
@@ -1131,6 +1267,7 @@ const WorkflowLogic = (() => {
   // renameTo renames a workflow: the orchestrator renames every version and follows the name in
   // the other workflows; the page does the same with what it shows. A draft has only its name here.
   async function renameTo(e, to) {
+    if (descriptionActionBlocked("renamed")) return;
     const from = e.name;
     if (!isDraft(e)) {
       try { await api("POST", `${API}/workflows/${encodeURIComponent(from)}/rename`, { name: to }, creatorHeaders()); }
@@ -1427,7 +1564,8 @@ const WorkflowLogic = (() => {
   const stepFields = {
     id(s, typed) {
       const v = slug(typed);
-      if (!v || workflow().steps.some((o) => o !== s && sameName(o.id, v))) { setStatus("Node IDs must be unique and non-empty", "error"); return; }
+      if (!v) { setStatus("Not renamed: a node needs an ID", "error"); return; }
+      if (workflow().steps.some((o) => o !== s && sameName(o.id, v))) { setStatus(`There is already a node named ${titleCase(v)}`, "error"); return; }
       for (const o of workflow().steps) o.depends_on = (o.depends_on || []).map((d) => (d === s.id ? v : d));
       for (const o of workflow().steps) if (o.on_reject === s.id) o.on_reject = v;
       if (state.selected === s.id) state.selected = v;
@@ -1796,7 +1934,11 @@ const WorkflowLogic = (() => {
   // Make lead and Remove end the pick, so the next click picks a member instead of drawing a channel.
   let teamPick = null; // { step, name }
   let justDragged = false; // set for the click that ends a drag of a member tile
-  const focusMember = (name) => [...$("inspector").querySelectorAll(".team-member")].find((b) => b.dataset.member === name)?.focus();
+  // A team shows in the node panel and, opened by a double-click, on the canvas: a pick shows in
+  // both, and the focus returns to the one last used.
+  let teamHost = "inspector";
+  const focusMember = (name) => [...$(teamHost).querySelectorAll(".team-member")].find((b) => b.dataset.member === name)?.focus();
+  const renderTeams = () => { renderInspector(); if (state.teamOpen) renderCanvas(); };
 
   // teamPanel shows a team's members as tiles on a ring, the lead at the top, with the channels
   // as lines between them. Dashed lines are the default: the lead has a channel to every member.
@@ -1826,6 +1968,8 @@ const WorkflowLogic = (() => {
     const toggle = (a, b) => {
       const exists = pairs.some(([x, y]) => L.channelId(x, y) === L.channelId(a, b));
       teamPick = null;
+      const problem = !exists && L.channelProblem(s, a, b);
+      if (problem) { renderTeams(); setStatus(problem, "error"); focusMember(b); return; }
       edit((current) => setChannels(current, L.toggleChannel(current, a, b)), exists ? "Removed" : "");
       focusMember(b);
     };
@@ -1878,6 +2022,39 @@ const WorkflowLogic = (() => {
         title: L.memberTip(m, picked, pairs),
         style: `left:${at.get(m.name).x}%;top:${at.get(m.name).y}px`,
       }, h("span", { className: "team-member-name" }, m.name), word ? h("span", { className: "team-member-kind" }, word) : null);
+      tile.addEventListener("focusin", () => { teamHost = tile.closest("#team-canvas") ? "team-canvas" : "inspector"; });
+      // The port under the tile: a drag from it onto another member draws a channel between the two.
+      const port = h("span", { className: "team-port", title: `Drag onto another member to draw a channel from ${m.name}` });
+      tile.append(port);
+      let draft = null; // the line that follows the pointer while a channel is drawn
+      const pointAt = (ev) => { const box = lines.getBoundingClientRect(); return { x: ev.clientX - box.left, y: ev.clientY - box.top }; };
+      port.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0) return;
+        ev.stopPropagation(); // the tile does not move
+        port.setPointerCapture?.(ev.pointerId);
+        const box = lines.getBoundingClientRect(), r = tile.getBoundingClientRect(), p = pointAt(ev);
+        draft = el("line", { class: "team-channel team-channel-draft", x1: r.left + r.width / 2 - box.left, y1: r.bottom - box.top, x2: p.x, y2: p.y }, lines);
+      });
+      port.addEventListener("pointermove", (ev) => {
+        if (!draft) return;
+        const p = pointAt(ev);
+        draft.setAttribute("x2", p.x);
+        draft.setAttribute("y2", p.y);
+      });
+      const endDraft = (ev, add) => {
+        if (!draft) return;
+        draft.remove();
+        draft = null;
+        if (!add) return;
+        const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".team-member");
+        const to = target && target.parentElement === tile.parentElement ? target.dataset.member : "";
+        if (!to || to === m.name) return;
+        if (pairs.some(([x, y]) => L.channelId(x, y) === L.channelId(m.name, to))) { setStatus(`${m.name} and ${to} have a channel already`); return; }
+        toggle(m.name, to);
+      };
+      port.addEventListener("pointerup", (ev) => endDraft(ev, true));
+      port.addEventListener("pointercancel", (ev) => endDraft(ev, false));
+      port.addEventListener("click", (ev) => ev.stopPropagation()); // a click on the port picks nothing
       // A drag moves the member; the tile and its channel lines follow, and the place is stored on release.
       let move = null; // { x, y, dragged, pos }
       tile.addEventListener("pointerdown", (ev) => { if (ev.button === 0) { move = { x: ev.clientX, y: ev.clientY, dragged: false, pos: null }; tile.setPointerCapture?.(ev.pointerId); } });
@@ -1917,13 +2094,13 @@ const WorkflowLogic = (() => {
         if (justDragged) return;
         if (picked && !on) { toggle(picked.name, m.name); return; }
         teamPick = on ? null : { step: s.id, name: m.name };
-        renderInspector();
+        renderTeams();
         focusMember(m.name);
       });
       tile.addEventListener("keydown", (ev) => {
         if (ev.key !== "Escape" || !teamPick) return;
         teamPick = null;
-        renderInspector();
+        renderTeams();
         focusMember(m.name);
       });
       tile.addEventListener("contextmenu", (ev) => openMenu(ev, [
@@ -1979,11 +2156,6 @@ const WorkflowLogic = (() => {
       openMenu(ev, items.length ? items : [["Nothing left to add", () => {}, "", "Every agent and workflow is a member already", true]]);
     });
 
-    // The two actions on the picked member, for the keyboard as well as the right-click menu.
-    const action = (label, run, blocker, tip, className = "") => h("button", {
-      type: "button", className, disabled: !picked || !!blocker(picked),
-      title: !picked ? "Needs a picked member" : blocker(picked) || tip(picked), onclick: () => run(picked),
-    }, label);
     const problems = L.teamProblems(s);
     return h("div", { className: "team-panel" },
       h("div", { className: "file-head" },
@@ -1993,10 +2165,7 @@ const WorkflowLogic = (() => {
       members.length
         ? h("div", { className: "team-ring", role: "group", "aria-label": "Team members", style: `height:${height}px` }, lines, ...tiles)
         : null,
-      ...problems.map((p) => h("p", { className: "error-text team-problem" }, p)),
-      h("div", { className: "team-actions" },
-        action("Make lead", makeLead, leadBlocker, (m) => `Makes ${m.name} the lead agent; ${members[0].name} stays a member`),
-        action("Remove", remove, removeBlocker, (m) => `Removes ${m.name} and its channels from the team`, "danger")));
+      ...problems.map((p) => h("p", { className: "error-text team-problem" }, p)));
   }
 
   // nestedCard lists the steps of the workflow version a workflow node runs, with a link that opens it.
@@ -2073,7 +2242,7 @@ const WorkflowLogic = (() => {
     try { localStorage.setItem("factory.inspector", open ? "open" : "closed"); } catch { /* storage unavailable */ }
     renderToggles();
   }
-  const inspectorToggle = iconButton("panelRight", "Detail panel", () => { setInspector(!state.inspectorOpen); renderInspector(); });
+  const inspectorToggle = iconButton("panelRight", "Detail panel", () => { setInspector(!state.inspectorOpen); renderInspector(); if (state.inspectorOpen) revealPanel($("inspector"), true); });
   pageToggles.workflows = [inspectorToggle];
   function renderToggles() {
     inspectorToggle.classList.toggle("on", state.inspectorOpen);
@@ -2368,6 +2537,7 @@ const WorkflowLogic = (() => {
   async function duplicateWorkflow(i = state.current) {
     const e = state.workflows[i];
     if (!e) return;
+    if (descriptionActionBlocked("duplicated")) return;
     const source = i === state.current && state.edit ? state.edit : e;
     let name = `${e.name}-copy`;
     for (let n = 2; state.workflows.some((x) => sameName(x.name, name)); n++) name = `${e.name}-copy-${n}`;
@@ -2384,6 +2554,7 @@ const WorkflowLogic = (() => {
   async function deleteWorkflow(i = state.current) {
     const e = state.workflows[i];
     if (!e) return;
+    if (descriptionActionBlocked("deleted")) return;
     const draft = isDraft(e);
     if (!(await confirmAction(draft ? `Delete ${titleCase(e.name)}?` : `Delete ${titleCase(e.name)} with all its versions?`, "Delete"))) return;
     if (!draft) {
@@ -2468,7 +2639,7 @@ const WorkflowLogic = (() => {
   }
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp);
-  window.addEventListener("beforeunload", (ev) => { if (state.dirty) ev.preventDefault(); });
+  window.addEventListener("beforeunload", (ev) => { if (state.dirty || descriptionDirty() || descriptionEdit?.saving) ev.preventDefault(); });
 
   tabs.workflows = {
     // Opening the page refreshes from the server (unless edits are not saved yet);
@@ -2482,7 +2653,7 @@ const WorkflowLogic = (() => {
       if (fresh) { loadAgents(); loadRepositories(); }
       // Unsaved edits survive a visit to another page: nothing is loaded over them, and a hash
       // that names another workflow or version asks first.
-      if (fresh && !state.dirty && !state.saving) { load(); return; }
+      if (fresh && !state.dirty && !state.saving && !descriptionDirty() && !descriptionEdit?.saving) { load(); return; }
       if (state.loaded) followHash(wanted.rest, wanted.remembered);
     },
     hide() {

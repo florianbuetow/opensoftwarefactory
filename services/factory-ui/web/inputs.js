@@ -200,7 +200,32 @@ const Inputs = (() => {
     // Text.
     const text = h("textarea", { className: "inputs-text", "aria-label": "Input text", value: st.text });
     text.addEventListener("input", () => { st.text = text.value; update(); });
-    panes.text.append(text);
+    // Upload file opens the file dialog and puts the text of the chosen file in the field; a
+    // file dropped on the field does the same.
+    const takeFile = async (file) => {
+      if (!file) return;
+      if (!isText(file)) { setStatus(`Not added: ${file.name} (not a text file)`, "error"); return; }
+      try {
+        text.value = st.text = await file.text();
+        update();
+        text.focus();
+      } catch (e) { setStatus(`Cannot read ${file.name}: ${e.message}`, "error"); }
+    };
+    const textPicker = h("input", { type: "file", hidden: true });
+    const textUpload = h("button", { type: "button", title: "Replaces the input text with the text of a file; a file dropped on the field does the same" }, icon("upload"), " Upload file");
+    textUpload.onclick = () => textPicker.click();
+    textPicker.onchange = () => { const file = textPicker.files[0]; textPicker.value = ""; takeFile(file); };
+    // Only a dragged file is taken over: dragged text still drops into the field as usual.
+    const dragsFile = (ev) => [...(ev.dataTransfer?.types || [])].includes("Files");
+    text.addEventListener("dragover", (ev) => { if (!dragsFile(ev)) return; ev.preventDefault(); text.classList.add("drop"); });
+    text.addEventListener("dragleave", () => text.classList.remove("drop"));
+    text.addEventListener("drop", (ev) => {
+      if (!dragsFile(ev)) return;
+      ev.preventDefault();
+      text.classList.remove("drop");
+      takeFile(ev.dataTransfer.files[0]);
+    });
+    panes.text.append(text, h("div", { className: "row pane-actions" }, textUpload, textPicker));
 
     // Task collection.
     const collectionList = h("ul", { className: "pick-list", role: "radiogroup", "aria-label": "Task collections" });
