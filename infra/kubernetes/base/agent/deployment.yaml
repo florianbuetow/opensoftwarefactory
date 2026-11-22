@@ -27,6 +27,8 @@ spec:
           image: opensoftwarefactory-agent:local
           imagePullPolicy: Never
           env:
+            - name: EVALUATION_URL
+              value: http://evaluation:8080
             - name: TEMPORAL_ADDRESS
               value: temporal:7233
             - name: BLOB_URL

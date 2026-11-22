@@ -28,8 +28,7 @@ data:
     [INPUT]
         Name              tail
         Tag               kube.*
-        Path              /var/log/containers/*_opensoftwarefactory_*.log
-        Exclude_Path      /var/log/containers/log-collector-*_opensoftwarefactory_*.log
+        Path              /var/log/containers/*_opensoftwarefactory_*.log,/var/log/containers/*_opensoftwarefactory-devpods_*.log
         multiline.parser  docker, cri
         DB                /buffers/tail.db
         DB.Sync           Full
@@ -37,7 +36,8 @@ data:
         Refresh_Interval  5
         Inotify_Watcher   False
         Rotate_Wait       30
-        Skip_Long_Lines   On
+        Buffer_Max_Size   64M
+        Skip_Long_Lines   Off
         storage.type      filesystem
 
     [FILTER]
@@ -62,6 +62,28 @@ data:
         Match  kube.*
         script /fluent-bit/config/redact.lua
         call   redact
+
+    # Archive every redacted record before applying search-only exclusions.
+    [FILTER]
+        Name                  rewrite_tag
+        Match                 kube.*
+        Rule                  $cluster ^opensoftwarefactory$ archive.$TAG true
+        Emitter_Name          host_archive
+        Emitter_Storage.type  filesystem
+
+    [FILTER]
+        Name   lua
+        Match  kube.*
+        script /fluent-bit/config/redact.lua
+        call   search_only
+
+    [OUTPUT]
+        Name   file
+        Match  archive.*
+        Path   /archive
+        File   factory.ndjson
+        Mkdir  true
+        Format plain
 
     @INCLUDE /credentials/fluent-bit-output.conf
 
@@ -103,6 +125,15 @@ data:
     end
 
     function redact(tag, timestamp, record)
+      scrub(record, 0)
+      return 1, timestamp, record
+    end
+
+    function search_only(tag, timestamp, record)
+      if type(record.kubernetes) == "table"
+        and record.kubernetes.container_name == "log-collector" then
+        return -1, timestamp, record
+      end
       -- Ingesting this access-log line would generate another identical line forever.
       if type(record.kubernetes) == "table"
         and record.kubernetes.container_name == "openobserve"
@@ -110,6 +141,5 @@ data:
         and string.find(record.log, "POST /api/default/factory/_json", 1, true) then
         return -1, timestamp, record
       end
-      scrub(record, 0)
       return 1, timestamp, record
     end

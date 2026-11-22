@@ -60,6 +60,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: archive
+              mountPath: /archive
             - name: config
               mountPath: /fluent-bit/config
               readOnly: true
@@ -72,6 +74,10 @@ spec:
             - name: buffers
               mountPath: /buffers
       volumes:
+        - name: archive
+          hostPath:
+            path: /blobstore/data/host-log-archive
+            type: DirectoryOrCreate
         - name: config
           configMap:
             name: log-collector

@@ -12,9 +12,31 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from factory import NotFoundError, blobstore, connectors, policies, valid_id
+from factory import NotFoundError, blobstore, connectors, evidence, policies, valid_id
 
 SEARCH_SECONDS = 5.0
+
+
+def read_trace(run_id: str, execution_id: str, trace_id: str = "", cursor: str = "", limit: int = 100) -> dict:
+    """Read target workflow execution spans and artifact references without modifying them.
+
+    Supply the business run UUID and target execution ID from the workflow event.
+    trace_id is the optional distributed trace ID, not the business run UUID.
+    Follow next_cursor to read more. query_complete describes pagination only;
+    source_status explicitly reports unknown or unavailable trace evidence.
+    This tool cannot change traces, submit SQL, or access another HTTP endpoint.
+    """
+    return evidence.read(run_id, execution_id, trace_id, cursor, limit)
+
+
+def read_trace_artifact(run_id: str, execution_id: str, artifact_id: str) -> dict:
+    """Read an artifact only within the target workflow execution's evidence scope.
+
+    Use an artifact_id returned by read_trace. The factory verifies its run and
+    execution ownership and bounds returned content, reporting truncation.
+    This operation cannot read arbitrary blob namespaces or modify artifacts.
+    """
+    return evidence.artifact(run_id, execution_id, artifact_id)
 
 REQUIREMENT = re.compile(r"\b(must|should|shall|needs?)\b", re.IGNORECASE)
 WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'_-]*")

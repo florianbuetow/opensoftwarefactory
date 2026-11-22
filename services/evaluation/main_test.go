@@ -3,12 +3,15 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,15 +26,19 @@ const (
 )
 
 type fixture struct {
-	mu       sync.Mutex
-	runs     map[string]bool
-	objects  map[string][]byte
-	statuses map[string]any
+	mu                sync.Mutex
+	runs              map[string]bool
+	objects           map[string][]byte
+	revisions         map[string]string
+	nextRevision      int
+	failPriceList     bool
+	failExecutionList bool
+	statuses          map[string]any
 }
 
 func newFixture(t *testing.T) (*fixture, *httptest.Server, *httptest.Server) {
 	t.Helper()
-	f := &fixture{runs: map[string]bool{runA: true, runB: true, runC: true, runD: true}, objects: map[string][]byte{}, statuses: map[string]any{}}
+	f := &fixture{runs: map[string]bool{runA: true, runB: true, runC: true, runD: true}, objects: map[string][]byte{}, revisions: map[string]string{}, statuses: map[string]any{}}
 	started := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	put := func(id string, v any) { f.objects[id], _ = json.Marshal(v) }
 	put("runs/"+runA+"/run.json", map[string]any{"trace_id": runA, "workflow": "feature", "started": started.Add(2 * time.Hour), "input_artifact": "runs/" + runA + "/input", "distributed_trace_id": strings.Repeat("a", 32)})
@@ -82,6 +89,23 @@ func (f *fixture) blobHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, 200, map[string]any{"directories": []any{}, "objects": objects})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/list/"):
+		prefix := strings.Trim(strings.TrimPrefix(r.URL.Path, "/list/"), "/") + "/"
+		if f.failPriceList && prefix == pricePrefix+"/" {
+			http.Error(w, "temporarily unavailable", 503)
+			return
+		}
+		if f.failExecutionList && prefix == "workflow-executions/" {
+			http.Error(w, "temporarily unavailable", 503)
+			return
+		}
+		var objects []map[string]any
+		for id := range f.objects {
+			if strings.HasPrefix(id, prefix) && !strings.Contains(strings.TrimPrefix(id, prefix), "/") {
+				objects = append(objects, map[string]any{"id": id})
+			}
+		}
+		writeJSON(w, 200, map[string]any{"directories": []any{}, "objects": objects})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/trace/"):
 		id := strings.TrimPrefix(r.URL.Path, "/trace/")
 		var objects []map[string]any
@@ -94,7 +118,20 @@ func (f *fixture) blobHandler(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/blobs/"):
 		id := strings.TrimPrefix(r.URL.Path, "/blobs/")
 		if r.Method == http.MethodPut {
+			if r.Header.Get("If-None-Match") == "*" {
+				if _, exists := f.objects[id]; exists {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					return
+				}
+			}
+			if match := strings.Trim(r.Header.Get("If-Match"), `"`); match != "" && match != f.revisions[id] {
+				w.WriteHeader(http.StatusPreconditionFailed)
+				return
+			}
 			f.objects[id], _ = io.ReadAll(r.Body)
+			f.nextRevision++
+			f.revisions[id] = fmt.Sprintf("r%d", f.nextRevision)
+			w.Header().Set("ETag", `"`+f.revisions[id]+`"`)
 			w.WriteHeader(204)
 			return
 		}
@@ -104,6 +141,13 @@ func (f *fixture) blobHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.Header().Set("X-Created", "2026-11-01T12:00:00Z")
+		if f.revisions[id] == "" {
+			f.nextRevision++
+			f.revisions[id] = fmt.Sprintf("r%d", f.nextRevision)
+		}
+		w.Header().Set("ETag", `"`+f.revisions[id]+`"`)
 		_, _ = w.Write(data)
 	default:
 		http.NotFound(w, r)
@@ -113,6 +157,9 @@ func (f *fixture) blobHandler(w http.ResponseWriter, r *http.Request) {
 func testEvaluation(t *testing.T, blob, orch string) *httptest.Server {
 	t.Helper()
 	s := &service{blobs: blob, orchestrator: orch, http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go s.projectorLoop(ctx)
 	srv := httptest.NewServer(s.routes())
 	t.Cleanup(srv.Close)
 	return srv

@@ -20,17 +20,64 @@ type toolCall struct {
 }
 
 type usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens                                            *int64 `json:"prompt_tokens,omitempty"`
+	CompletionTokens                                        *int64 `json:"completion_tokens,omitempty"`
+	TotalTokens                                             *int64 `json:"total_tokens,omitempty"`
+	CachedInputTokens                                       *int64 `json:"cached_input_tokens,omitempty"`
+	ReasoningTokens                                         *int64 `json:"reasoning_tokens,omitempty"`
+	Raw                                                     string `json:"-"`
+	promptIncomplete, completionIncomplete, totalIncomplete bool
+	cachedIncomplete, reasoningIncomplete                   bool
+}
+
+func (u *usage) UnmarshalJSON(data []byte) error {
+	type wire usage
+	var decoded struct {
+		wire
+		InputTokens   *int64 `json:"input_tokens"`
+		OutputTokens  *int64 `json:"output_tokens"`
+		PromptDetails struct {
+			Cached *int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionDetails struct {
+			Reasoning *int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*u = usage(decoded.wire)
+	if u.PromptTokens == nil {
+		u.PromptTokens = decoded.InputTokens
+	}
+	if u.CompletionTokens == nil {
+		u.CompletionTokens = decoded.OutputTokens
+	}
+	if u.CachedInputTokens == nil {
+		u.CachedInputTokens = decoded.PromptDetails.Cached
+	}
+	if u.ReasoningTokens == nil {
+		u.ReasoningTokens = decoded.CompletionDetails.Reasoning
+	}
+	u.Raw = string(data)
+	return nil
+}
+
+func (u usage) MarshalJSON() ([]byte, error) {
+	if u.Raw != "" {
+		return []byte(u.Raw), nil
+	}
+	type wire usage
+	return json.Marshal(wire(u))
 }
 
 type chatRequest struct {
-	Model           string   `json:"model"`
-	Messages        []any    `json:"messages"`
-	Tools           []any    `json:"tools,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
+	Model           string            `json:"model"`
+	Messages        []any             `json:"messages"`
+	Tools           []any             `json:"tools,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	Temperature     *float64          `json:"temperature,omitempty"`
+	ResponseFormat  map[string]string `json:"response_format,omitempty"`
 	// MaxTokens limits one answer, so a model that does not stop cannot hold a step for minutes.
 	MaxTokens int  `json:"max_tokens,omitempty"`
 	Stream    bool `json:"stream"`
@@ -39,10 +86,11 @@ type chatRequest struct {
 // completion is one parsed model response. Message is the assistant message
 // exactly as returned, so it can be appended to the conversation unchanged.
 type completion struct {
-	Message   json.RawMessage
-	Content   string
-	ToolCalls []toolCall
-	Usage     *usage
+	Message       json.RawMessage
+	Content       string
+	ToolCalls     []toolCall
+	Usage         *usage
+	MeasurementID string
 }
 
 func chat(ctx context.Context, client *http.Client, baseURL string, req chatRequest) (completion, error) {
@@ -95,7 +143,7 @@ func chat(ctx context.Context, client *http.Client, baseURL string, req chatRequ
 	if err := json.Unmarshal(out.Choices[0].Message, &msg); err != nil {
 		return completion{}, fmt.Errorf("llm gateway: invalid message: %w", err)
 	}
-	c := completion{Message: out.Choices[0].Message, ToolCalls: msg.ToolCalls, Usage: out.Usage}
+	c := completion{Message: out.Choices[0].Message, ToolCalls: msg.ToolCalls, Usage: out.Usage, MeasurementID: resp.Header.Get("X-Usage-Measurement-Id")}
 	if msg.Content != nil {
 		c.Content = *msg.Content
 	}

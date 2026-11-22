@@ -10,7 +10,7 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Central deployment list, in rollout order. Images are built from every services/*/Dockerfile.
-services := "llm-gateway openobserve telemetry-collector temporal blobstore agent-registry policy-registry tool-gateway mcp-gateway git-host connectors orchestrator evaluation agent factory-ui"
+services := "jetstream llm-gateway openobserve telemetry-collector temporal blobstore agent-registry policy-registry tool-gateway mcp-gateway git-host connectors orchestrator evaluation agent factory-ui"
 cluster := "opensoftwarefactory"
 context := "kind-" + cluster
 namespace := "opensoftwarefactory"
@@ -31,6 +31,7 @@ init:
     node scripts/init-llm-gateway.js
     node scripts/init-openobserve.js
     node scripts/init-orchestrator.js
+    node scripts/init-jetstream.js
     node scripts/generate-kind-config.js
     printf "\033[0;32m✓ Local configuration initialized\033[0m\n"
     echo ""
@@ -112,19 +113,22 @@ _reset-data deployments paths node_paths:
         printf "\033[0;31m✗ Cannot reset data while cluster {{cluster}} is unavailable; run just start first\033[0m\n" >&2
         exit 1
     fi
-    declare -A original_replicas
+    original_deployments=()
+    original_replicas=()
     running=()
     for deployment in {{deployments}}; do
         replicas=$(kubectl --context {{context}} --namespace {{namespace}} get deployment "$deployment" \
             -o jsonpath='{.spec.replicas}')
-        original_replicas["$deployment"]=${replicas:-0}
+        original_deployments+=("$deployment")
+        original_replicas+=("${replicas:-0}")
         if [ "${replicas:-0}" -gt 0 ]; then running+=("$deployment"); fi
     done
     scaled=0
     restore_replicas() {
-        for deployment in {{deployments}}; do
+        for index in "${!original_deployments[@]}"; do
+            deployment=${original_deployments[$index]}
             kubectl --context {{context}} --namespace {{namespace}} scale deployment "$deployment" \
-                --replicas="${original_replicas[$deployment]}" >/dev/null
+                --replicas="${original_replicas[$index]}" >/dev/null
         done
         for deployment in "${running[@]}"; do
             kubectl --context {{context}} --namespace {{namespace}} rollout status "deployment/$deployment" --timeout=300s
@@ -170,6 +174,11 @@ help:
     @echo ""
     @printf "\033[0;33mSetup & Lifecycle:\033[0m\n"
     @printf "  %-38s %s\n" "just init" "Initialize local configuration without overwriting it"
+    @printf "  %-38s %s\n" "just sync-seeds" "Publish optional local scratch/seeds to the cluster"
+    @printf "  %-38s %s\n" "just verify-measurements" "Test isolated real measurement service processes"
+    @printf "  %-38s %s\n" "just verify-measurements-live" "Test real projection in a disposable OpenObserve stream"
+    @printf "  %-38s %s\n" "just verify-workflow-events" "Test real isolated JetStream/Temporal intake and judges"
+    @printf "  %-38s %s\n" "just verify-openobserve" "Verify replacement in a disposable telemetry stream"
     @printf "  %-38s %s\n" "just cluster-create" "Create the empty KIND cluster"
     @printf "  %-38s %s\n" "just cluster-delete" "Delete the project cluster, keeping all data"
     @printf "  %-38s %s\n" "just reset" "Delete workflows, artifacts, and run history, then re-init"
@@ -248,6 +257,49 @@ stop:
     printf "\033[0;32m✓ Project cluster and all its services stopped; data retained\033[0m\n"
     echo ""
 
+# Publish optional ignored local seeds; no seed payload is built into an image.
+sync-seeds:
+    node scripts/sync-seeds.js {{cluster}}-control-plane
+
+# Test real local services with isolated temporary data; no cluster mutation.
+verify-measurements:
+    node scripts/verify-factory-measurements.js
+
+# Exercise the actual projector against a unique disposable live OpenObserve stream.
+verify-measurements-live:
+    VERIFY_REAL_OPENOBSERVE=1 node scripts/verify-factory-measurements.js
+
+# Test actual isolated broker/workflow processes with a deterministic model fixture.
+verify-workflow-events:
+    node scripts/verify-workflow-events.js
+
+# Verify replacement only in a fresh disposable OpenObserve test stream.
+verify-openobserve:
+    node scripts/verify-openobserve.js
+
+# Recovery only with explicit authorization to interrupt all workloads on default Colima.
+_restart-shared-runtime approval:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "{{approval}}" != "shared-runtime-approved" ]; then
+        echo "Explicit shared-runtime authorization is required." >&2
+        exit 1
+    fi
+    running=()
+    while IFS= read -r container; do
+        [ -z "$container" ] || running+=("$container")
+    done < <(docker ps -q)
+    colima --profile default stop
+    colima --profile default start
+    if [ "${#running[@]}" -gt 0 ]; then docker start "${running[@]}"; fi
+    just _vm-limits
+
+# Prepare durable event storage and install generated local credentials.
+_event-storage:
+    docker exec {{cluster}}-control-plane install -d -o 1000 -g 1000 /var/lib/opensoftwarefactory/jetstream /var/lib/opensoftwarefactory/evaluation
+    kubectl --context {{context}} apply -f infra/kubernetes/overlays/local/factory/namespace.yaml
+    kubectl --context {{context}} apply -f scratch/measurements/jetstream/secret.json
+
 # Deploy already-built local images and manifests to the running project cluster.
 deploy:
     #!/usr/bin/env bash
@@ -277,6 +329,8 @@ deploy:
         exit 1
     fi
     just init
+    just sync-seeds
+    just _event-storage
     kind load docker-image "${images[@]}" --name {{cluster}}
     existing=""
     if kubectl --context {{context}} --namespace {{namespace}} get namespace {{namespace}} >/dev/null 2>&1; then
@@ -329,6 +383,47 @@ _build:
         image="opensoftwarefactory-$(basename "$dir"):local"
         docker build --tag "$image" "$dir"
     done
+
+# Remove only unused dangling image cache, never containers or volumes.
+_prune-image-cache:
+    docker image prune -f
+
+# Clear unused rebuildable builder cache after builds, without deleting images or data.
+_prune-build-cache:
+    docker builder prune -f --keep-storage 512MB
+
+# Rebuild the measurement backend after a focused integration correction.
+_build-evaluation:
+    docker build --tag opensoftwarefactory-evaluation:local services/evaluation
+
+# Resume a build interrupted after the earlier service images were verified.
+_build-final-services:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DOCKER_CONFIG=$(mktemp -d)
+    trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+    docker build --tag opensoftwarefactory-registry:local services/registry
+    docker build --tag opensoftwarefactory-tool-gateway:local services/tool-gateway
+
+# Allow retained-artifact metadata migration to finish before liveness applies.
+_deploy-blobstore:
+    kubectl --context {{context}} --namespace {{namespace}} apply -f infra/kubernetes/base/blobstore/deployment.yaml
+    kubectl --context {{context}} --namespace {{namespace}} rollout status deployment/blobstore --timeout=600s
+
+# Load and roll out only the already-built evaluation image.
+_deploy-evaluation:
+    kind load docker-image opensoftwarefactory-evaluation:local --name {{cluster}}
+    kubectl --context {{context}} --namespace {{namespace}} apply -f infra/kubernetes/base/evaluation/deployment.yaml
+    kubectl --context {{context}} --namespace {{namespace}} rollout restart deployment/evaluation
+    kubectl --context {{context}} --namespace {{namespace}} rollout status deployment/evaluation --timeout=300s
+
+# Build and roll out only the orchestrator after a focused recovery correction.
+_update-orchestrator:
+    docker build --tag opensoftwarefactory-orchestrator:local services/orchestrator
+    kind load docker-image opensoftwarefactory-orchestrator:local --name {{cluster}}
+    kubectl --context {{context}} --namespace {{namespace}} apply -f infra/kubernetes/base/orchestrator/deployment.yaml
+    kubectl --context {{context}} --namespace {{namespace}} rollout restart deployment/orchestrator
+    kubectl --context {{context}} --namespace {{namespace}} rollout status deployment/orchestrator --timeout=300s
 
 # Build and deploy only the factory UI, preserving the other running services.
 update-ui:
@@ -519,6 +614,13 @@ check:
     node --check scripts/generate-kind-config.js
     node --check scripts/init-openobserve.js
     node --check scripts/init-orchestrator.js
+    node --check scripts/sync-seeds.js
+    node --check scripts/init-jetstream.js
+    node --check scripts/verify-factory-measurements.js
+    node --check scripts/verify-workflow-events.js
+    node --test scripts/jetstream.test.js
+    node --test services/factory-ui/measurements_ui_test.mjs
+    node --test scripts/seeds.test.js
     node --check scripts/auxiliary-targets.test.js
     node --check scripts/lifecycle.test.js
     node --check scripts/migrate-unpack-inputs.js

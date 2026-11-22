@@ -4,6 +4,10 @@ telemetry:
   endpoint: ""
   insecure: false
 
+# Raw provider usage is durably spooled to blobstore before canonical delivery.
+blobstore_url: http://blobstore:8080
+evaluation_url: http://evaluation:8080
+
 # The factory uses only the models loaded in LM Studio on this machine.
 providers:
   - name: lm-studio

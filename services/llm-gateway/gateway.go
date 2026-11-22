@@ -22,10 +22,15 @@ import (
 )
 
 type Gateway struct {
-	routes    map[string]route
-	providers []*Provider
-	transport *http.Transport
-	log       *slog.Logger
+	routes         map[string]route
+	providers      []*Provider
+	transport      *http.Transport
+	log            *slog.Logger
+	blobstoreURL   string
+	evaluationURL  string
+	evidenceClient *http.Client
+	replayMu       sync.Mutex
+	replayOffset   int
 }
 
 func newGateway(c Config, l *slog.Logger) (*Gateway, error) {
@@ -42,7 +47,9 @@ func newGateway(c Config, l *slog.Logger) (*Gateway, error) {
 	for i := range c.Providers {
 		providers[i] = &c.Providers[i]
 	}
-	return &Gateway{routes: routes, providers: providers, transport: t, log: l}, nil
+	return &Gateway{routes: routes, providers: providers, transport: t, log: l,
+		blobstoreURL: strings.TrimRight(c.BlobstoreURL, "/"), evaluationURL: strings.TrimRight(c.EvaluationURL, "/"),
+		evidenceClient: &http.Client{Timeout: 10 * time.Second}}, nil
 }
 
 // resolveRoute keeps configured aliases authoritative, then allows explicitly enabled providers
@@ -82,7 +89,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 	correlation := []any{"run_id", r.Header.Get("X-Trace-Id"), "step", r.Header.Get("X-Step-Id"), "agent", r.Header.Get("X-Agent-Ref"), "trace_id", span.SpanContext().TraceID().String(), "span_id", span.SpanContext().SpanID().String()}
 	requestLog := g.log.With(correlation...)
-	span.SetAttributes(attribute.String("factory.run_id", r.Header.Get("X-Trace-Id")), attribute.String("factory.step", r.Header.Get("X-Step-Id")), attribute.String("factory.agent", r.Header.Get("X-Agent-Ref")))
+	span.SetAttributes(attribute.String("factory.run_id", r.Header.Get("X-Trace-Id")), attribute.String("factory.execution_id", r.Header.Get("X-Execution-Id")), attribute.String("factory.parent_execution_id", r.Header.Get("X-Parent-Execution-Id")), attribute.String("factory.step", r.Header.Get("X-Step-Id")), attribute.String("factory.agent", r.Header.Get("X-Agent-Ref")))
 	defer func() {
 		span.SetAttributes(attribute.Int("http.response.status_code", status), attribute.String("provider", provider))
 		if status >= 400 {
@@ -106,6 +113,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body io.Reader
 	var selected route
 	var streaming, synthetic, includeUsage bool
+	var requestedModel, effort string
+	modes := map[string]string{}
+	requestSettings := map[string]string{}
 	var sampling []any // temperature of a chat request, as passed on to the provider
 	switch {
 	case r.URL.Path == "/v1/chat/completions":
@@ -131,6 +141,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(400, "A model is required", "invalid_request_error")
 			return
 		}
+		requestedModel = model
+		if raw, ok := request["reasoning_effort"]; ok {
+			if json.Unmarshal(raw, &effort) != nil || strings.TrimSpace(effort) == "" {
+				fail(400, "reasoning_effort must be a non-empty string", "invalid_request_error")
+				return
+			}
+		}
 		var ok bool
 		selected, ok = g.resolveRoute(ctx, model)
 		if !ok {
@@ -144,6 +161,39 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		synthetic = streaming && !selected.provider.Streaming
+		switch {
+		case synthetic:
+			requestSettings["stream"] = "synthetic"
+		case streaming:
+			requestSettings["stream"] = "native"
+		default:
+			requestSettings["stream"] = "none"
+		}
+		if raw, ok := request["temperature"]; ok && string(raw) != "null" {
+			requestSettings["temperature"] = string(raw)
+		}
+		if raw, ok := request["service_tier"]; ok && string(raw) != "null" {
+			var tier string
+			if json.Unmarshal(raw, &tier) != nil || strings.TrimSpace(tier) == "" {
+				fail(400, "service_tier must be a non-empty string", "invalid_request_error")
+				return
+			}
+			modes["service_tier"] = tier
+		}
+		if raw, ok := request["modes"]; ok && string(raw) != "null" {
+			var supplied map[string]string
+			if json.Unmarshal(raw, &supplied) != nil || supplied == nil {
+				fail(400, "modes must be an object of string values", "invalid_request_error")
+				return
+			}
+			for key, value := range supplied {
+				if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+					fail(400, "modes keys and values must be non-empty strings", "invalid_request_error")
+					return
+				}
+				modes[key] = value
+			}
+		}
 		if synthetic {
 			if raw, ok := request["stream_options"]; ok && string(raw) != "null" {
 				var options struct {
@@ -220,16 +270,40 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	authorize(upstream, selected.provider)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(upstream.Header))
+	var attemptID string
+	requestedAt := time.Now().UTC()
+	if operation == "chat.completions" {
+		attemptID, err = newAttemptID()
+		if err != nil {
+			fail(500, "Unable to allocate upstream attempt", "api_error")
+			return
+		}
+	}
+	var usageCtx usageContext
+	if attemptID != "" {
+		usageCtx = usageContextFromRequest(r, span, attemptID, requestedAt, selected, requestedModel, effort, modes, requestSettings)
+		if err := g.beginUsageAttempt(ctx, usageCtx); err != nil {
+			fail(503, "Usage evidence unavailable", "api_error")
+			return
+		}
+	}
 	response, err := g.transport.RoundTrip(upstream)
 	if err != nil {
+		if attemptID != "" {
+			g.completeUsage(ctx, usageCtx, nil, false)
+		}
 		fail(502, "Upstream connection failed", "api_error")
 		return
 	}
 	defer response.Body.Close()
+	if attemptID != "" {
+		w.Header().Set("X-Usage-Measurement-Id", attemptID)
+	}
 	status = response.StatusCode
 	if synthetic && status >= 200 && status < 300 {
 		completion, err := readCompletion(response.Body)
 		if err != nil {
+			g.completeUsage(ctx, usageCtx, nil, false)
 			fail(502, "Invalid upstream completion", "api_error")
 			return
 		}
@@ -241,11 +315,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(status)
 		if err = writeCompletionStream(w, completion, includeUsage); err != nil {
+			g.completeUsage(ctx, usageCtx, completion.Usage, false)
 			requestError = "stream interrupted"
 			span.SetStatus(codes.Error, "stream interrupted")
 			requestLog.WarnContext(ctx, "stream interrupted", "provider", provider)
 			panic(http.ErrAbortHandler)
 		}
+		g.completeUsage(ctx, usageCtx, completion.Usage, true)
 		return
 	}
 	copyHeaders(w.Header(), response.Header)
@@ -255,11 +331,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		dst = flushWriter{w}
 		_ = http.NewResponseController(w).Flush()
 	}
-	if _, err = io.Copy(dst, response.Body); err != nil {
+	observer := newUsageObserver(streaming)
+	if _, err = io.Copy(dst, io.TeeReader(response.Body, observer)); err != nil {
+		if attemptID != "" {
+			g.completeUsage(ctx, usageCtx, observer.Usage(), false)
+		}
 		requestError = "response interrupted"
 		span.SetStatus(codes.Error, "response interrupted")
 		requestLog.WarnContext(ctx, "response interrupted", "provider", provider)
 		panic(http.ErrAbortHandler)
+	}
+	if attemptID != "" {
+		g.completeUsage(ctx, usageCtx, observer.Usage(), true)
 	}
 }
 

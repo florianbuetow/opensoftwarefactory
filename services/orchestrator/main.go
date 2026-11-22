@@ -74,11 +74,17 @@ func run() error {
 		return fmt.Errorf("connecting to Temporal: %w", err)
 	}
 	defer c.Close()
+	nc, js, err := connectNATS()
+	if err != nil {
+		return fmt.Errorf("connecting to JetStream: %w", err)
+	}
+	defer nc.Close()
 	w := worker.New(c, pipeline.TaskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(pipeline.Pipeline, workflow.RegisterOptions{Name: pipeline.WorkflowName})
 	w.RegisterWorkflowWithOptions(pipeline.Team, workflow.RegisterOptions{Name: pipeline.TeamWorkflowName})
+	w.RegisterWorkflowWithOptions(pipeline.Recalculation, workflow.RegisterOptions{Name: pipeline.RecalculationWorkflowName})
 	agents := newAgentRegistry(blobs.Client)
-	w.RegisterActivity(&pipeline.Activities{Store: blobs, LoadDefinitions: func() ([]pipeline.Definition, error) {
+	w.RegisterActivity(&pipeline.Activities{Store: blobs, Conditional: blobs, EvaluationURL: envString("EVALUATION_URL", "http://evaluation:8080"), HTTPClient: blobs.Client, LoadDefinitions: func() ([]pipeline.Definition, error) {
 		cfg, err := workflows.snapshot()
 		return cfg.Workflows, err
 	}, DescribeAgent: agentDescriber(agents, logger), Connectors: pipeline.NewHTTPConnectorsFromEnv(blobs.Client)})
@@ -91,6 +97,9 @@ func run() error {
 	httpServer := &http.Server{Addr: *addr, Handler: otelhttp.NewHandler(s.routes(), "orchestrator.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	events := &eventService{temporal: c, store: blobs, js: js, interval: 5 * time.Second, log: logger, http: blobs.Client, evaluationURL: envString("EVALUATION_URL", "http://evaluation:8080")}
+	s.events = events
+	go events.run(ctx)
 	result := make(chan error, 1)
 	go func() {
 		logger.Info("orchestrator listening", "address", httpServer.Addr)
@@ -114,12 +123,31 @@ type temporalRunner struct{ c client.Client }
 // Start uses the trace ID as the Temporal workflow ID, so each run is
 // addressable by its trace ID in the API and the Temporal UI.
 func (r temporalRunner) Start(ctx context.Context, in pipeline.Input) error {
-	_, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	_, err := r.StartExecution(ctx, in)
+	return err
+}
+
+type executionStarter interface {
+	StartExecution(context.Context, pipeline.Input) (string, error)
+}
+
+func (r temporalRunner) StartExecution(ctx context.Context, in pipeline.Input) (string, error) {
+	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        in.TraceID,
 		TaskQueue: pipeline.TaskQueue,
-		Memo:      map[string]any{"workflow": in.Definition.Name, "trace_id": in.TraceID},
+		Memo:      map[string]any{"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(in.Definition), "trace_id": in.TraceID, "artifact_prefix": in.Prefix},
 	}, pipeline.WorkflowName, in)
-	return err
+	if err != nil {
+		// A deadline or transport error can be ambiguous: Temporal may have accepted the
+		// deterministic workflow ID even though this client missed the response.
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if desc, describeErr := r.c.DescribeWorkflowExecution(checkCtx, in.TraceID, ""); describeErr == nil && desc.GetWorkflowExecutionInfo().GetExecution().GetRunId() != "" {
+			return desc.GetWorkflowExecutionInfo().GetExecution().GetRunId(), nil
+		}
+		return "", err
+	}
+	return run.GetRunID(), nil
 }
 
 func (r temporalRunner) Status(ctx context.Context, traceID string) (RunStatus, error) {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -27,12 +28,17 @@ import (
 
 // StepRequest is the activity input every service receives.
 type StepRequest struct {
-	TraceID        string      `json:"trace_id"`
-	Workflow       string      `json:"workflow"`
-	StepID         string      `json:"step_id"`
-	Agent          string      `json:"agent,omitempty"`
-	Inputs         []InputItem `json:"inputs"`
-	OutputArtifact string      `json:"output_artifact"`
+	TraceID           string      `json:"trace_id"`
+	Workflow          string      `json:"workflow"`
+	StepID            string      `json:"step_id"`
+	Agent             string      `json:"agent,omitempty"`
+	Inputs            []InputItem `json:"inputs"`
+	OutputArtifact    string      `json:"output_artifact"`
+	ProducerRunID     string      `json:"producer_run_id,omitempty"`
+	TargetRunID       string      `json:"target_run_id,omitempty"`
+	TargetExecutionID string      `json:"target_execution_id,omitempty"`
+	ExecutionID       string      `json:"execution_id,omitempty"`
+	ParentExecutionID string      `json:"parent_execution_id,omitempty"`
 	// DevPod is the run's dev pod; empty when the run has none.
 	DevPod string `json:"dev_pod,omitempty"`
 }
@@ -72,7 +78,8 @@ type Definition struct {
 	UnpackInputs *bool `json:"unpack_inputs"`
 	// Commands lists the command patterns the agent may run in a dev pod. The connector service
 	// enforces them; here they are only named in the dev pod note.
-	Commands []string `json:"commands,omitempty"`
+	Commands       []string        `json:"commands,omitempty"`
+	OutputContract *OutputContract `json:"output_contract,omitempty"`
 }
 
 // noThinking is the assistant turn that tells a thinking model its thinking is already over.
@@ -88,36 +95,46 @@ const maxAnswerTokens = 6000
 // effort "none" the model is asked not to think first: no reasoning_effort is sent and the
 // conversation ends with an empty thinking block.
 func (d Definition) chatRequest(messages, tools []any) chatRequest {
+	var responseFormat map[string]string
+	if d.OutputContract != nil {
+		responseFormat = map[string]string{"type": "json_object"}
+	}
 	if d.Effort == "none" {
 		ended := append(append(make([]any, 0, len(messages)+1), messages...), map[string]string{"role": "assistant", "content": noThinking})
-		return chatRequest{Model: d.Models[0], Messages: ended, Tools: tools, Temperature: d.Temperature, MaxTokens: maxAnswerTokens}
+		return chatRequest{Model: d.Models[0], Messages: ended, Tools: tools, Temperature: d.Temperature, ResponseFormat: responseFormat, MaxTokens: maxAnswerTokens}
 	}
-	return chatRequest{Model: d.Models[0], Messages: messages, Tools: tools, ReasoningEffort: d.Effort, Temperature: d.Temperature, MaxTokens: maxAnswerTokens}
+	return chatRequest{Model: d.Models[0], Messages: messages, Tools: tools, ReasoningEffort: d.Effort, Temperature: d.Temperature, ResponseFormat: responseFormat, MaxTokens: maxAnswerTokens}
 }
 
 // RunRecord is stored next to the output artifact as <artifact>.run.json.
 type RunRecord struct {
-	Agent                 string          `json:"agent"`
-	Model                 string          `json:"model"`
-	Effort                string          `json:"effort,omitempty"`
-	Temperature           *float64        `json:"temperature,omitempty"`
-	Started               time.Time       `json:"started"`
-	Finished              time.Time       `json:"finished"`
-	ModelCalls            int             `json:"model_calls"`
-	Messages              []any           `json:"messages"`
-	Usage                 *usage          `json:"usage,omitempty"`
-	EstimatedInputTokens  *int64          `json:"estimated_input_tokens,omitempty"`
-	EstimatedOutputTokens *int64          `json:"estimated_output_tokens,omitempty"`
-	ProcessingTimeMS      *int64          `json:"processing_time_ms,omitempty"`
-	EstimationMethod      string          `json:"estimation_method,omitempty"`
-	Status                string          `json:"status,omitempty"`
-	Error                 string          `json:"error,omitempty"`
-	Attempt               int32           `json:"attempt,omitempty"`
-	Events                []RunEvent      `json:"events,omitempty"`
-	TraceID               string          `json:"trace_id,omitempty"`
-	SpanID                string          `json:"span_id,omitempty"`
-	RunID                 string          `json:"run_id,omitempty"`
-	PromptEvidence        *PromptEvidence `json:"prompt_evidence,omitempty"`
+	Agent                 string            `json:"agent"`
+	Model                 string            `json:"model"`
+	Effort                string            `json:"effort,omitempty"`
+	Temperature           *float64          `json:"temperature,omitempty"`
+	Started               time.Time         `json:"started"`
+	Finished              time.Time         `json:"finished"`
+	ModelCalls            int               `json:"model_calls"`
+	Messages              []any             `json:"messages"`
+	Usage                 *usage            `json:"usage,omitempty"`
+	EstimatedInputTokens  *int64            `json:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens *int64            `json:"estimated_output_tokens,omitempty"`
+	ProcessingTimeMS      *int64            `json:"processing_time_ms,omitempty"`
+	EstimationMethod      string            `json:"estimation_method,omitempty"`
+	Status                string            `json:"status,omitempty"`
+	Error                 string            `json:"error,omitempty"`
+	Attempt               int32             `json:"attempt,omitempty"`
+	Events                []RunEvent        `json:"events,omitempty"`
+	TraceID               string            `json:"trace_id,omitempty"`
+	SpanID                string            `json:"span_id,omitempty"`
+	RunID                 string            `json:"run_id,omitempty"`
+	ExecutionID           string            `json:"execution_id,omitempty"`
+	ParentExecutionID     string            `json:"parent_execution_id,omitempty"`
+	ActivityID            string            `json:"activity_id,omitempty"`
+	ActivityAttempt       int32             `json:"activity_attempt,omitempty"`
+	PromptEvidence        *PromptEvidence   `json:"prompt_evidence,omitempty"`
+	OutputValidation      string            `json:"output_validation,omitempty"`
+	ExtractionObligation  *extractionIntent `json:"extraction_obligation,omitempty"`
 }
 
 // PromptEvidence links the exact registry sources and immutable run snapshots used to build
@@ -160,9 +177,15 @@ type RunEvent struct {
 	Inputs                []string  `json:"input_artifacts,omitempty"`
 	Output                string    `json:"output_artifact,omitempty"`
 	Policies              []string  `json:"policies,omitempty"`
+	MeasurementID         string    `json:"measurement_id,omitempty"`
 }
 
-type correlation struct{ traceID, stepID, agentRef, traceparent string }
+type correlation struct {
+	traceID, stepID, agentRef, traceparent     string
+	executionID, parentExecutionID, activityID string
+	activityAttempt                            int32
+	turn                                       int
+}
 type correlationKey struct{}
 
 type categorizedError struct{ category, message string }
@@ -173,10 +196,27 @@ func (e categorizedError) ErrorCategory() string { return e.category }
 func withCorrelation(ctx context.Context, req StepRequest, ref string, attempt int32) context.Context {
 	sum := sha256.Sum256([]byte(req.TraceID + "\x00" + req.OutputArtifact + "\x00" + req.StepID + "\x00" + ref + "\x00" + strconv.Itoa(int(attempt))))
 	trace := sha256.Sum256([]byte(req.TraceID))
-	return context.WithValue(ctx, correlationKey{}, correlation{
+	c := correlation{
 		traceID: req.TraceID, stepID: req.StepID, agentRef: ref,
-		traceparent: fmt.Sprintf("00-%x-%x-01", trace[:16], sum[:8]),
-	})
+		traceparent:     fmt.Sprintf("00-%x-%x-01", trace[:16], sum[:8]),
+		activityAttempt: attempt,
+		executionID:     req.ExecutionID, parentExecutionID: req.ParentExecutionID,
+	}
+	if activity.IsActivity(ctx) {
+		info := activity.GetInfo(ctx)
+		c.executionID = info.WorkflowExecution.RunID
+		c.activityID = info.ActivityID
+	}
+	return context.WithValue(ctx, correlationKey{}, c)
+}
+
+func withModelTurn(ctx context.Context, turn int) context.Context {
+	c, ok := ctx.Value(correlationKey{}).(correlation)
+	if !ok {
+		return ctx
+	}
+	c.turn = turn
+	return context.WithValue(ctx, correlationKey{}, c)
 }
 
 func setCorrelationHeaders(req *http.Request) {
@@ -184,6 +224,19 @@ func setCorrelationHeaders(req *http.Request) {
 		req.Header.Set("X-Trace-Id", c.traceID)
 		req.Header.Set("X-Step-Id", c.stepID)
 		req.Header.Set("X-Agent-Ref", c.agentRef)
+		if c.executionID != "" {
+			req.Header.Set("X-Execution-Id", c.executionID)
+		}
+		if c.parentExecutionID != "" {
+			req.Header.Set("X-Parent-Execution-Id", c.parentExecutionID)
+		}
+		if c.activityID != "" {
+			req.Header.Set("X-Activity-Id", c.activityID)
+		}
+		req.Header.Set("X-Activity-Attempt", strconv.Itoa(int(c.activityAttempt)))
+		if c.turn > 0 {
+			req.Header.Set("X-Turn", strconv.Itoa(c.turn))
+		}
 		if req.Header.Get("Traceparent") == "" {
 			req.Header.Set("Traceparent", c.traceparent)
 		}
@@ -192,6 +245,15 @@ func setCorrelationHeaders(req *http.Request) {
 }
 
 func eventSpan(ctx context.Context, event RunEvent, spanName string, attrs ...attribute.KeyValue) (context.Context, RunEvent, trace.Span) {
+	if c, ok := ctx.Value(correlationKey{}).(correlation); ok {
+		attrs = append(attrs, attribute.String("factory.run_id", c.traceID))
+		if c.executionID != "" {
+			attrs = append(attrs, attribute.String("factory.execution_id", c.executionID))
+		}
+		if c.parentExecutionID != "" {
+			attrs = append(attrs, attribute.String("factory.parent_execution_id", c.parentExecutionID))
+		}
+	}
 	ctx, span := otel.Tracer("opensoftwarefactory/agent").Start(ctx, spanName, trace.WithAttributes(attrs...))
 	sc := span.SpanContext()
 	if sc.IsValid() {
@@ -274,6 +336,37 @@ func addEstimate(total **int64, value int64) {
 	**total += value
 }
 
+func addReported(total **int64, incomplete *bool, value *int64) {
+	if *incomplete {
+		return
+	}
+	if value == nil {
+		*total = nil
+		*incomplete = true
+		return
+	}
+	if *total == nil {
+		copied := *value
+		*total = &copied
+		return
+	}
+	**total += *value
+}
+
+func addUsage(total **usage, current *usage) {
+	if *total == nil {
+		*total = &usage{}
+	}
+	if current == nil {
+		current = &usage{}
+	}
+	addReported(&(*total).PromptTokens, &(*total).promptIncomplete, current.PromptTokens)
+	addReported(&(*total).CompletionTokens, &(*total).completionIncomplete, current.CompletionTokens)
+	addReported(&(*total).TotalTokens, &(*total).totalIncomplete, current.TotalTokens)
+	addReported(&(*total).CachedInputTokens, &(*total).cachedIncomplete, current.CachedInputTokens)
+	addReported(&(*total).ReasoningTokens, &(*total).reasoningIncomplete, current.ReasoningTokens)
+}
+
 // finalModelInputEstimate describes only the initial serialized request represented by the handoff.
 func finalModelInputEstimate(events []RunEvent) *int64 {
 	for _, event := range events {
@@ -286,13 +379,17 @@ func finalModelInputEstimate(events []RunEvent) *int64 {
 
 // Service runs pinned agent definitions as Temporal step activities.
 type Service struct {
-	Store             Store
-	RegistryURL       string
-	PolicyRegistryURL string
-	LLMURL            string
-	MCPGatewayURL     string
-	HTTP              *http.Client
-	Logger            *slog.Logger
+	Store                 Store
+	RegistryURL           string
+	PolicyRegistryURL     string
+	LLMURL                string
+	EvaluationURL         string
+	MCPGatewayURL         string
+	HTTP                  *http.Client
+	Logger                *slog.Logger
+	reconcileMu           sync.Mutex
+	reconcileDirs         []string
+	intentReconcileOffset int
 }
 
 var refPart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -323,22 +420,30 @@ func validName(name string) bool {
 
 // Process runs the step's agent and stores its final answer and run record.
 func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResult, retErr error) {
+	executionID := req.ExecutionID
+	if activity.IsActivity(ctx) {
+		executionID = activity.GetInfo(ctx).WorkflowExecution.RunID
+	}
 	ctx, processSpan := otel.Tracer("opensoftwarefactory/agent").Start(ctx, "agent.process",
-		trace.WithAttributes(attribute.String("factory.run_id", req.TraceID), attribute.String("factory.step", req.StepID), attribute.String("factory.agent", req.Agent)))
+		trace.WithAttributes(attribute.String("factory.run_id", req.TraceID), attribute.String("factory.execution_id", executionID), attribute.String("factory.parent_execution_id", req.ParentExecutionID), attribute.String("factory.step", req.StepID), attribute.String("factory.agent", req.Agent)))
 	defer processSpan.End()
 	started := time.Now().UTC()
 	attempt := attemptOf(ctx)
 	record := RunRecord{Agent: req.Agent, Started: started, Attempt: attempt, Status: "running", Messages: []any{}, RunID: req.TraceID}
+	record.ExecutionID, record.ParentExecutionID, record.ActivityAttempt = executionID, req.ParentExecutionID, attempt
+	if activity.IsActivity(ctx) {
+		record.ActivityID = activity.GetInfo(ctx).ActivityID
+	}
 	ctx = withCorrelation(ctx, req, req.Agent, attempt)
-	initial := ctx.Value(correlationKey{}).(correlation)
-	initialParts := strings.Split(initial.traceparent, "-")
-	record.TraceID, record.SpanID = initialParts[1], initialParts[2]
 	if sc := processSpan.SpanContext(); sc.IsValid() {
 		record.TraceID, record.SpanID = sc.TraceID().String(), sc.SpanID().String()
 	}
 	meta := Meta{Creator: "agent:" + req.Agent, TraceID: req.TraceID}
 	log := s.Logger.With("run_id", req.TraceID, "step", req.StepID, "agent", req.Agent,
 		"attempt", attempt, "trace_id", record.TraceID, "span_id", record.SpanID)
+	if previous, ok := s.resumeCompletedExtraction(ctx, req, log); ok {
+		return previous, nil
+	}
 	if err := s.persistRunRecord(record, req.OutputArtifact, meta); err != nil {
 		return StepResult{}, fmt.Errorf("persisting agent start checkpoint: %w", err)
 	}
@@ -491,6 +596,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	}
 	record.Messages = messages
 	var total *usage
+	anyReportedUsage := false
 	calls := 0
 	answer := ""
 	done := false
@@ -506,7 +612,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
 			return StepResult{}, err
 		}
-		c, err := chat(eventCtx, s.HTTP, s.LLMURL, modelRequest)
+		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, modelRequest)
 		addEstimate(&record.EstimatedInputTokens, inputEstimate)
 		record.EstimationMethod = tokenEstimationMethod
 		if err != nil {
@@ -518,13 +624,10 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 			return StepResult{}, err
 		}
 		record.Events[len(record.Events)-1] = finishEventSpan(event, eventTrace, "completed", nil)
+		record.Events[len(record.Events)-1].MeasurementID = c.MeasurementID
+		addUsage(&total, c.Usage)
 		if c.Usage != nil {
-			if total == nil {
-				total = &usage{}
-			}
-			total.PromptTokens += c.Usage.PromptTokens
-			total.CompletionTokens += c.Usage.CompletionTokens
-			total.TotalTokens += c.Usage.TotalTokens
+			anyReportedUsage = true
 			record.Events[len(record.Events)-1].Usage = c.Usage
 		}
 		outputEstimate := estimateTokens(string(c.Message))
@@ -538,7 +641,10 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 			"estimated_input_tokens", inputEstimate, "estimated_output_tokens", outputEstimate,
 			"estimation_method", tokenEstimationMethod, "processing_time_ms", processingMS)
 		messages = append(messages, c.Message)
-		record.Messages, record.ModelCalls, record.Usage = messages, calls, total
+		record.Messages, record.ModelCalls = messages, calls
+		if anyReportedUsage {
+			record.Usage = total
+		}
 		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
 			return StepResult{}, err
 		}
@@ -623,10 +729,43 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	if err := s.Store.Put(ctx, req.OutputArtifact, []byte(answer), meta); err != nil {
 		return StepResult{}, fmt.Errorf("writing artifact %q: %w", req.OutputArtifact, err)
 	}
+	if def.OutputContract != nil {
+		record.OutputValidation = validateOutput(answer, *def.OutputContract)
+		record.ExtractionObligation = makeExtractionIntent(req, ref, *def.OutputContract, record.OutputValidation)
+		if record.ExtractionObligation == nil {
+			log.Warn("judge extraction not submitted", "reason", "target identity missing")
+		} else {
+			if err := s.persistRunRecord(record, req.OutputArtifact, meta); err != nil {
+				log.Error("persisting extraction obligation in run record failed", "error", err)
+			}
+			s.deliverExtraction(ctx, record.ExtractionObligation, req.TraceID, log)
+		}
+	}
 	log.Info("agent finished", "model_calls", calls, "artifact", req.OutputArtifact,
 		"estimated_input_tokens", meta.EstimatedInputTokens, "estimated_output_tokens", meta.EstimatedOutputTokens,
 		"estimation_method", meta.EstimationMethod, "processing_time_ms", meta.ProcessingTimeMS)
 	return StepResult{Artifact: req.OutputArtifact, Blocked: blocked}, nil
+}
+
+func (s *Service) resumeCompletedExtraction(ctx context.Context, req StepRequest, log *slog.Logger) (StepResult, bool) {
+	data, err := s.Store.Get(ctx, req.OutputArtifact+".run.json")
+	if err != nil {
+		return StepResult{}, false
+	}
+	var previous RunRecord
+	if json.Unmarshal(data, &previous) != nil || previous.Status != "completed" || previous.ExtractionObligation == nil {
+		return StepResult{}, false
+	}
+	if _, err := s.Store.Get(ctx, req.OutputArtifact); err != nil {
+		return StepResult{}, false
+	}
+	if previous.ExtractionObligation.Status == "delivered" {
+		return StepResult{Artifact: req.OutputArtifact}, true
+	}
+	log.Info("resuming durable extraction without rerunning agent", "artifact", req.OutputArtifact)
+	s.deliverExtraction(ctx, previous.ExtractionObligation, req.TraceID, log)
+	_ = s.persistRunRecord(previous, req.OutputArtifact, Meta{Creator: "agent:" + previous.Agent, TraceID: req.TraceID})
+	return StepResult{Artifact: req.OutputArtifact}, true
 }
 
 // checkpointRunRecord makes an in-flight operation and the conversation leading to it durable.

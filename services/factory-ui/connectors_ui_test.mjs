@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-// The Connectors page and the dev pod view (docs/plans/dev-pods.md): the adapters that read
+// The Connectors page and the dev pod view: the adapters that read
 // the connector service's answers, and the page running against a small stand-in for the DOM
 // and for the helpers of app.js.
 

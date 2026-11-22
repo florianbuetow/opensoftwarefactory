@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -21,6 +22,9 @@ const (
 	CompleteSessionActivity = "CompleteSession"
 	// FinishRunActivity completes the metadata of a top-level run.
 	FinishRunActivity = "FinishRun"
+	// InitializeIntakeActivity atomically claims an accepted event before any graph node.
+	InitializeIntakeActivity    = "InitializeIntake"
+	RecordExecutionOpenActivity = "RecordExecutionOpen"
 )
 
 // Run statuses recorded in a run's metadata.
@@ -82,6 +86,10 @@ func (a *Activities) FinishRun(ctx context.Context, req FinishRunRequest) error 
 // and complete the sessions of interactive steps.
 type Activities struct {
 	Store Store
+	// Conditional is injected separately so the legacy Store contract remains unchanged.
+	Conditional   ConditionalStore
+	EvaluationURL string
+	HTTPClient    *http.Client
 	// LoadDefinitions returns every stored version of the configured workflows.
 	LoadDefinitions func() ([]Definition, error)
 	// DescribeAgent returns the description of a pinned agent for team.json, or "" when it
@@ -90,6 +98,157 @@ type Activities struct {
 	// Connectors is the connector service, which owns the dev pods. It may be nil for an
 	// orchestrator whose workflows use none.
 	Connectors Connectors
+}
+
+type IntakeReceipt struct {
+	SchemaVersion   int        `json:"schema_version"`
+	BindingID       string     `json:"binding_id"`
+	BindingRevision string     `json:"binding_revision"`
+	EventID         string     `json:"event_id"`
+	TraceID         string     `json:"trace_id"`
+	ExecutionID     string     `json:"execution_id"`
+	Workflow        string     `json:"workflow"`
+	WorkflowVersion int        `json:"workflow_version"`
+	CreatedAt       time.Time  `json:"created_at"`
+	AcceptanceHash  string     `json:"acceptance_hash"`
+	Phase           string     `json:"phase"`
+	InitializedAt   *time.Time `json:"initialized_at,omitempty"`
+	TakenOverFrom   string     `json:"taken_over_from,omitempty"`
+}
+
+type InitializeIntakeRequest struct {
+	TraceID     string      `json:"trace_id"`
+	ExecutionID string      `json:"execution_id"`
+	Prefix      string      `json:"prefix"`
+	Definition  Definition  `json:"definition"`
+	Intake      IntakeInput `json:"intake"`
+}
+
+type InitializeIntakeResult struct {
+	Proceed bool `json:"proceed"`
+}
+
+type ExecutionOpenRecord struct {
+	WorkflowID        string    `json:"workflow_id"`
+	ExecutionID       string    `json:"execution_id"`
+	RunID             string    `json:"run_id"`
+	Workflow          string    `json:"workflow"`
+	WorkflowVersion   int       `json:"workflow_version"`
+	ArtifactPrefix    string    `json:"artifact_prefix"`
+	ParentExecutionID string    `json:"parent_execution_id,omitempty"`
+	AcceptedAt        time.Time `json:"accepted_at"`
+}
+
+func (a *Activities) RecordExecutionOpen(ctx context.Context, record ExecutionOpenRecord) error {
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = a.Store.Put(ctx, "workflow-events-open/"+record.ExecutionID+".json", data, Meta{Creator: sessionCreator}); err != nil {
+		return fmt.Errorf("persisting execution lifecycle obligation: %w", err)
+	}
+	return nil
+}
+
+// InitializeIntake creates the durable receipt first. A retry by the same Temporal run is
+// allowed; a different run exits without executing graph nodes. The immutable event payload
+// is persisted only by the receipt owner.
+func (a *Activities) InitializeIntake(ctx context.Context, req InitializeIntakeRequest) (InitializeIntakeResult, error) {
+	if a.Conditional == nil {
+		return InitializeIntakeResult{}, temporal.NewNonRetryableApplicationError("conditional artifact storage is unavailable", "ConditionalStoreUnavailable", nil)
+	}
+	expectedHash, hashErr := IntakeAcceptanceHash(req.Definition, req.Intake)
+	if hashErr != nil || req.Intake.AcceptanceHash == "" || expectedHash != req.Intake.AcceptanceHash {
+		return InitializeIntakeResult{}, temporal.NewNonRetryableApplicationError("intake acceptance hash does not match the pinned configuration", "IntakeAcceptanceHashMismatch", hashErr)
+	}
+	receiptID := "intake-receipts/" + req.TraceID + ".json"
+	receipt := IntakeReceipt{SchemaVersion: 1, BindingID: req.Intake.BindingID, BindingRevision: req.Intake.BindingRevision,
+		EventID: req.Intake.EventID, TraceID: req.TraceID, ExecutionID: req.ExecutionID,
+		Workflow: req.Definition.Name, WorkflowVersion: DefinitionVersion(req.Definition), CreatedAt: time.Now().UTC(), AcceptanceHash: req.Intake.AcceptanceHash, Phase: "claimed"}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return InitializeIntakeResult{}, err
+	}
+	revision, err := a.Conditional.PutIfAbsent(ctx, receiptID, data, Meta{Creator: sessionCreator})
+	if errors.Is(err, ErrPreconditionFailed) {
+		current, currentRevision, readErr := a.Conditional.GetWithRevision(ctx, receiptID)
+		if readErr != nil {
+			return InitializeIntakeResult{}, readErr
+		}
+		var existing IntakeReceipt
+		if json.Unmarshal(current, &existing) != nil || existing.AcceptanceHash == "" || existing.AcceptanceHash != receipt.AcceptanceHash || existing.BindingID != receipt.BindingID || existing.EventID != receipt.EventID || existing.TraceID != receipt.TraceID {
+			return InitializeIntakeResult{}, temporal.NewNonRetryableApplicationError("intake receipt conflicts with accepted payload", "IntakeReceiptConflict", nil)
+		}
+		if existing.Phase == "initialized" {
+			return InitializeIntakeResult{Proceed: existing.ExecutionID == req.ExecutionID}, nil
+		}
+		if existing.Phase != "claimed" {
+			return InitializeIntakeResult{}, temporal.NewNonRetryableApplicationError("intake receipt has an invalid phase", "InvalidIntakeReceipt", nil)
+		}
+		if existing.ExecutionID != req.ExecutionID {
+			receipt.TakenOverFrom = existing.ExecutionID
+			receipt.CreatedAt = existing.CreatedAt
+		}
+		revision, err = a.Conditional.PutIfMatch(ctx, receiptID, dataForReceipt(receipt), Meta{Creator: sessionCreator}, currentRevision)
+		if errors.Is(err, ErrPreconditionFailed) {
+			return InitializeIntakeResult{}, errors.New("intake receipt changed during takeover")
+		}
+		if err != nil {
+			return InitializeIntakeResult{}, err
+		}
+		err = nil
+	}
+	if err != nil {
+		return InitializeIntakeResult{}, err
+	}
+	prefix := req.Prefix
+	if prefix == "" {
+		prefix = RunPrefix(req.TraceID)
+	}
+	if err := a.Store.Put(ctx, ArtifactID(prefix, InputSource), req.Intake.Event, Meta{Creator: sessionCreator, TraceID: req.TraceID}); err != nil {
+		return InitializeIntakeResult{}, fmt.Errorf("persisting intake input: %w", err)
+	}
+	runRecord := struct {
+		TraceID         string    `json:"trace_id"`
+		ExecutionID     string    `json:"execution_id"`
+		Workflow        string    `json:"workflow"`
+		WorkflowVersion int       `json:"workflow_version"`
+		Started         time.Time `json:"started"`
+		StartedBy       string    `json:"started_by"`
+		InputArtifact   string    `json:"input_artifact"`
+		Source          string    `json:"source"`
+	}{req.TraceID, req.ExecutionID, req.Definition.Name, DefinitionVersion(req.Definition), time.Now().UTC(), sessionCreator, ArtifactID(prefix, InputSource), "factory-event:" + req.Intake.EventID}
+	runData, _ := json.MarshalIndent(runRecord, "", "  ")
+	if err := a.Store.Put(ctx, ArtifactID(prefix, "run.json"), runData, Meta{Creator: sessionCreator, TraceID: req.TraceID}); err != nil {
+		return InitializeIntakeResult{}, fmt.Errorf("persisting intake run record: %w", err)
+	}
+	metadata := struct {
+		SchemaVersion int            `json:"schema_version"`
+		RunID         string         `json:"run_id"`
+		ExecutionID   string         `json:"execution_id"`
+		Workflow      map[string]any `json:"workflow"`
+		Workflows     []any          `json:"workflows"`
+		Started       string         `json:"started"`
+		StartedBy     string         `json:"started_by"`
+		InputArtifact string         `json:"input_artifact"`
+		Agents        map[string]any `json:"agents"`
+	}{1, req.TraceID, req.ExecutionID, map[string]any{"name": req.Definition.Name, "version": DefinitionVersion(req.Definition)}, []any{}, runRecord.Started.Format(time.RFC3339), sessionCreator, ArtifactID(prefix, InputSource), map[string]any{}}
+	metadataData, _ := json.MarshalIndent(metadata, "", "  ")
+	if err := a.Store.Put(ctx, ArtifactID(prefix, MetadataFile), metadataData, Meta{Creator: sessionCreator, TraceID: req.TraceID}); err != nil {
+		return InitializeIntakeResult{}, fmt.Errorf("persisting intake metadata: %w", err)
+	}
+	now := time.Now().UTC()
+	receipt.Phase = "initialized"
+	receipt.InitializedAt = &now
+	if _, err = a.Conditional.PutIfMatch(ctx, receiptID, dataForReceipt(receipt), Meta{Creator: sessionCreator}, revision); err != nil {
+		return InitializeIntakeResult{}, fmt.Errorf("committing intake receipt initialization: %w", err)
+	}
+	return InitializeIntakeResult{Proceed: true}, nil
+}
+
+func dataForReceipt(receipt IntakeReceipt) []byte {
+	data, _ := json.MarshalIndent(receipt, "", "  ")
+	return data
 }
 
 // DecisionRecord is stored as the artifact of a gate step.

@@ -6,6 +6,8 @@ metadata:
     app.kubernetes.io/name: evaluation
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: evaluation
@@ -26,12 +28,24 @@ spec:
           image: opensoftwarefactory-evaluation:local
           imagePullPolicy: Never
           env:
+            - name: EVALUATION_LOCK_PATH
+              value: /state/writer.lock
+            - name: OPENOBSERVE_URL
+              value: http://openobserve:5080
+            - name: OPENOBSERVE_CONFIG
+              value: /openobserve/config/openobserve.env
             - name: BLOBSTORE_URL
               value: http://blobstore:8080
             - name: ORCHESTRATOR_URL
               value: http://orchestrator:8080
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: observe-config
+              mountPath: /openobserve/config
+              readOnly: true
           ports:
             - name: http
               containerPort: 8080
@@ -48,3 +62,12 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/lib/opensoftwarefactory/evaluation
+            type: Directory
+        - name: observe-config
+          hostPath:
+            path: /openobserve/config
+            type: Directory

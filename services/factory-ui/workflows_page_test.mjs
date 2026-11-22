@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 // The Workflows page runs here against a small stand-in for the DOM and for the helpers of
-// app.js, with the orchestrator answering as docs/plans/workflow-versions.md says. It covers
+// app.js, with the orchestrator answering versioned workflow requests. It covers
 // what the logic tests cannot: that the page code loads, saves versions, switches between
 // them, and asks before unsaved edits are lost.
 
@@ -816,7 +816,7 @@ test("a team's workflow member is pinned, named by its workflow, and can move to
   assert.equal(ui.context.location.hash, "#workflows/inner/write?path=crew");
 });
 
-// ---- Merge and batch nodes (docs/plans/merge-batch.md) ----
+// ---- Merge and batch nodes ----
 
 // fan adds a workflow with a merge, a batch, and a route step after the merge.
 function fan(ui) {
@@ -937,7 +937,7 @@ test("a step that changes its kind to or from merge and batch drops the fields o
   assert.deepEqual(stored.find((s) => s.id === "collect"), { id: "collect", service: "agent", depends_on: ["a", "b"], position: { x: 0, y: 176 } });
 });
 
-// ---- Dev pod, command and stop nodes, and a gate's back edge (docs/plans/dev-pods.md) ----
+// ---- Dev pod, command and stop nodes, and a gate's back edge ----
 
 // ship adds a workflow that works in a dev pod: pod, build, verify, review, stop, top to bottom.
 function ship(ui) {

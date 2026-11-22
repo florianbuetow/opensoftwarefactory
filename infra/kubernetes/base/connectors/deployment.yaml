@@ -29,7 +29,14 @@ spec:
         - name: connectors
           image: opensoftwarefactory-connectors:local
           imagePullPolicy: Never
+          envFrom:
+            - secretRef:
+                name: factory-events-consumer
           env:
+            - name: NATS_URL
+              value: nats://jetstream:4222
+            - name: CONNECTOR_SEED_FILE
+              value: /seed-root/current/connectors/repositories.json
             - name: BLOBSTORE_URL
               value: http://blobstore:8080
             - name: AGENT_REGISTRY_URL
@@ -42,6 +49,10 @@ spec:
               value: opensoftwarefactory-devpod:local
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
+          volumeMounts:
+            - name: local-seeds
+              mountPath: /seed-root
+              readOnly: true
           ports:
             - name: http
               containerPort: 8080
@@ -58,3 +69,8 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: local-seeds
+          hostPath:
+            path: /var/lib/opensoftwarefactory/seeds
+            type: Directory

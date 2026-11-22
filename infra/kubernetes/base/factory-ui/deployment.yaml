@@ -27,6 +27,8 @@ spec:
           image: opensoftwarefactory-factory-ui:local
           imagePullPolicy: Never
           env:
+            - name: FACTORY_SEED_DIR
+              value: /seed-root/current/factory-ui
             - name: ORCHESTRATOR_URL
               value: http://orchestrator:8080
             - name: AGENT_REGISTRY_URL
@@ -86,10 +88,17 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: local-seeds
+              mountPath: /seed-root
+              readOnly: true
             - name: openobserve-config
               mountPath: /openobserve/config
               readOnly: true
       volumes:
+        - name: local-seeds
+          hostPath:
+            path: /var/lib/opensoftwarefactory/seeds
+            type: Directory
         - name: openobserve-config
           hostPath:
             path: /openobserve/config

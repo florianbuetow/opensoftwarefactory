@@ -77,6 +77,31 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, "/list/") {
+			prefix := strings.TrimPrefix(r.URL.Path, "/list/") + "/"
+			objects := []map[string]string{}
+			dirset := map[string]bool{}
+			for id := range f.blobs {
+				if strings.HasPrefix(id, prefix) {
+					rest := strings.TrimPrefix(id, prefix)
+					if strings.Contains(rest, "/") {
+						dirset[strings.SplitN(rest, "/", 2)[0]] = true
+					} else {
+						objects = append(objects, map[string]string{"id": id})
+					}
+				}
+			}
+			dirs := []string{}
+			for dir := range dirset {
+				dirs = append(dirs, dir)
+			}
+			if len(objects) == 0 && len(dirs) == 0 {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"objects": objects, "directories": dirs})
+			return
+		}
 		id := strings.TrimPrefix(r.URL.Path, "/blobs/")
 		switch r.Method {
 		case http.MethodGet:
@@ -92,6 +117,9 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 			f.putMeta[id] = [2]string{r.Header.Get("X-Creator"), r.Header.Get("X-Trace-Id")}
 			f.putMetricHeaders[id] = r.Header.Clone()
 			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			delete(f.blobs, id)
+			w.WriteHeader(http.StatusNoContent)
 		}
 	}))
 	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +409,7 @@ func TestProcessHappyPathWithToolCall(t *testing.T) {
 	if rec.Agent != "intake@v1" || rec.Model != "m1" || rec.Effort != "high" || rec.ModelCalls != 2 || len(rec.Messages) != 5 {
 		t.Fatalf("run record = %+v", rec)
 	}
-	if rec.Usage != (usage{PromptTokens: 30, CompletionTokens: 12, TotalTokens: 42}) {
+	if valueOf(rec.Usage.PromptTokens) != 30 || valueOf(rec.Usage.CompletionTokens) != 12 || valueOf(rec.Usage.TotalTokens) != 42 {
 		t.Fatalf("usage = %+v", rec.Usage)
 	}
 	if rec.Events[1].EstimatedInputTokens == nil || rec.Events[1].EstimatedOutputTokens == nil || rec.Events[1].ProcessingTimeMS == nil || rec.Events[2].EstimatedInputTokens == nil || rec.Events[2].EstimatedOutputTokens == nil || rec.Events[2].ProcessingTimeMS == nil || rec.Events[3].EstimatedOutputTokens == nil {
@@ -396,7 +424,7 @@ func TestProcessHappyPathWithToolCall(t *testing.T) {
 	if artifactHeaders.Get("X-Estimated-Input-Tokens") != strconv.FormatInt(*rec.Events[1].EstimatedInputTokens, 10) {
 		t.Fatalf("artifact initial request estimate = %q, want %d", artifactHeaders.Get("X-Estimated-Input-Tokens"), *rec.Events[1].EstimatedInputTokens)
 	}
-	if rec.Status != "completed" || rec.Attempt != 1 || len(rec.TraceID) != 32 || len(rec.SpanID) != 16 || len(rec.Events) != 4 {
+	if rec.Status != "completed" || rec.Attempt != 1 || rec.TraceID != "" || rec.SpanID != "" || len(rec.Events) != 4 {
 		t.Fatalf("record observability = status %q attempt %d trace/span %q/%q events %+v", rec.Status, rec.Attempt, rec.TraceID, rec.SpanID, rec.Events)
 	}
 	if _, ok := f.blobs["runs/t1/plan.attempt-1.run.json"]; !ok {
@@ -656,6 +684,18 @@ func TestCorrelationSpanDistinguishesNestedStepsWithSameID(t *testing.T) {
 	}
 	if strings.Split(one.traceparent, "-")[2] == strings.Split(two.traceparent, "-")[2] {
 		t.Fatal("nested steps with the same ID reused a span ID")
+	}
+}
+
+func TestCorrelationHeadersCarryExecutionActivityAndTurn(t *testing.T) {
+	req := request()
+	req.ExecutionID = "execution-1"
+	req.ParentExecutionID = "parent-1"
+	ctx := withModelTurn(withCorrelation(context.Background(), req, "judge@v3", 2), 4)
+	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.test", nil)
+	setCorrelationHeaders(httpReq)
+	if httpReq.Header.Get("X-Execution-Id") != "execution-1" || httpReq.Header.Get("X-Parent-Execution-Id") != "parent-1" || httpReq.Header.Get("X-Activity-Attempt") != "2" || httpReq.Header.Get("X-Turn") != "4" {
+		t.Fatalf("headers %v", httpReq.Header)
 	}
 }
 

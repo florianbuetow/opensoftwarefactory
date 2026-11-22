@@ -28,6 +28,8 @@ spec:
           image: opensoftwarefactory-git-host:local
           imagePullPolicy: Never
           env:
+            - name: SEED_DIR
+              value: /seed-root/current/git-host
             - name: PORT
               value: "8080"
             - name: GIT_HOST_DATA
@@ -62,11 +64,18 @@ spec:
               drop:
                 - ALL
           volumeMounts:
+            - name: local-seeds
+              mountPath: /seed-root
+              readOnly: true
             - name: data
               mountPath: /data
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: local-seeds
+          hostPath:
+            path: /var/lib/opensoftwarefactory/seeds
+            type: Directory
         - name: data
           emptyDir: {}
         - name: tmp

@@ -30,6 +30,8 @@ spec:
           image: opensoftwarefactory-registry:local
           imagePullPolicy: Never
           args:
+            - -seed
+            - /seed-root/current/registry/policies
             - -prefix
             - policies
             - -files
@@ -41,6 +43,10 @@ spec:
               value: http://telemetry-collector:4318/v1/traces
             - name: BLOBSTORE_URL
               value: http://blobstore:8080
+          volumeMounts:
+            - name: local-seeds
+              mountPath: /seed-root
+              readOnly: true
           ports:
             - name: http
               containerPort: 8080
@@ -70,3 +76,8 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: local-seeds
+          hostPath:
+            path: /var/lib/opensoftwarefactory/seeds
+            type: Directory

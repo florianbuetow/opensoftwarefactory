@@ -3,6 +3,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -122,10 +123,14 @@ type Definition struct {
 // run input, with InputSource as its source. Prefix is the artifact prefix
 // of this run's steps; it defaults to RunPrefix(TraceID).
 type Input struct {
-	TraceID    string     `json:"trace_id"`
-	Definition Definition `json:"definition"`
-	Inputs     []Item     `json:"inputs"`
-	Prefix     string     `json:"prefix,omitempty"`
+	TraceID string `json:"trace_id"`
+	// ExecutionID and ParentExecutionID distinguish this Temporal execution from the
+	// business run and its nested executions. Temporal fills ExecutionID for intake runs.
+	ExecutionID       string     `json:"execution_id,omitempty"`
+	ParentExecutionID string     `json:"parent_execution_id,omitempty"`
+	Definition        Definition `json:"definition"`
+	Inputs            []Item     `json:"inputs"`
+	Prefix            string     `json:"prefix,omitempty"`
 	// Depth counts the workflow steps and team members above this run; a top-level run has 0.
 	Depth int `json:"depth,omitempty"`
 	// Run changes whenever the step that started this run runs again after a rejection, so
@@ -134,6 +139,19 @@ type Input struct {
 	// DevPod is the dev pod of the run that started this one; every step of a nested run
 	// works in it. It is nil for a top-level run, whose pod a devpod step creates.
 	DevPod *DevPod `json:"dev_pod,omitempty"`
+	// Intake is set only for automatically accepted factory events. Manual and legacy
+	// inputs leave it nil and replay the original command path.
+	Intake *IntakeInput `json:"intake,omitempty"`
+}
+
+// IntakeInput is the immutable trigger snapshot accepted by the orchestrator.
+type IntakeInput struct {
+	BindingID       string          `json:"binding_id"`
+	BindingRevision string          `json:"binding_revision"`
+	EventID         string          `json:"event_id"`
+	Event           json.RawMessage `json:"event"`
+	Binding         json.RawMessage `json:"binding"`
+	AcceptanceHash  string          `json:"acceptance_hash"`
 }
 
 // Result maps every step ID to the artifact it produced. Steps of a routed
@@ -155,13 +173,20 @@ type Result struct {
 // StepRequest is the activity input every service receives. DevPod is the ID of the run's
 // dev pod, empty when the step works without one.
 type StepRequest struct {
-	TraceID        string `json:"trace_id"`
-	Workflow       string `json:"workflow"`
-	StepID         string `json:"step_id"`
-	Agent          string `json:"agent,omitempty"`
-	Inputs         []Item `json:"inputs"`
-	OutputArtifact string `json:"output_artifact"`
-	DevPod         string `json:"dev_pod,omitempty"`
+	TraceID           string `json:"trace_id"`
+	ExecutionID       string `json:"execution_id,omitempty"`
+	ParentExecutionID string `json:"parent_execution_id,omitempty"`
+	Workflow          string `json:"workflow"`
+	StepID            string `json:"step_id"`
+	Agent             string `json:"agent,omitempty"`
+	Inputs            []Item `json:"inputs"`
+	OutputArtifact    string `json:"output_artifact"`
+	DevPod            string `json:"dev_pod,omitempty"`
+	ProducerRunID     string `json:"producer_run_id,omitempty"`
+	TargetRunID       string `json:"target_run_id,omitempty"`
+	TargetExecutionID string `json:"target_execution_id,omitempty"`
+	MappingVersion    string `json:"mapping_version,omitempty"`
+	BindingRevision   string `json:"binding_revision,omitempty"`
 }
 
 // StepResult is the activity output every service returns: the artifact the step wrote. The
@@ -313,6 +338,40 @@ func (s Step) StartToClose() (time.Duration, error) {
 // and forward them as one message; the steps after them run once per message.
 // A top-level run records how it ended in its metadata.
 func Pipeline(ctx workflow.Context, in Input) (Result, error) {
+	version := workflow.GetVersion(ctx, "factory-measurements-v1", workflow.DefaultVersion, 1)
+	if version == 1 {
+		info := workflow.GetInfo(ctx)
+		in.ExecutionID = info.WorkflowExecution.RunID
+		if info.ParentWorkflowExecution != nil {
+			in.ParentExecutionID = info.ParentWorkflowExecution.RunID
+		}
+	}
+	if workflow.GetVersion(ctx, "factory-lifecycle-open-v1", workflow.DefaultVersion, 1) == 1 {
+		info := workflow.GetInfo(ctx)
+		prefix := in.Prefix
+		if prefix == "" {
+			prefix = RunPrefix(in.TraceID)
+		}
+		lifecycleCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: TaskQueue, StartToCloseTimeout: time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 0}})
+		if err := workflow.ExecuteActivity(lifecycleCtx, RecordExecutionOpenActivity, ExecutionOpenRecord{WorkflowID: info.WorkflowExecution.ID, ExecutionID: info.WorkflowExecution.RunID, RunID: in.TraceID, Workflow: in.Definition.Name, WorkflowVersion: DefinitionVersion(in.Definition), ArtifactPrefix: prefix, ParentExecutionID: in.ParentExecutionID, AcceptedAt: info.WorkflowStartTime}).Get(lifecycleCtx, nil); err != nil {
+			return Result{}, err
+		}
+	}
+	if version == 1 && in.Intake != nil && in.Depth == 0 {
+		var initialized InitializeIntakeResult
+		activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			TaskQueue: TaskQueue, StartToCloseTimeout: time.Minute,
+			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 0},
+		})
+		if err := workflow.ExecuteActivity(activityCtx, InitializeIntakeActivity, InitializeIntakeRequest{
+			TraceID: in.TraceID, ExecutionID: in.ExecutionID, Prefix: in.Prefix, Definition: in.Definition, Intake: *in.Intake,
+		}).Get(activityCtx, &initialized); err != nil {
+			return Result{}, err
+		}
+		if !initialized.Proceed {
+			return Result{TraceID: in.TraceID, Artifacts: map[string]string{}}, nil
+		}
+	}
 	var held *DevPod
 	res, err := runPipeline(ctx, in, &held)
 	if held != nil {
@@ -1051,6 +1110,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 					TraceID: in.TraceID, Name: s.Workflow, Inputs: stepInputs,
 					Prefix: output, Depth: in.Depth + 1, Run: run, DevPod: podOf(s.ID),
 					WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID + "/" + name,
+					Intake:     in.Intake,
 				})
 				selector.AddFuture(nested, func(f workflow.Future) {
 					pending--
@@ -1080,6 +1140,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				teamIn := TeamInput{
 					TraceID: in.TraceID, Workflow: in.Definition.Name, Step: s, Inputs: stepInputs, Prefix: in.Prefix,
 					Artifact: output, Team: team.Team, Depth: in.Depth, Run: run, Rejection: rejections[s.ID], DevPod: podOf(s.ID),
+					Intake: in.Intake,
 				}
 				delete(rejections, s.ID)
 				stepCtx, cancelStep := workflow.WithCancel(ctx)
@@ -1112,13 +1173,23 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				continue
 			}
 			req := StepRequest{
-				TraceID:        in.TraceID,
-				Workflow:       in.Definition.Name,
-				StepID:         s.ID,
-				Agent:          s.Agent,
-				Inputs:         stepInputs,
-				OutputArtifact: output,
-				DevPod:         podID(s.ID),
+				TraceID:           in.TraceID,
+				ExecutionID:       in.ExecutionID,
+				ParentExecutionID: in.ParentExecutionID,
+				Workflow:          in.Definition.Name,
+				StepID:            s.ID,
+				Agent:             s.Agent,
+				Inputs:            stepInputs,
+				OutputArtifact:    output,
+				DevPod:            podID(s.ID),
+			}
+			if in.Intake != nil {
+				var target struct {
+					RunID       string `json:"run_id"`
+					ExecutionID string `json:"execution_id"`
+				}
+				_ = json.Unmarshal(in.Intake.Event, &target)
+				req.ProducerRunID, req.TargetRunID, req.TargetExecutionID, req.BindingRevision = in.TraceID, target.RunID, target.ExecutionID, in.Intake.BindingRevision
 			}
 			timeout, _ := s.StartToClose()
 			attempts := s.MaxAttempts
@@ -1239,7 +1310,7 @@ func startRoute(ctx, ownCtx workflow.Context, in Input, name string, stepInputs 
 		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 			WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID + "/" + name,
 			TaskQueue:  TaskQueue,
-			Memo:       map[string]any{"workflow": routed.Definition.Name, "trace_id": in.TraceID},
+			Memo:       map[string]any{"workflow": routed.Definition.Name, "workflow_version": DefinitionVersion(routed.Definition), "trace_id": in.TraceID, "artifact_prefix": ArtifactID(in.Prefix, name)},
 			// A route that runs again waits until its cancelled earlier run has closed.
 			WaitForCancellation: true,
 		})
@@ -1252,6 +1323,7 @@ func startRoute(ctx, ownCtx workflow.Context, in Input, name string, stepInputs 
 			Depth:      in.Depth + 1,
 			Run:        run,
 			DevPod:     pod,
+			Intake:     in.Intake,
 		}).Get(ctx, &child)
 		setter.Set(child, err)
 	})

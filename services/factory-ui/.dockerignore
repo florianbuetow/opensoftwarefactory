@@ -1,1 +1,4 @@
 *_test.go
+
+# Locally compiled executable is not an image build input.
+factory-ui

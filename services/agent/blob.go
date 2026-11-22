@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,17 @@ type Meta struct {
 type Store interface {
 	Put(ctx context.Context, id string, data []byte, meta Meta) error
 	Get(ctx context.Context, id string) ([]byte, error)
+}
+
+type PrefixStore interface {
+	Store
+	List(ctx context.Context, prefix string) ([]string, error)
+	Delete(ctx context.Context, id string) error
+}
+
+type TreeStore interface {
+	PrefixStore
+	ListChildren(ctx context.Context, prefix string) (directories, objects []string, err error)
 }
 
 var segmentPattern = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
@@ -104,4 +116,54 @@ func (s HTTPStore) Put(ctx context.Context, id string, data []byte, meta Meta) e
 
 func (s HTTPStore) Get(ctx context.Context, id string) ([]byte, error) {
 	return s.do(ctx, http.MethodGet, id, nil, Meta{})
+}
+
+func (s HTTPStore) Delete(ctx context.Context, id string) error {
+	_, err := s.do(ctx, http.MethodDelete, id, nil, Meta{})
+	return err
+}
+
+func (s HTTPStore) List(ctx context.Context, prefix string) ([]string, error) {
+	_, objects, err := s.ListChildren(ctx, prefix)
+	return objects, err
+}
+
+func (s HTTPStore) ListChildren(ctx context.Context, prefix string) ([]string, []string, error) {
+	if !validID(prefix) {
+		return nil, nil, fmt.Errorf("invalid prefix %q", prefix)
+	}
+	root := strings.TrimSuffix(strings.TrimRight(s.BaseURL, "/"), "/blobs")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/list/"+prefix, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := s.Client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return []string{}, []string{}, nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, nil, fmt.Errorf("LIST %s: %s", prefix, resp.Status)
+	}
+	var listing struct {
+		Directories []string `json:"directories"`
+		Objects     []struct {
+			ID string `json:"id"`
+		} `json:"objects"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&listing); err != nil {
+		return nil, nil, err
+	}
+	ids := make([]string, 0, len(listing.Objects))
+	for _, object := range listing.Objects {
+		ids = append(ids, object.ID)
+	}
+	dirs := make([]string, 0, len(listing.Directories))
+	for _, dir := range listing.Directories {
+		dirs = append(dirs, prefix+"/"+dir)
+	}
+	return dirs, ids, nil
 }

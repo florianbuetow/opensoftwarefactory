@@ -6,6 +6,8 @@ metadata:
     app.kubernetes.io/name: llm-gateway
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: llm-gateway
@@ -31,6 +33,8 @@ spec:
             - -logs
             - /logs
           env:
+            - name: EVALUATION_URL
+              value: http://evaluation:8080
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
           ports:

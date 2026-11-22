@@ -43,6 +43,8 @@ type agentError struct {
 type RunMetadata struct {
 	SchemaVersion      int               `json:"schema_version"`
 	RunID              string            `json:"run_id"`
+	ExecutionID        string            `json:"execution_id,omitempty"`
+	ParentExecutionID  string            `json:"parent_execution_id,omitempty"`
 	DistributedTraceID string            `json:"distributed_trace_id,omitempty"`
 	Workflow           WorkflowVersion   `json:"workflow"`
 	Workflows          []WorkflowVersion `json:"workflows"`
@@ -60,7 +62,7 @@ type RunMetadata struct {
 // The workflow a route step starts is chosen during the run and is not listed.
 func (s *server) runMetadata(ctx context.Context, c Config, def pipeline.Definition, record RunRecord) RunMetadata {
 	meta := RunMetadata{
-		SchemaVersion: metadataSchemaVersion, RunID: record.TraceID, DistributedTraceID: record.DistributedTraceID,
+		SchemaVersion: metadataSchemaVersion, RunID: record.TraceID, ExecutionID: record.ExecutionID, ParentExecutionID: record.ParentExecutionID, DistributedTraceID: record.DistributedTraceID,
 		Workflow:  WorkflowVersion{Name: def.Name, Version: pipeline.DefinitionVersion(def)},
 		Workflows: []WorkflowVersion{}, Started: record.Started.Format(time.RFC3339), StartedBy: record.StartedBy,
 		InputArtifact: record.InputArtifact, Agents: map[string]any{},

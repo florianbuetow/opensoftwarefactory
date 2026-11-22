@@ -49,6 +49,11 @@ func (f *fakeRunner) Start(_ context.Context, in pipeline.Input) error {
 	return nil
 }
 
+func (f *fakeRunner) StartExecution(_ context.Context, in pipeline.Input) (string, error) {
+	f.started = append(f.started, in)
+	return "execution-" + in.TraceID, nil
+}
+
 func (f *fakeRunner) Status(_ context.Context, trace string) (RunStatus, error) {
 	for _, in := range f.started {
 		if in.TraceID == trace {

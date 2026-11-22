@@ -39,9 +39,14 @@ func diamond() Definition {
 	}}
 }
 
+func registerExecutionLifecycle(env *testsuite.TestWorkflowEnvironment) {
+	env.RegisterActivityWithOptions(func(context.Context, ExecutionOpenRecord) error { return nil }, activity.RegisterOptions{Name: RecordExecutionOpenActivity})
+}
+
 func TestPipelineHandsOutputsToDependents(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
+	registerExecutionLifecycle(env)
 	var mu sync.Mutex
 	seen := map[string]StepRequest{}
 	record := func(_ context.Context, req StepRequest) (StepResult, error) {
@@ -84,6 +89,7 @@ func TestPipelineHandsOutputsToDependents(t *testing.T) {
 func TestPipelineStopsOnStepFailure(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
+	registerExecutionLifecycle(env)
 	var mu sync.Mutex
 	joined := false
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
@@ -125,6 +131,7 @@ func TestPipelineRejectsInvalidDefinition(t *testing.T) {
 func TestAgentStepsCarryThePinnedAgent(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
+	registerExecutionLifecycle(env)
 	var got StepRequest
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
 		got = req

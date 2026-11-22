@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-// Merge and batch nodes (docs/plans/merge-batch.md): the editor logic, the one input shape
+// Merge and batch nodes: the editor logic, the one input shape
 // (an ordered list of items), and what Runs shows for a node and for the steps after it.
 
 const read = (name) => fs.readFileSync(new URL(`web/${name}`, import.meta.url), "utf8");

@@ -65,6 +65,7 @@ type TurnEvent struct {
 	EstimatedOutputTokens *int64    `json:"estimated_output_tokens,omitempty"`
 	EstimationMethod      string    `json:"estimation_method,omitempty"`
 	Error                 string    `json:"error,omitempty"`
+	MeasurementID         string    `json:"measurement_id,omitempty"`
 }
 
 // record stores a finished model or tool call.
@@ -351,7 +352,7 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 		inputEstimate := estimateJSONTokens(modelRequest)
 		modelEvent := TurnEvent{Kind: "model_call", Name: "chat completion", Model: def.Models[0], Turn: calls, Started: event.Started,
 			EstimatedInputTokens: &inputEstimate, EstimationMethod: tokenEstimationMethod}
-		c, err := chat(eventCtx, s.HTTP, s.LLMURL, modelRequest)
+		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, modelRequest)
 		if err != nil {
 			finishEventSpan(event, eventTrace, "failed", err)
 			history.record(modelEvent, "failed", err)
@@ -360,6 +361,7 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 		finishEventSpan(event, eventTrace, "completed", nil)
 		outputEstimate := estimateTokens(string(c.Message))
 		modelEvent.Usage, modelEvent.EstimatedOutputTokens = c.Usage, &outputEstimate
+		modelEvent.MeasurementID = c.MeasurementID
 		history.record(modelEvent, "completed", nil)
 		history.Messages = append(history.Messages, c.Message)
 		if len(c.ToolCalls) == 0 {

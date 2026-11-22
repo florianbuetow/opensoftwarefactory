@@ -34,7 +34,14 @@ try {
   console.log(`Kept existing ${path.relative(root, config)}`);
 }
 
-const values = Object.fromEntries((await readFile(config, "utf8"))
+// Apply the requested retained-history policy without changing credentials or other settings.
+let retainedConfig = await readFile(config, "utf8");
+for (const [key, value] of Object.entries({ ZO_COMPACT_DATA_RETENTION_DAYS: "0", ZO_INGEST_ALLOWED_UPTO: "100000000", ZO_MAX_FILE_RETENTION_TIME: "10", ZO_CALCULATE_STATS_INTERVAL: "10", ZO_USE_STREAM_SETTINGS_FOR_PARTITIONS_ENABLED: "false" })) {
+  const pattern = new RegExp(`^${key}=.*$`, "m");
+  retainedConfig = pattern.test(retainedConfig) ? retainedConfig.replace(pattern, `${key}=${value}`) : `${retainedConfig.trimEnd()}\n${key}=${value}\n`;
+}
+await writeFile(config, retainedConfig);
+const values = Object.fromEntries(retainedConfig
   .split(/\r?\n/)
   .filter((line) => line && !line.startsWith("#") && line.includes("="))
   .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));

@@ -24,6 +24,7 @@ type observabilityClient struct {
 	base, user, password                         string
 	collectorBase, tracingHealth, tracingMetrics string
 	retentionDays                                int
+	retentionKnown                               bool
 	http                                         *http.Client
 }
 
@@ -82,7 +83,8 @@ func loadObservability(base, configPath, collectorBase, tracingHealth, tracingMe
 		case "ZO_ROOT_USER_PASSWORD":
 			client.password = value
 		case "ZO_COMPACT_DATA_RETENTION_DAYS":
-			_, _ = fmt.Sscan(value, &client.retentionDays)
+			_, err := fmt.Sscan(value, &client.retentionDays)
+			client.retentionKnown = err == nil && client.retentionDays >= 0
 		}
 	}
 	return client
@@ -185,10 +187,6 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 			return
 		}
 		now := time.Now().UTC()
-		days := client.retentionDays
-		if days <= 0 {
-			days = 7
-		}
 		where := `run_id = '` + runID + `'`
 		if traceID != "" {
 			where += ` AND trace_id = '` + traceID + `'`
@@ -207,7 +205,7 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 			}
 			where += fmt.Sprintf(" AND (attempt = %d OR attempt IS NULL)", number)
 		}
-		searchStart, searchEnd := now.Add(-time.Duration(days)*24*time.Hour), now
+		searchStart, searchEnd := client.searchStart(now), now
 		if rawStart, rawEnd := r.URL.Query().Get("start"), r.URL.Query().Get("end"); rawStart != "" || rawEnd != "" {
 			started, startErr := time.Parse(time.RFC3339Nano, rawStart)
 			finished, endErr := time.Parse(time.RFC3339Nano, rawEnd)
@@ -240,12 +238,8 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "trace_id must be 32 hexadecimal characters"})
 			return
 		}
-		days := client.retentionDays
-		if days <= 0 {
-			days = 7
-		}
 		now := time.Now().UTC()
-		result, err := client.searchType(r.Context(), `SELECT * FROM "default" WHERE trace_id = '`+traceID+`' ORDER BY start_time ASC`, now.Add(-time.Duration(days)*24*time.Hour), now, 500, "traces")
+		result, err := client.searchType(r.Context(), `SELECT * FROM "default" WHERE trace_id = '`+traceID+`' ORDER BY start_time ASC`, client.searchStart(now), now, 500, "traces")
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
@@ -318,7 +312,7 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 				status = "degraded"
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": status, "components": components, "retention_days": client.retentionDays})
+		writeJSON(w, http.StatusOK, map[string]any{"status": status, "components": components, "retention_days": client.retentionDays, "retention_known": client.retentionKnown || client.retentionDays > 0})
 	})
 	return mux
 }
@@ -460,4 +454,12 @@ func validateObservabilityURL(raw string) string {
 		return ""
 	}
 	return raw
+}
+
+// No configured expiry must not silently narrow a query to seven days.
+func (o *observabilityClient) searchStart(now time.Time) time.Time {
+	if o.retentionDays > 0 {
+		return now.AddDate(0, 0, -o.retentionDays)
+	}
+	return time.Unix(0, 0).UTC()
 }

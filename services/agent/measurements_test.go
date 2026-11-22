@@ -8,6 +8,44 @@ import (
 	"testing"
 )
 
+func valueOf(value *int64) int64 {
+	if value == nil {
+		return -1
+	}
+	return *value
+}
+
+func TestUsageKeepsProviderDetailAndMissingCounts(t *testing.T) {
+	var got usage
+	raw := `{"prompt_tokens":0,"prompt_tokens_details":{"cached_tokens":0},"provider_cost":0.012}`
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PromptTokens == nil || *got.PromptTokens != 0 || got.CachedInputTokens == nil || *got.CachedInputTokens != 0 || got.CompletionTokens != nil {
+		t.Fatalf("usage %+v", got)
+	}
+	stored, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stored), `"provider_cost":0.012`) || strings.Contains(string(stored), `"completion_tokens":0`) {
+		t.Fatalf("stored usage %s", stored)
+	}
+}
+
+func TestAggregatedUsageStaysUnknownWhenAnyCallOmitsCount(t *testing.T) {
+	one := int64(1)
+	var total *usage
+	addUsage(&total, &usage{PromptTokens: &one, CompletionTokens: &one, TotalTokens: &one})
+	addUsage(&total, &usage{CompletionTokens: &one, TotalTokens: &one})
+	if total.PromptTokens != nil {
+		t.Fatalf("apparently complete prompt total %v", *total.PromptTokens)
+	}
+	if valueOf(total.CompletionTokens) != 2 || valueOf(total.TotalTokens) != 2 {
+		t.Fatalf("known totals %+v", total)
+	}
+}
+
 const settingsAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"effort":"low","temperature":0.2,"tools":["docs/search"],"max_retries":1}`
 
 // checkSettingsSent fails unless every model request carries the temperature.
@@ -57,7 +95,7 @@ func checkToolRoundEvents(t *testing.T, events []TurnEvent) {
 	if first.Kind != "model_call" || first.Name != "chat completion" || first.Model != "m1" || first.Turn != 1 || first.Status != "completed" || first.Error != "" {
 		t.Fatalf("first model call = %+v", first)
 	}
-	if first.Usage == nil || *first.Usage != (usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}) {
+	if first.Usage == nil || valueOf(first.Usage.PromptTokens) != 10 || valueOf(first.Usage.CompletionTokens) != 5 || valueOf(first.Usage.TotalTokens) != 15 {
 		t.Fatalf("first model call usage = %+v", first.Usage)
 	}
 	if tool.Kind != "tool_call" || tool.Name != "docs__search" || tool.Turn != 1 || tool.Status != "completed" || tool.Model != "" || tool.Usage != nil {
@@ -69,7 +107,7 @@ func checkToolRoundEvents(t *testing.T, events []TurnEvent) {
 	if want := estimateJSONTokens(map[string]string{"name": "docs__search", "arguments": `{"q":"auth"}`}); *tool.EstimatedInputTokens != want {
 		t.Fatalf("tool input estimate = %d, want %d", *tool.EstimatedInputTokens, want)
 	}
-	if last.Kind != "model_call" || last.Turn != 2 || last.Status != "completed" || last.Usage == nil || last.Usage.TotalTokens != 27 {
+	if last.Kind != "model_call" || last.Turn != 2 || last.Status != "completed" || last.Usage == nil || valueOf(last.Usage.TotalTokens) != 27 {
 		t.Fatalf("last model call = %+v", last)
 	}
 	if want := estimateTokens(`{"role":"assistant","content":"the plan"}`); *last.EstimatedOutputTokens != want {
@@ -122,7 +160,7 @@ func TestProcessSendsAndRecordsModelSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Events: tool discovery, model call, tool call, model call.
-	if len(typed.Events) != 4 || typed.Events[1].Usage == nil || typed.Events[1].Usage.TotalTokens != 15 || typed.Events[3].Usage == nil || typed.Events[3].Usage.TotalTokens != 27 {
+	if len(typed.Events) != 4 || typed.Events[1].Usage == nil || valueOf(typed.Events[1].Usage.TotalTokens) != 15 || typed.Events[3].Usage == nil || valueOf(typed.Events[3].Usage.TotalTokens) != 27 {
 		t.Fatalf("model call events miss the reported usage: %+v", typed.Events)
 	}
 	if typed.Events[0].Usage != nil || typed.Events[2].Usage != nil {

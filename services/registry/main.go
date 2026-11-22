@@ -343,6 +343,10 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		if err := validateOutputContract(files["agent.json"]); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		if err := r.validatePolicyReferences(req.Context(), string(files["systemprompt.md"])); err != nil {
 			var statusErr *policyValidationError
 			if errors.As(err, &statusErr) {
@@ -720,6 +724,11 @@ func (r *registry) seedVersion(ctx context.Context, dir, name, version string) e
 			return fmt.Errorf("seed %s/%s: %w", name, version, err)
 		}
 		files[f] = data
+	}
+	if r.prefix == "agents" {
+		if err := validateOutputContract(files["agent.json"]); err != nil {
+			return fmt.Errorf("seed %s/%s: %w", name, version, err)
+		}
 	}
 	if err := r.write(ctx, name, version, files, "seed"); err != nil {
 		return err

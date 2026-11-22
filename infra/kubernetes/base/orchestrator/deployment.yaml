@@ -28,13 +28,25 @@ spec:
         - name: orchestrator
           image: opensoftwarefactory-orchestrator:local
           imagePullPolicy: Never
+          args: ["-seed", "/seed-root/current/orchestrator"]
+          envFrom:
+            - secretRef:
+                name: factory-events-publisher
           env:
+            - name: EVALUATION_URL
+              value: http://evaluation:8080
+            - name: NATS_URL
+              value: nats://jetstream:4222
             - name: TEMPORAL_ADDRESS
               value: temporal:7233
             - name: BLOB_URL
               value: http://blobstore:8080/blobs
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
+          volumeMounts:
+            - name: local-seeds
+              mountPath: /seed-root
+              readOnly: true
           ports:
             - name: http
               containerPort: 8080
@@ -64,3 +76,8 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: local-seeds
+          hostPath:
+            path: /var/lib/opensoftwarefactory/seeds
+            type: Directory

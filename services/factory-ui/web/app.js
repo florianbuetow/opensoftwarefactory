@@ -12,8 +12,10 @@ let activeTab = null;
 
 // Pages in menu order, with their titles. The Memory page keeps its old hash, #artifacts.
 const PAGES = [
+  { name: "intake", title: "Intake", icon: "connector", tip: "Triggers that start workflows from connector events" },
   { name: "workflows", title: "Workflows", icon: "workflow", tip: "Workflow graphs" },
   { name: "runs", title: "Runs", icon: "run", tip: "Every run, newest first" },
+  { name: "events", title: "Events", icon: "history", tip: "Workflow event history" },
   { name: "decisions", title: "Decisions", icon: "gate", tip: "Gates waiting for a person" },
   { name: "sessions", title: "Sessions", icon: "chat", tip: "Interactive sessions waiting for a person" },
   { name: "agents", title: "Agents", icon: "agent", tip: "Versioned agent definitions" },
@@ -26,6 +28,7 @@ const PAGES = [
 ];
 // Pages without a menu item: opened from another page, whose menu item stays the active one.
 const SUBPAGES = { teams: { name: "teams", title: "Team", menu: "runs" }, devpods: { name: "devpods", title: "Dev pod", menu: "connectors" } };
+Object.assign(SUBPAGES, { metrics: { name: "metrics", title: "Graphs", menu: "evaluations" }, judges: { name: "judges", title: "Judges", menu: "evaluations" }, pricing: { name: "pricing", title: "Prices", menu: "evaluations" } });
 
 // Icons: 16px, 1.5px stroke, currentColor. Static markup only.
 const ICONS = {
@@ -1187,6 +1190,7 @@ const PANELS = {
   ],
   cluster: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   connectors: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
+  intake: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   devpods: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
 };
 const MIN_MAIN = 280;

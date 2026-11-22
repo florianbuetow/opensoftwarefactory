@@ -1,3 +1,5 @@
 config/
 logs/
 *_test.go
+blobstore
+data/

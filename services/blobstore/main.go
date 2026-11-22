@@ -21,7 +21,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -61,6 +60,7 @@ type Meta struct {
 	ID                    string    `json:"id"`
 	Size                  int64     `json:"size"`
 	Created               time.Time `json:"created"`
+	Revision              string    `json:"revision,omitempty"`
 	Creator               string    `json:"creator,omitempty"`
 	TraceID               string    `json:"trace_id,omitempty"`
 	EstimatedInputTokens  *int64    `json:"estimated_input_tokens,omitempty"`
@@ -126,11 +126,17 @@ func run() error {
 
 func newHandler(root string, logger *slog.Logger) (http.Handler, error) {
 	s := store{objects: filepath.Join(root, "objects"), meta: filepath.Join(root, "meta"), traces: filepath.Join(root, "traces"),
-		logger: logger, mu: &sync.Mutex{}, indexed: &atomic.Bool{}}
-	for _, dir := range []string{s.objects, s.meta, s.traces} {
+		transactions: filepath.Join(root, "transactions"), logger: logger, mu: &sync.Mutex{}, tx: &transactionState{}, indexed: &atomic.Bool{}}
+	for _, dir := range []string{s.objects, s.meta, s.traces, s.transactions} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.recoverTransactions(); err != nil {
+		return nil, fmt.Errorf("recovering blob transactions: %w", err)
+	}
+	if err := s.ensureLegacyRevisions(); err != nil {
+		return nil, fmt.Errorf("assigning revisions to existing blobs: %w", err)
 	}
 	// Objects stored before the trace index existed are indexed once, in the background;
 	// until then a trace lookup scans all metadata as it always did. An empty store has
@@ -154,10 +160,14 @@ func newHandler(root string, logger *slog.Logger) (http.Handler, error) {
 }
 
 type store struct {
-	objects string
-	meta    string
-	traces  string
-	logger  *slog.Logger
+	objects      string
+	meta         string
+	traces       string
+	transactions string
+	logger       *slog.Logger
+	// tx serialises object mutations and keeps object bytes and metadata consistent
+	// for readers. It is deliberately separate from the trace-index mutex.
+	tx *transactionState
 	// mu serialises every change to a metadata record and its trace index entry,
 	// so concurrent writes under one trace ID cannot lose entries.
 	mu *sync.Mutex
@@ -200,10 +210,9 @@ func headerValue(r *http.Request, name string) (string, bool) {
 	return v, true
 }
 
-// put writes to a temporary file and renames it so readers never see a partial object.
 func (s store) put(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	object, metaPath, ok := s.paths(id)
+	_, _, ok := s.paths(id)
 	if !ok {
 		http.Error(w, "invalid object id", http.StatusBadRequest)
 		return
@@ -218,39 +227,23 @@ func (s store) put(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid metadata header", http.StatusBadRequest)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(object), 0o750); err != nil {
-		s.fail(w, err)
-		return
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(object), ".upload-*")
+	condition, err := parsePutCondition(r)
 	if err != nil {
-		s.fail(w, err)
+		http.Error(w, "invalid conditional header", http.StatusBadRequest)
 		return
 	}
-	defer os.Remove(tmp.Name())
-	size, err := io.Copy(tmp, http.MaxBytesReader(w, r.Body, maxObjectBytes))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		http.Error(w, "object too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	if err = os.Rename(tmp.Name(), object); err != nil {
-		s.fail(w, err)
-		return
-	}
-	m := Meta{ID: id, Size: size, Created: time.Now().UTC(), Creator: creator, TraceID: trace,
+	m := Meta{ID: id, Created: time.Now().UTC(), Creator: creator, TraceID: trace,
 		EstimatedInputTokens: inputTokens, EstimatedOutputTokens: outputTokens, ProcessingTimeMS: processingTime, EstimationMethod: method}
-	if err = s.writeMeta(metaPath, m); err != nil {
+	revision, status, err := s.commitPut(id, r.Body, m, condition)
+	if status != 0 {
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	w.Header().Set("ETag", quoteETag(revision))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -267,6 +260,17 @@ func optionalNonnegativeInt64Header(r *http.Request, name string) (*int64, bool)
 }
 
 func (s store) get(w http.ResponseWriter, r *http.Request) {
+	s.tx.mu.RLock()
+	locked := true
+	defer func() {
+		if locked {
+			s.tx.mu.RUnlock()
+		}
+	}()
+	if s.tx.err != nil {
+		s.fail(w, s.tx.err)
+		return
+	}
 	id := r.PathValue("id")
 	object, _, ok := s.paths(id)
 	if !ok {
@@ -289,6 +293,13 @@ func (s store) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := s.readMeta(id, info)
+	// The open file descriptor and copied metadata form one committed snapshot.
+	// Renames/unlinks cannot change these bytes; a slow download need not block writes.
+	s.tx.mu.RUnlock()
+	locked = false
+	if m.Revision != "" {
+		w.Header().Set("ETag", quoteETag(m.Revision))
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set(headerCreator, m.Creator)
 	w.Header().Set(headerTrace, m.TraceID)
@@ -310,30 +321,20 @@ func setOptionalInt64ResponseHeader(w http.ResponseWriter, name string, value *i
 
 func (s store) delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	object, metaPath, ok := s.paths(id)
+	_, _, ok := s.paths(id)
 	if !ok {
 		http.Error(w, "invalid object id", http.StatusBadRequest)
 		return
 	}
-	info, err := os.Stat(object)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && info.IsDir()) {
+	status, err := s.commitDelete(id)
+	if status != 0 {
 		http.Error(w, "object not found", http.StatusNotFound)
 		return
-	}
-	if err == nil {
-		err = os.Remove(object)
 	}
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	if err = s.removeMeta(id, metaPath); err != nil {
-		s.fail(w, err)
-		return
-	}
-	// A folder exists only while it holds objects, so a listing never shows empty ones.
-	pruneEmpty(filepath.Dir(object), s.objects)
-	pruneEmpty(filepath.Dir(metaPath), s.meta)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -343,11 +344,19 @@ func pruneEmpty(dir, root string) {
 		if os.Remove(dir) != nil { // not empty, or already gone
 			return
 		}
-		dir = filepath.Dir(dir)
+		parent := filepath.Dir(dir)
+		_ = syncDir(parent)
+		dir = parent
 	}
 }
 
 func (s store) getMeta(w http.ResponseWriter, r *http.Request) {
+	s.tx.mu.RLock()
+	defer s.tx.mu.RUnlock()
+	if s.tx.err != nil {
+		s.fail(w, s.tx.err)
+		return
+	}
 	id := r.PathValue("id")
 	object, _, ok := s.paths(id)
 	if !ok {
@@ -386,6 +395,12 @@ func (s store) readMeta(id string, info fs.FileInfo) Meta {
 
 // list returns the immediate children of a prefix: directories and objects.
 func (s store) list(w http.ResponseWriter, r *http.Request) {
+	s.tx.mu.RLock()
+	defer s.tx.mu.RUnlock()
+	if s.tx.err != nil {
+		s.fail(w, s.tx.err)
+		return
+	}
 	prefix := strings.TrimSuffix(r.PathValue("prefix"), "/")
 	if prefix != "" && !validID(prefix) {
 		http.Error(w, "invalid prefix", http.StatusBadRequest)
@@ -428,6 +443,12 @@ func (s store) list(w http.ResponseWriter, r *http.Request) {
 
 // trace returns every object whose metadata carries the trace ID, oldest first.
 func (s store) trace(w http.ResponseWriter, r *http.Request) {
+	s.tx.mu.RLock()
+	defer s.tx.mu.RUnlock()
+	if s.tx.err != nil {
+		s.fail(w, s.tx.err)
+		return
+	}
 	trace := r.PathValue("trace")
 	if trace == "" || len(trace) > maxHeaderValue {
 		http.Error(w, "invalid trace id", http.StatusBadRequest)
@@ -609,9 +630,15 @@ func (s store) writeMeta(metaPath string, m Meta) error {
 	defer s.mu.Unlock()
 	previous := storedTrace(metaPath)
 	if m.TraceID != "" {
+		if err := ensureDirDurable(filepath.Dir(s.traceEntry(m.TraceID, m.ID)), s.traces); err != nil {
+			return err
+		}
 		if err := writeJSONAtomic(s.traceEntry(m.TraceID, m.ID), m.ID); err != nil {
 			return err
 		}
+	}
+	if err := ensureDirDurable(filepath.Dir(metaPath), s.meta); err != nil {
+		return err
 	}
 	if err := writeJSONAtomic(metaPath, m); err != nil {
 		return err
@@ -630,6 +657,9 @@ func (s store) removeMeta(id, metaPath string) error {
 	if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	if err := syncNearestDir(filepath.Dir(metaPath), s.meta); err != nil {
+		return err
+	}
 	if previous != "" {
 		s.dropTraceEntry(previous, id)
 	}
@@ -644,7 +674,11 @@ func (s store) dropTraceEntry(trace, id string) {
 		s.logger.Warn("removing trace index entry failed", "error", err)
 		return
 	}
-	_ = os.Remove(filepath.Dir(entry)) // fails while other entries remain
+	dir := filepath.Dir(entry)
+	_ = syncNearestDir(dir, s.traces)
+	if os.Remove(dir) == nil { // fails while other entries remain
+		_ = syncDir(s.traces)
+	}
 }
 
 func (s store) fail(w http.ResponseWriter, err error) {
@@ -675,8 +709,15 @@ func writeJSONAtomic(path string, v any) error {
 		tmp.Close()
 		return err
 	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err = os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }

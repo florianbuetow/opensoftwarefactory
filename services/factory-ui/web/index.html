@@ -27,6 +27,24 @@
 </header>
 
 <main class="content">
+  <section class="page page-measurements" id="tab-events" hidden></section>
+  <!-- Intake: event triggers – the selected trigger -->
+  <section class="page page-cluster page-intake" id="tab-intake" hidden>
+    <div class="panel list-panel">
+      <div class="panel-head"><h2>Event triggers</h2><span id="intake-new-slot"></span></div>
+      <div class="panel-body">
+        <ul id="intake-list" class="rows" role="listbox" aria-label="Event triggers"></ul>
+        <div id="intake-empty"></div>
+      </div>
+    </div>
+    <div class="panel content-panel">
+      <div class="panel-head"></div>
+      <div class="panel-body" id="intake-main"></div>
+    </div>
+  </section>
+  <section class="page page-measurements" id="tab-metrics" hidden></section>
+  <section class="page page-measurements" id="tab-judges" hidden></section>
+  <section class="page page-measurements" id="tab-pricing" hidden></section>
   <div id="page-toggles" class="page-toggles"></div>
   <!-- Workflows: list – canvas – inspector -->
   <section class="page page-workflows" id="tab-workflows" hidden>
@@ -203,6 +221,12 @@
 <script src="workflows.js"></script>
 <script src="runs.js"></script>
 <script src="evaluations.js"></script>
+<script src="measurement-controls.js"></script>
+<script src="events.js"></script>
+<script src="intake.js"></script>
+<script src="pricing.js"></script>
+<script src="metrics.js"></script>
+<script src="judges.js"></script>
 <script src="registry.js"></script>
 <script src="agents.js"></script>
 <script src="policies.js"></script>

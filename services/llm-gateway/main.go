@@ -30,6 +30,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if c.BlobstoreURL == "" {
+		c.BlobstoreURL = env("BLOBSTORE_URL", "http://blobstore:8080")
+	}
+	if c.EvaluationURL == "" {
+		c.EvaluationURL = env("EVALUATION_URL", "http://evaluation:8080")
+	}
 	if c.Telemetry.Endpoint == "" {
 		c.Telemetry.Endpoint = os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
 		c.Telemetry.Insecure = strings.HasPrefix(c.Telemetry.Endpoint, "http://")
@@ -65,10 +71,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	replayCtx, replayCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := gateway.replayUsageOutbox(replayCtx); err != nil {
+		logger.Warn("usage outbox replay incomplete", "error", err)
+	}
+	replayCancel()
 	defer gateway.transport.CloseIdleConnections()
-	server := &http.Server{Addr: ":8080", Handler: gateway, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	server := &http.Server{Addr: env("GATEWAY_ADDR", ":8080"), Handler: gateway, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go gateway.replayUsageOutboxLoop(ctx)
 	result := make(chan error, 1)
 	go func() { logger.Info("gateway listening", "address", server.Addr); result <- server.ListenAndServe() }()
 	select {
@@ -86,4 +98,11 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func env(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

@@ -17,5 +17,12 @@ ZO_QUERY_THREAD_NUM=1
 ZO_FILE_MOVE_THREAD_NUM=1
 ZO_FILE_MERGE_THREAD_NUM=1
 ZO_MEM_DUMP_THREAD_NUM=1
-ZO_COMPACT_DATA_RETENTION_DAYS=7
+# The pinned server treats zero as disabled retention; host archives also never expire.
+ZO_COMPACT_DATA_RETENTION_DAYS=0
+# Accept the full historical RFC3339 year range without changing occurrence timestamps.
+ZO_INGEST_ALLOWED_UPTO=100000000
+# Bound projection persistence/statistics lag on this local single-node installation.
+ZO_MAX_FILE_RETENTION_TIME=10
+ZO_CALCULATE_STATS_INTERVAL=10
+ZO_USE_STREAM_SETTINGS_FOR_PARTITIONS_ENABLED=false
 ZO_TELEMETRY=false

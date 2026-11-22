@@ -17,8 +17,7 @@ services/blobstore/data/
 .venv/
 __pycache__/
 .pytest_cache/
-# Every docs folder and every data folder, at any depth. docs/DESIGN.md stays tracked: it is
-# the UI guide that AGENTS.md points to.
+# Local documentation and data stay private. The public UI design guide stays tracked.
 **/docs/*
 !/docs/DESIGN.md
 **/data/
@@ -40,3 +39,8 @@ PLAN.md
 # Locally built service binaries.
 /services/agent/agent
 /services/factory-ui/factory-ui
+# Root Markdown and examples are private, local-only material.
+/*.[mM][dD]
+/*.[mM][aA][rR][kK][dD][oO][wW][nN]
+/*.[mM][dD][oO][wW][nN]
+/examples/

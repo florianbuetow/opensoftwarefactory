@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 var errNotFound = errors.New("not found")
@@ -19,22 +20,63 @@ type blobClient struct {
 }
 
 func (b blobClient) get(ctx context.Context, id string) ([]byte, error) {
+	data, _, err := b.getWithRevision(ctx, id)
+	return data, err
+}
+
+func (b blobClient) getWithRevision(ctx context.Context, id string) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/blobs/"+id, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	resp, err := b.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("the blob store is not reachable: %w", err)
+		return nil, "", fmt.Errorf("the blob store is not reachable: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, errNotFound
+		return nil, "", errNotFound
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("reading %s from the blob store: %s", id, resp.Status)
+		return nil, "", fmt.Errorf("reading %s from the blob store: %s", id, resp.Status)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	return data, strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
+
+var errPrecondition = errors.New("precondition failed")
+
+func (b blobClient) putConditionalJSON(ctx context.Context, id string, v any, revision string, create bool) (string, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, b.base+"/blobs/"+id, bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Creator", "connectors")
+	if create {
+		req.Header.Set("If-None-Match", "*")
+	} else {
+		req.Header.Set("If-Match", `"`+revision+`"`)
+	}
+	resp, err := b.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("the blob store is not reachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		return "", errPrecondition
+	}
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("writing %s to the blob store: %s", id, resp.Status)
+	}
+	return strings.Trim(resp.Header.Get("ETag"), `"`), nil
 }
 
 func (b blobClient) getJSON(ctx context.Context, id string, out any) error {

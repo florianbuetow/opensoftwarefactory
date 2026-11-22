@@ -50,6 +50,13 @@ test("initialization preserves credentials/data and KIND mounts the host directo
     await writeFile(path.join(dataPath, "preserve-me"), "existing telemetry");
     run("init-openobserve.js");
     assert.equal(await readFile(configPath, "utf8"), config + "# local edit\n");
+    await writeFile(configPath, (config + "# local edit\n").replace("ZO_COMPACT_DATA_RETENTION_DAYS=0", "ZO_COMPACT_DATA_RETENTION_DAYS=7").replace(/^ZO_INGEST_ALLOWED_UPTO=.*\n/m, ""));
+    run("init-openobserve.js");
+    const migrated = await readFile(configPath, "utf8");
+    assert.ok(migrated.includes(`ZO_ROOT_USER_PASSWORD=${password}`));
+    assert.match(migrated, /^ZO_COMPACT_DATA_RETENTION_DAYS=0$/m);
+    assert.match(migrated, /^ZO_INGEST_ALLOWED_UPTO=100000000$/m);
+    assert.ok(migrated.includes("# local edit\n"));
     assert.equal(await readFile(path.join(dataPath, "preserve-me"), "utf8"), "existing telemetry");
     run("generate-kind-config.js");
     const generated = await readFile(path.join(root, "infra/kind/cluster.local.yaml"), "utf8");

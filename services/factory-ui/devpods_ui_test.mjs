@@ -3,7 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-// Dev pods and rejections that go back (docs/plans/dev-pods.md): the editor logic for the
+// Dev pods and rejections that go back: the editor logic for the
 // dev pod, command and stop steps and for a gate's back edge, and what Runs reads about a
 // run's dev pod, its pull request, the Blocked state and the rounds of a step.
 

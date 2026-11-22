@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestObservabilityLogsAreFilteredAndNormalized(t *testing.T) {
@@ -162,5 +163,17 @@ func TestLoadObservabilityReadsLocalCredentials(t *testing.T) {
 	client := loadObservability("http://openobserve:5080", path, "http://logs:2020", "http://traces:13133", "http://traces:8888/metrics")
 	if client.user != "ada@example.test" || client.password != "safe" || client.retentionDays != 7 {
 		t.Fatalf("client = %+v", client)
+	}
+}
+
+func TestUnlimitedRetentionDoesNotUseSevenDayWindow(t *testing.T) {
+	client := &observabilityClient{retentionKnown: true}
+	now := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
+	if got := client.searchStart(now); !got.Equal(time.Unix(0, 0)) {
+		t.Fatalf("unlimited search starts at %v", got)
+	}
+	client.retentionDays = 7
+	if got := client.searchStart(now); !got.Equal(now.AddDate(0, 0, -7)) {
+		t.Fatalf("explicit retention ignored: %v", got)
 	}
 }

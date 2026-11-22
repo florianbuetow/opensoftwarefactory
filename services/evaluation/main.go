@@ -80,10 +80,14 @@ func (s setSummary) MarshalJSON() ([]byte, error) {
 }
 
 type service struct {
-	blobs, orchestrator string
-	http                *http.Client
-	log                 *slog.Logger
-	setMu               sync.Mutex
+	blobs, orchestrator  string
+	openobserve          string
+	openobserveUser      string
+	openobservePassword  string
+	projectionStream     string
+	http                 *http.Client
+	log                  *slog.Logger
+	setMu, measurementMu sync.Mutex
 }
 
 func main() {
@@ -104,10 +108,32 @@ func run() error {
 		_ = shutdown(ctx)
 	}()
 	client := &http.Client{Timeout: 15 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)}
-	s := &service{blobs: strings.TrimRight(env("BLOBSTORE_URL", "http://blobstore:8080"), "/"), orchestrator: strings.TrimRight(env("ORCHESTRATOR_URL", "http://orchestrator:8080"), "/"), http: client, log: log}
-	server := &http.Server{Addr: ":8080", Handler: otelhttp.NewHandler(s.routes(), "evaluation"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	openObserveUser, openObservePassword, err := openObserveCredentials(env("OPENOBSERVE_CONFIG", "/openobserve/config/openobserve.env"))
+	if err != nil {
+		log.Warn("OpenObserve projection and evidence are unavailable", "error", err)
+		openObserveUser, openObservePassword = "", ""
+	}
+	lock, err := acquireWriterLock(env("EVALUATION_LOCK_PATH", "/state/writer.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	projectionStreamName := env("EVALUATION_PROJECTION_STREAM", projectionStream)
+	if !validProjectionStream(projectionStreamName) {
+		return fmt.Errorf("EVALUATION_PROJECTION_STREAM must match ^[a-z][a-z0-9_]{0,95}$")
+	}
+	s := &service{
+		blobs:           strings.TrimRight(env("BLOBSTORE_URL", "http://blobstore:8080"), "/"),
+		orchestrator:    strings.TrimRight(env("ORCHESTRATOR_URL", "http://orchestrator:8080"), "/"),
+		openobserve:     strings.TrimRight(env("OPENOBSERVE_URL", "http://openobserve:5080"), "/"),
+		openobserveUser: openObserveUser, openobservePassword: openObservePassword,
+		projectionStream: projectionStreamName,
+		http:             client, log: log,
+	}
+	server := &http.Server{Addr: env("EVALUATION_ADDR", ":8080"), Handler: otelhttp.NewHandler(s.routes(), "evaluation"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go s.projectorLoop(ctx)
 	done := make(chan error, 1)
 	go func() { log.Info("evaluation listening", "address", server.Addr); done <- server.ListenAndServe() }()
 	select {
@@ -138,6 +164,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("GET /api/sets/{id}", s.getSet)
 	mux.HandleFunc("PUT /api/sets/{id}", s.updateSet)
 	mux.HandleFunc("GET /api/sets/{id}/export", s.exportSet)
+	s.measurementRoutes(mux)
 	return mux
 }
 

@@ -323,7 +323,7 @@ test("the run metadata is noted, never listed as a step", async () => {
   assert.equal((await older.outputs("run-2")).metadata, false, "a run from before the metadata");
 });
 
-// A step after a merge or batch node runs once per message the node forwards (docs/plans/merge-batch.md).
+// A step after a merge or batch node runs once per message the node forwards.
 test("the objects of a pass belong to their step and pass; they are no steps of their own", async () => {
   const index = setup({ api: async () => ({ objects: [
     { id: "runs/run-1/intake", created: "2026-01-01" },

@@ -2,7 +2,7 @@
 
 One image, `opensoftwarefactory-devpod:local`, for both containers of a dev pod. The connector
 service creates the pods; this image has no deployment of its own. The contracts are in
-[the dev pod plan](../../docs/plans/dev-pods.md).
+the service APIs and tests.
 
 | Container | Command | User | Port | Holds |
 | --- | --- | --- | --- | --- |

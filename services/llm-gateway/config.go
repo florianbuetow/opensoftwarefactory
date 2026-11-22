@@ -25,9 +25,11 @@ type Provider struct {
 	Models         map[string]string `yaml:"models"`
 }
 type Config struct {
-	Providers []Provider      `yaml:"providers"`
-	LogLevel  string          `yaml:"log_level"`
-	Telemetry TelemetryConfig `yaml:"telemetry"`
+	Providers     []Provider      `yaml:"providers"`
+	LogLevel      string          `yaml:"log_level"`
+	Telemetry     TelemetryConfig `yaml:"telemetry"`
+	BlobstoreURL  string          `yaml:"blobstore_url"`
+	EvaluationURL string          `yaml:"evaluation_url"`
 }
 type route struct {
 	provider *Provider
@@ -56,6 +58,15 @@ func loadConfig(path string) (Config, error) {
 func routes(c *Config) (map[string]route, error) {
 	out := make(map[string]route)
 	names := make(map[string]bool)
+	for name, endpoint := range map[string]string{"blobstore_url": c.BlobstoreURL, "evaluation_url": c.EvaluationURL} {
+		if endpoint == "" {
+			continue
+		}
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return nil, fmt.Errorf("%s must be an HTTP(S) URL without credentials, query or fragment", name)
+		}
+	}
 	if len(c.Providers) == 0 {
 		return nil, fmt.Errorf("at least one provider is required")
 	}

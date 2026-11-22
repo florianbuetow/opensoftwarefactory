@@ -34,8 +34,9 @@ func TestPutGetDelete(t *testing.T) {
 	if got := do(t, http.MethodGet, url, "", nil); got.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET missing: %d", got.StatusCode)
 	}
-	if got := do(t, http.MethodPut, url, "hello", nil); got.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT: %d", got.StatusCode)
+	put := do(t, http.MethodPut, url, "hello", nil)
+	if put.StatusCode != http.StatusNoContent || put.Header.Get("ETag") == "" {
+		t.Fatalf("PUT: %d ETag %q", put.StatusCode, put.Header.Get("ETag"))
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "objects", "runs", "abc", "top")); string(data) != "hello" {
 		t.Fatalf("file content %q", data)
@@ -50,6 +51,9 @@ func TestPutGetDelete(t *testing.T) {
 	}
 	if resp.Header.Get(headerCreated) == "" {
 		t.Fatal("GET lacks created header")
+	}
+	if resp.Header.Get("ETag") != put.Header.Get("ETag") {
+		t.Fatalf("GET ETag %q, PUT ETag %q", resp.Header.Get("ETag"), put.Header.Get("ETag"))
 	}
 	if got := do(t, http.MethodDelete, url, "", nil); got.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE: %d", got.StatusCode)

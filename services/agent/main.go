@@ -50,10 +50,25 @@ func run() error {
 		RegistryURL:       env("AGENT_REGISTRY_URL", "http://agent-registry:8080"),
 		PolicyRegistryURL: env("POLICY_REGISTRY_URL", "http://policy-registry:8080"),
 		LLMURL:            env("LLM_URL", "http://llm-gateway:8080/v1"),
+		EvaluationURL:     env("EVALUATION_URL", "http://evaluation:8080"),
 		MCPGatewayURL:     env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"),
 		HTTP:              tracedHTTP,
 		Logger:            logger,
 	}
+	serviceCtx, serviceCancel := context.WithCancel(context.Background())
+	defer serviceCancel()
+	replayCtx, replayCancel := context.WithTimeout(serviceCtx, 20*time.Second)
+	if err := svc.reconcileExtractionIntents(replayCtx, 100); err != nil {
+		logger.Warn("judge extraction reconciliation incomplete", "error", err)
+	}
+	if err := svc.reconcileCompletedRunObligations(replayCtx, 100); err != nil {
+		logger.Warn("completed judge extraction reconciliation incomplete", "error", err)
+	}
+	if err := svc.replayExtractionIntents(replayCtx); err != nil {
+		logger.Warn("judge extraction replay incomplete", "error", err)
+	}
+	replayCancel()
+	go svc.replayExtractionLoop(serviceCtx)
 	// The chat API serves interactive sessions next to the worker and stops with it.
 	chatServer := &http.Server{Addr: env("CHAT_ADDR", ":8080"), Handler: otelhttp.NewHandler(svc.routes(), "agent.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	stop := make(chan interface{}, 2)

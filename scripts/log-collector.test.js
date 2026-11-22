@@ -12,7 +12,8 @@ const openobserveInit = fs.readFileSync(new URL("init-openobserve.js", new URL("
 
 test("collector tails only factory logs and forwards buffered redacted JSON", () => {
   assert.match(config, /Path\s+\/var\/log\/containers\/\*_opensoftwarefactory_\*\.log/);
-  assert.match(config, /Exclude_Path\s+\/var\/log\/containers\/log-collector-/);
+  assert.doesNotMatch(config, /Exclude_Path/);
+  assert.match(config, /Skip_Long_Lines\s+Off/);
   assert.match(config, /Merge_Log\s+On/);
   assert.match(config, /storage\.type\s+filesystem/);
   assert.match(config, /Inotify_Watcher\s+False/);
@@ -20,6 +21,17 @@ test("collector tails only factory logs and forwards buffered redacted JSON", ()
   assert.match(config, /value\[key\] = "\[REDACTED\]"/);
   assert.match(config, /POST \/api\/default\/factory\/_json/);
   assert.match(config, /return -1, timestamp, record/);
+});
+
+test("host archive receives redacted logs before search-only exclusions", () => {
+  assert.ok(config.indexOf("call   redact") < config.indexOf("Name                  rewrite_tag"));
+  assert.ok(config.indexOf("Name                  rewrite_tag") < config.indexOf("call   search_only"));
+  assert.match(config, /Match\s+archive\.\*/);
+  assert.match(config, /Format plain/);
+  assert.match(daemonset, /path: \/blobstore\/data\/host-log-archive/);
+  const reset = justfile.slice(justfile.indexOf("reset-observe:"), justfile.indexOf("# Stop the given deployments"));
+  assert.doesNotMatch(reset, /host-log-archive|blobstore\/data/);
+  assert.doesNotMatch(config, /archive.*(?:delete|expire)/i);
 });
 
 test("collector uses mounted credentials without committing them", () => {

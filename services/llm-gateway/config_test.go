@@ -37,6 +37,17 @@ func TestLoadConfigDefaultsLogLevelAndRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestMeasurementEndpointConfiguration(t *testing.T) {
+	c := Config{BlobstoreURL: "http://blobstore:8080", EvaluationURL: "https://evaluation.example", Providers: []Provider{{Name: "p", BaseURL: "https://provider.example/v1", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
+	if _, err := routes(&c); err != nil {
+		t.Fatal(err)
+	}
+	c.EvaluationURL = "https://user:secret@example.com"
+	if _, err := routes(&c); err == nil {
+		t.Fatal("credentialed evaluation URL accepted")
+	}
+}
+
 func TestInvalidProviderConfigurations(t *testing.T) {
 	valid := Provider{
 		Name: "one", BaseURL: "https://example.com/v1", Auth: Auth{Type: "none"},

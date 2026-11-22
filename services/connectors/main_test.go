@@ -643,8 +643,8 @@ func TestIdleTimeAndIntervalCanBeSecondsAndHoldsCanExpire(t *testing.T) {
 	loose := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/b", "run": "run-2"})
 	w.call("POST", "/api/devpods/"+loose+"/release", map[string]any{"run": "run-2"})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.s.sweepLoop(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); w.s.sweepLoop(ctx) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for len(w.kube.names(w.kube.pods)) != 1 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -653,7 +653,12 @@ func TestIdleTimeAndIntervalCanBeSecondsAndHoldsCanExpire(t *testing.T) {
 		t.Fatalf("pods after the idle time = %v, want only the held one", got)
 	}
 	// With a hold time limit, a hold that is not renewed ends.
+	cancel()
+	<-done
 	w.s.cfg.holdTTL = 30 * time.Millisecond
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	go w.s.sweepLoop(ctx)
 	for len(w.kube.names(w.kube.pods)) != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

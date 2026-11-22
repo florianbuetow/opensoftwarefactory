@@ -47,6 +47,8 @@ type RunStatus struct {
 // RunRecord is stored as runs/<trace>/run.json when a run starts.
 type RunRecord struct {
 	TraceID            string    `json:"trace_id"`
+	ExecutionID        string    `json:"execution_id,omitempty"`
+	ParentExecutionID  string    `json:"parent_execution_id,omitempty"`
 	DistributedTraceID string    `json:"distributed_trace_id,omitempty"`
 	Workflow           string    `json:"workflow"`
 	WorkflowVersion    int       `json:"workflow_version"`
@@ -55,6 +57,13 @@ type RunRecord struct {
 	InputArtifact      string    `json:"input_artifact"`
 	Source             string    `json:"source,omitempty"`
 }
+
+type runStartObligation struct {
+	Run      RunRecord   `json:"run"`
+	Metadata RunMetadata `json:"metadata"`
+}
+
+const runStartObligationPrefix = "run-start-obligations"
 
 // PendingDecision is a gate step of a running workflow that waits for a person.
 type PendingDecision struct {
@@ -120,6 +129,7 @@ type server struct {
 	// agents reads the settings of a pinned agent for the run metadata. It may be nil.
 	agents func(ctx context.Context, ref string) (AgentSettings, error)
 	logger *slog.Logger
+	events *eventService
 }
 
 func (s *server) routes() http.Handler {
@@ -134,6 +144,9 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/workflows/{name}/rename", s.renameWorkflow)
 	mux.HandleFunc("DELETE /api/workflows/{name}", s.deleteWorkflow)
 	mux.HandleFunc("POST /api/workflows/{name}/runs", s.startRun)
+	mux.HandleFunc("POST /api/intake/runs", s.startIntakeRun)
+	mux.HandleFunc("POST /api/measurement-recalculations", s.startMeasurementRecalculation)
+	mux.HandleFunc("GET /api/workflow-events/status", s.workflowEventStatus)
 	mux.HandleFunc("GET /api/runs/{trace}", s.getRun)
 	mux.HandleFunc("DELETE /api/runs/{trace}", s.deleteRun)
 	mux.HandleFunc("GET /api/artifacts/{id...}", s.getArtifact)
@@ -143,6 +156,17 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/complete", s.postSessionComplete)
 	mux.HandleFunc("GET /api/teams", s.getTeams)
 	return mux
+}
+
+func (s *server) workflowEventStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.events == nil {
+		s.fail(w, http.StatusServiceUnavailable, errors.New("workflow event publication is unavailable"))
+		return
+	}
+	s.events.mu.RLock()
+	health := s.events.health
+	s.events.mu.RUnlock()
+	writeJSON(w, http.StatusOK, health)
 }
 
 func (s *server) config() (Config, error) {
@@ -222,18 +246,71 @@ func (s *server) startRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The metadata records what produces the run, so the run can be evaluated later.
-	metadata, _ := json.MarshalIndent(s.runMetadata(r.Context(), c, def, run), "", "  ")
+	runMeta := s.runMetadata(r.Context(), c, def, run)
+	metadata, _ := json.MarshalIndent(runMeta, "", "  ")
 	if err = s.blobs.Put(r.Context(), pipeline.ArtifactID(prefix, pipeline.MetadataFile), metadata, pipeline.Meta{Creator: startedBy, TraceID: traceID}); err != nil {
 		s.fail(w, http.StatusBadGateway, err)
 		return
 	}
 	runInputs := []pipeline.Item{{Source: pipeline.InputSource, Artifact: input, Round: 1}}
-	if err = s.runner.Start(r.Context(), pipeline.Input{TraceID: traceID, Definition: def, Inputs: runInputs, Prefix: prefix}); err != nil {
+	obligationID := runStartObligationPrefix + "/" + traceID + ".json"
+	obligationData, _ := json.MarshalIndent(runStartObligation{Run: run, Metadata: runMeta}, "", "  ")
+	if err = s.blobs.Put(r.Context(), obligationID, obligationData, pipeline.Meta{Creator: startedBy}); err != nil {
+		s.fail(w, http.StatusBadGateway, fmt.Errorf("persisting run acceptance obligation: %w", err))
+		return
+	}
+	runInput := pipeline.Input{TraceID: traceID, Definition: def, Inputs: runInputs, Prefix: prefix}
+	if starter, ok := s.runner.(executionStarter); ok {
+		run.ExecutionID, err = starter.StartExecution(r.Context(), runInput)
+	} else {
+		err = s.runner.Start(r.Context(), runInput)
+	}
+	if err != nil {
+		if remover, ok := s.blobs.(interface {
+			Delete(context.Context, string) error
+		}); ok {
+			_ = remover.Delete(r.Context(), obligationID)
+		}
 		s.fail(w, http.StatusBadGateway, err)
 		return
 	}
+	if run.ExecutionID != "" {
+		finalized := true
+		eventObligated := s.events == nil
+		if s.events != nil {
+			if eventErr := s.events.acceptExecution(r.Context(), knownOpenExecution{WorkflowID: traceID, ExecutionID: run.ExecutionID, RunID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(def), AcceptedAt: run.Started}); eventErr != nil {
+				s.logger.Warn("persisting workflow event obligation failed", "trace_id", traceID, "execution_id", run.ExecutionID, "error", eventErr)
+			} else {
+				eventObligated = true
+			}
+		}
+		record, _ = json.MarshalIndent(run, "", "  ")
+		if err = s.blobs.Put(r.Context(), pipeline.ArtifactID(prefix, "run.json"), record, pipeline.Meta{Creator: startedBy, TraceID: traceID}); err != nil {
+			s.logger.Warn("accepted run metadata deferred to recovery", "trace_id", traceID, "execution_id", run.ExecutionID, "error", err)
+			finalized = false
+		}
+		runMeta.ExecutionID = run.ExecutionID
+		metadata, _ = json.MarshalIndent(runMeta, "", "  ")
+		if err = s.blobs.Put(r.Context(), pipeline.ArtifactID(prefix, pipeline.MetadataFile), metadata, pipeline.Meta{Creator: startedBy, TraceID: traceID}); err != nil {
+			s.logger.Warn("accepted run metadata deferred to recovery", "trace_id", traceID, "execution_id", run.ExecutionID, "error", err)
+			finalized = false
+		}
+		if finalized && eventObligated {
+			if remover, ok := s.blobs.(interface {
+				Delete(context.Context, string) error
+			}); ok {
+				_ = remover.Delete(r.Context(), obligationID)
+			}
+		}
+	} else {
+		if remover, ok := s.blobs.(interface {
+			Delete(context.Context, string) error
+		}); ok {
+			_ = remover.Delete(r.Context(), obligationID)
+		}
+	}
 	s.logger.Info("run started", "workflow", def.Name, "version", def.Version, "trace_id", traceID)
-	writeJSON(w, http.StatusAccepted, map[string]any{"trace_id": traceID, "workflow": def.Name, "workflow_version": def.Version, "input_artifact": input})
+	writeJSON(w, http.StatusAccepted, map[string]any{"trace_id": traceID, "execution_id": run.ExecutionID, "workflow": def.Name, "workflow_version": def.Version, "input_artifact": input})
 }
 
 func (s *server) getRun(w http.ResponseWriter, r *http.Request) {

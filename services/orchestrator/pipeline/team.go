@@ -197,7 +197,8 @@ type TeamInput struct {
 	Run       string         `json:"run,omitempty"`
 	Rejection *TeamRejection `json:"rejection,omitempty"`
 	// DevPod is the run's dev pod, nil when the team works without one.
-	DevPod *DevPod `json:"dev_pod,omitempty"`
+	DevPod *DevPod      `json:"dev_pod,omitempty"`
+	Intake *IntakeInput `json:"intake,omitempty"`
 }
 
 // TeamTurnRequest is the input of the agent service's TeamTurn activity. DevPod is the ID of
@@ -344,6 +345,7 @@ type nestedRun struct {
 	WorkflowID string
 	// DevPod is the dev pod the nested run works in, nil when it has none.
 	DevPod *DevPod
+	Intake *IntakeInput
 }
 
 // NestedResult is the result of a nested workflow: the artifacts of its steps and the
@@ -376,7 +378,7 @@ func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
 			TaskQueue:  TaskQueue,
 			// A step that runs again waits until its cancelled earlier run has closed.
 			WaitForCancellation: true,
-			Memo:                map[string]any{"workflow": resolved.Definition.Name, "trace_id": run.TraceID},
+			Memo:                map[string]any{"workflow": resolved.Definition.Name, "workflow_version": DefinitionVersion(resolved.Definition), "trace_id": run.TraceID, "artifact_prefix": run.Prefix},
 		})
 		var child Result
 		if err := workflow.ExecuteChildWorkflow(childCtx, WorkflowName, Input{
@@ -387,6 +389,7 @@ func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
 			Depth:      run.Depth,
 			Run:        run.Run,
 			DevPod:     run.DevPod,
+			Intake:     run.Intake,
 		}).Get(ctx, &child); err != nil {
 			setter.Set(nil, err)
 			return
@@ -553,6 +556,7 @@ func startMemberRun(ctx, ownCtx workflow.Context, in TeamInput, member TeamMembe
 			WorkflowID: fmt.Sprintf("%s/%s.r%d.%d", workflow.GetInfo(ctx).WorkflowExecution.ID, member.Name, round, n),
 			Run:        fmt.Sprintf("%s/r%d.%d", in.Run, round, n),
 			DevPod:     in.DevPod,
+			Intake:     in.Intake,
 		}).Get(ctx, &nested); err != nil {
 			setter.Set(nil, err)
 			return
