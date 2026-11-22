@@ -1,0 +1,7 @@
+:include .gitignore
+
+**/vendor/
+**/venv/
+**/.cache/
+**/.mypy_cache/
+**/.ruff_cache/

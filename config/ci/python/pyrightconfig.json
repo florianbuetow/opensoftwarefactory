@@ -1,0 +1,38 @@
+{
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Darwin",
+  "include": [
+    "../../../services/tool-gateway",
+    "../../../services/devpod",
+    "../../../services/git-host"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.venv"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "../../../services/tool-gateway",
+      "extraPaths": ["../../../services/tool-gateway"]
+    },
+    {
+      "root": "../../../services/devpod",
+      "extraPaths": ["../../../services/devpod"]
+    },
+    {
+      "root": "../../../services/git-host",
+      "extraPaths": ["../../../services/git-host"]
+    }
+  ],
+  "typeCheckingMode": "strict",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "error",
+  "reportMissingTypeStubs": "error",
+  "reportUnknownVariableType": "error",
+  "reportUnknownMemberType": "error",
+  "reportUnknownParameterType": "error",
+  "reportUnknownArgumentType": "error",
+  "reportMissingParameterType": "error",
+  "reportOptionalCall": "error"
+}

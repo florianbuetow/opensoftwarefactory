@@ -203,6 +203,8 @@ help:
     @echo ""
     @printf "\033[0;33mCI & Testing:\033[0m\n"
     @printf "  %-38s %s\n" "just check" "Check scripts, manifests, Go race tests, and Python tests"
+    @printf "  %-38s %s\n" "just ci" "Run Go and Python guardrails with summaries and failure output"
+    @printf "  %-38s %s\n" "just ci-verbose" "Run the same guardrails and stream all output"
     @echo ""
     @printf "\033[0;32m✓ Available commands shown\033[0m\n"
     @echo ""
@@ -626,3 +628,11 @@ check:
     uv run --no-project python3 -m unittest discover -b -s services/devpod/tests
     printf "\033[0;32m✓ All checks passed\033[0m\n"
     echo ""
+
+# Run the template guardrails, showing details when a check fails.
+ci:
+    @bash scripts/ci.sh quiet
+
+# Run the same guardrails, streaming the tools' output.
+ci-verbose:
+    @bash scripts/ci.sh verbose

@@ -1,0 +1,27 @@
+line-length = 140
+indent-width = 4
+target-version = "py313"
+exclude = [".git", ".ruff_cache", ".venv", "reports"]
+
+[lint]
+select = [
+  "E", "F", "D", "ANN", "B", "Q", "I", "N", "C90", "UP", "PERF", "SIM", "TID",
+]
+ignore = ["D107", "N802"]
+
+[lint.mccabe]
+max-complexity = 10
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+"**/tests/**/*.py" = ["D", "ANN"]
+"**/test_*.py" = ["D", "ANN"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

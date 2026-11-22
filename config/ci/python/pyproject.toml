@@ -1,0 +1,22 @@
+[project]
+name = "opensoftwarefactory-python-ci"
+version = "0.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "bandit[toml]>=1.9.2,<2",
+    "coverage>=7.11.3,<8",
+    "deptry>=0.24.0,<1",
+    "httpx>=0.28.1",
+    "mcp>=2.3.0,<3",
+    "mypy>=1.18.2,<2",
+    "pip-audit>=2.9.0,<3",
+    "pyright>=1.1.407,<2",
+    "pytest>=9.0.1,<10",
+    "pytest-cov>=7.0.0,<8",
+    "pytestarch>=4.0.1,<5",
+    "ruff>=0.14.5,<1",
+    "uvicorn>=0.54.0",
+]
+
+[tool.uv]
+package = false
