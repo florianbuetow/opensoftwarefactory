@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Open Software Factory: a thin, local software factory where every edit is a version, every run leaves a trace, and people decide at gates.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 36 36%27%3E%3Cpath d=%27M3 20 21 6l-3 11 15 3-20 12 3-11z%27 fill=%27%235cc7c0%27/%3E%3C/svg%3E">
+<title>Open Software Factory</title>
+<script>
+  (function () {
+    const saved = localStorage.getItem("osf-theme");
+    document.documentElement.dataset.theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  })();
+</script>
+<style>
+  :root {
+    --bg: #f6f6f6;
+    --text: #17171a;
+    --muted: #55555c;
+    --pill: #ffffff;
+    --line: rgba(0,0,0,.08);
+    --btn: #141416;
+    --btn-text: #ffffff;
+    --ghost: #ffffff;
+    --ghost-border: rgba(0,0,0,.16);
+    --shadow: 0 24px 40px -18px rgba(20,20,30,.35);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1012;
+    --text: #f3f3f5;
+    --muted: #a3a3ad;
+    --pill: #1d1e22;
+    --line: rgba(255,255,255,.1);
+    --btn: #f3f3f5;
+    --btn-text: #121214;
+    --ghost: rgba(255,255,255,.08);
+    --ghost-border: rgba(255,255,255,.22);
+    --shadow: 0 24px 40px -18px rgba(0,0,0,.8);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { background: var(--bg); }
+  body {
+    min-height: 100vh;
+    font-family: -apple-system, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(60% 40% at 20% 10%, rgba(255,255,255,.9), transparent 70%),
+      radial-gradient(50% 40% at 85% 60%, rgba(220,226,232,.5), transparent 70%),
+      var(--bg);
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  :root[data-theme="dark"] body {
+    background:
+      radial-gradient(60% 40% at 20% 10%, rgba(255,255,255,.05), transparent 70%),
+      var(--bg);
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* Navigation */
+  header {
+    --pad: clamp(20px, 4.5vw, 84px);
+    display: flex; align-items: center; gap: 16px 24px;
+    padding: 28px var(--pad);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 500; letter-spacing: -.02em; white-space: nowrap; }
+  .main-nav { display: flex; align-items: center; gap: clamp(10px, 1.2vw, 20px); margin-left: auto; font-size: 14.5px; font-weight: 500; white-space: nowrap; }
+  .main-nav a:hover { opacity: .6; }
+  .tools { display: flex; gap: 12px; margin-left: auto; }
+  .main-nav + .tools { margin-left: 0; }
+  .icon-btn {
+    width: 48px; height: 48px; border-radius: 50%; border: 0; cursor: pointer;
+    background: var(--pill); color: var(--text);
+    display: grid; place-items: center;
+    box-shadow: 0 1px 0 var(--line), 0 6px 18px -10px rgba(0,0,0,.25);
+  }
+  .icon-btn svg { width: 22px; height: 22px; }
+  .icon-btn:focus-visible, .btn:focus-visible, .main-nav a:focus-visible, .brand:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+
+  /* Hero */
+  main { text-align: center; padding: clamp(16px, 3vw, 44px) 0 0; }
+  .eyebrow {
+    display: inline-block;
+    margin: 0 auto 18px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: var(--pill);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: -.01em;
+  }
+  .eyebrow:hover { color: var(--text); }
+  .eyebrow:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+  h1 {
+    font-size: clamp(44px, 8vw, 112px);
+    line-height: 1;
+    letter-spacing: -.04em;
+    text-wrap: balance;
+    font-weight: 500;
+    max-width: 14ch;
+    margin: 0 auto;
+    position: relative; z-index: 2;
+  }
+  .stage { position: relative; margin-top: clamp(-20px, -1vw, 0px); }
+  .fan {
+    display: flex; justify-content: center; align-items: center;
+    padding: 70px 0 40px;
+    min-height: 420px;
+  }
+  .card {
+    flex: none;
+    width: clamp(136px, 13vw, 208px);
+    aspect-ratio: 4 / 5;
+    margin-left: clamp(-60px, -3.9vw, -30px);
+    border-radius: 24px;
+    padding: 15px;
+    box-shadow: var(--shadow);
+    position: relative;
+    display: flex; flex-direction: column; gap: 10px;
+    font-size: clamp(12px, .9vw, 13px);
+    overflow: hidden;
+  }
+  .card:first-child { margin-left: 0; }
+  .card .title { display: block; font-size: 1.3em; font-weight: 600; letter-spacing: -.02em; line-height: 1.12; }
+  .card small { font-size: .85em; font-weight: 500; }
+  .row { background: rgba(255,255,255,.9); color: #17171a; border-radius: 10px; padding: .6em .8em; font-weight: 500; display: flex; justify-content: space-between; align-items: center; gap: .5em; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .9em; }
+
+  /* Card and section share one colour each */
+  .c1, .t1 { background: #373c8a; color: #fff; }
+  .c2, .t2 { background: #c02a26; color: #fff; }
+  .c3, .t3 { background: #e8ecf6; color: #17171a; }
+  .c4, .t4 { background: linear-gradient(160deg, #ffc2b1, #ffe6d6); color: #17171a; }
+  .c5, .t5 { background: #ffd23f; color: #17171a; }
+  .c6, .t6 { background: #227449; color: #fff; }
+  .c7, .t7 { background: #a84a10; color: #fff; }
+  .c8, .t8 { background: #1c1a1b; color: #fff; }
+  .c9, .t9 { background: #2160d8; color: #fff; }
+  .t10 { background: #6b3fa0; color: #fff; }
+  .c1 { transform: translateY(46px) rotate(-9deg); z-index: 1; }
+  .c2 { transform: translateY(20px) rotate(-6deg); z-index: 2; }
+  .c3 { transform: translateY(-10px) rotate(-3deg); z-index: 3; }
+  .c4 { transform: translateY(16px) rotate(-1deg); z-index: 4; }
+  .c5 { transform: translateY(2px); z-index: 5; }
+  .c6 { transform: translateY(18px) rotate(2deg); z-index: 6; }
+  .c7 { transform: translateY(4px) rotate(4deg); z-index: 7; }
+  .c8 { transform: translateY(-4px) rotate(6deg); z-index: 8; }
+  .c9 { transform: translateY(22px) rotate(9deg); z-index: 9; }
+
+  .steps { display: grid; gap: 8px; margin-top: auto; }
+  .btns { display: grid; gap: 8px; margin-top: auto; }
+  .btns span { text-align: center; padding: .65em; border-radius: 99px; font-weight: 600; background: #17171a; color: #fff; }
+  .btns span + span { background: rgba(255,255,255,.7); color: #17171a; }
+  .timeline { display: grid; gap: 8px; margin-top: auto; }
+  .timeline i { display: block; height: 1.1em; border-radius: 6px; background: #ff6a3d; }
+  .timeline i:nth-child(2) { width: 70%; margin-left: 15%; background: #ffc247; }
+  .timeline i:nth-child(3) { width: 50%; margin-left: 40%; background: #6bd18d; }
+  .files { display: grid; gap: 7px; margin-top: auto; }
+  .files span { background: rgba(0,0,0,.2); border-radius: 8px; padding: .5em .7em; }
+  .checks { display: grid; gap: 8px; margin-top: auto; }
+  .checks span { background: rgba(0,0,0,.2); border-radius: 99px; padding: .5em .9em; }
+
+  .bubble {
+    position: absolute; z-index: 10;
+    color: #fff; font-size: clamp(16px, 1.7vw, 26px); font-weight: 500; letter-spacing: -.02em;
+    padding: .35em .75em; border-radius: 999px;
+  }
+  .bubble:hover { filter: brightness(1.12); }
+  .bubble:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+  .bubble::after { content: ""; position: absolute; bottom: -9px; left: 38%; border: 9px solid transparent; border-top-color: inherit; border-bottom: 0; }
+  .bubble.one { background: #2f5fe0; border-top-color: #2f5fe0; left: 15%; top: 6px; transform: rotate(-3deg); }
+  .bubble.two { background: #227449; border-top-color: #227449; right: 5%; top: 28px; transform: rotate(5deg); }
+
+  .lead { max-width: 620px; margin: 28px auto 0; padding: 0 24px; font-size: 18px; line-height: 1.45; letter-spacing: -.01em; text-wrap: pretty; }
+  .cta { display: flex; justify-content: center; gap: 16px; margin-top: 56px; }
+  .btn { display: inline-flex; align-items: center; gap: 10px; height: 52px; padding: 0 36px; border-radius: 999px; font-weight: 500; font-size: 17px; }
+  .btn svg { width: 22px; height: 22px; fill: currentColor; }
+  .btn.primary { background: var(--btn); color: var(--btn-text); }
+  .btn.ghost { background: var(--ghost); border: 1px solid var(--ghost-border); }
+  .btn:hover { opacity: .85; }
+  .btn:active { transform: translateY(1px); }
+
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  .card:focus-visible { outline: 2px solid var(--text); outline-offset: 4px; }
+
+  /* Sections */
+  .topic { scroll-margin-top: 24px; margin: 0 0 24px; padding: clamp(56px, 8vw, 112px) max(24px, calc((100% - 1200px) / 2)); border-radius: 0; display: grid; grid-template-columns: 1fr 1fr; gap: clamp(24px, 4vw, 64px); align-items: center; text-align: left; }
+  .cta + .topic { margin-top: 112px; }
+  .topic h2 { font-size: clamp(32px, 4.6vw, 64px); letter-spacing: -.04em; text-wrap: balance; line-height: 1; font-weight: 500; }
+  .topic p { font-size: 18px; line-height: 1.5; margin-top: 18px; max-width: 46ch; text-wrap: pretty; }
+  .topic ul { margin: 18px 0 0; padding: 0; list-style: none; display: grid; gap: 14px; font-size: 16px; }
+  .topic li { background: rgba(0,0,0,.2); border-radius: 12px; padding: 12px 16px; }
+  .topic.light li { background: rgba(255,255,255,.75); }
+  .start + .topic { margin-top: 96px; }
+
+  .start { max-width: 1100px; margin: 96px auto 0; padding: 0 24px; text-align: center; }
+  .start h2 { font-size: clamp(32px, 4.6vw, 64px); letter-spacing: -.04em; text-wrap: balance; font-weight: 500; }
+  .start p { max-width: 62ch; margin: 18px auto 0; font-size: 16px; line-height: 1.5; text-wrap: pretty; }
+  .start pre { display: inline-block; max-width: 100%; overflow-x: auto; margin-top: 28px; text-align: left; background: var(--pill); border: 1px solid var(--line); border-radius: 16px; padding: 20px 28px; font: 15px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
+  .foot {
+    max-width: 1200px;
+    margin: 72px auto 0;
+    padding: 36px 24px 64px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .foot p { margin: 0; text-wrap: pretty; }
+  .foot p a, .foot .back { text-decoration: underline; text-underline-offset: 3px; }
+  .foot p a:hover, .foot .back:hover { color: var(--text); }
+  .foot .back { font-weight: 500; }
+  .foot .back:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+  .socials { display: flex; justify-content: center; gap: 12px; }
+  .socials a { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; background: var(--pill); color: var(--text); box-shadow: 0 1px 0 var(--line), 0 6px 18px -10px rgba(0,0,0,.25); }
+  .socials a:hover { opacity: .6; }
+  .socials a:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+  .socials svg { width: 19px; height: 19px; fill: currentColor; }
+  @media (max-width: 640px) { .foot { justify-content: center; text-align: center; } }
+
+  @media (max-width: 800px) { .topic { grid-template-columns: 1fr; } }
+  /* Narrow: nav drops to its own horizontally scrolling row */
+  @media (max-width: 1560px) {
+    header { flex-wrap: wrap; }
+    .main-nav {
+      order: 3; flex: 1 0 100%; margin: 0 calc(-1 * var(--pad));
+      padding: 4px var(--pad) 8px;
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .main-nav::-webkit-scrollbar { display: none; }
+    .main-nav + .tools { margin-left: auto; }
+  }
+  @media (max-width: 1000px) { .c1, .c9 { display: none; } }
+  @media (max-width: 640px) {
+    .c2, .c3, .c7, .c8 { display: none; }
+    .fan { min-height: 300px; }
+    .card { width: 34vw; aspect-ratio: auto; min-height: 42vw; }
+    .bubble { font-size: 15px; }
+    .bubble.one { left: 4%; } .bubble.two { right: 4%; top: 46px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .card { transition: transform .2s ease-out; }
+    .card:hover { transform: translateY(-14px) rotate(0); z-index: 20; }
+  }
+</style>
+</head>
+<body id="top">
+<header>
+  <a class="brand" href="#top">Open Software Factory</a>
+  <nav class="main-nav" aria-label="Main">
+    <a href="#sec-1">Platform</a>
+    <a href="#sec-2">Workflows</a>
+    <a href="#sec-3">Teams</a>
+    <a href="#sec-4">Human in the Loop</a>
+    <a href="#sec-5">Registry</a>
+    <a href="#sec-6">Toolbox</a>
+    <a href="#sec-7">Connectors</a>
+    <a href="#sec-8">Context</a>
+    <a href="#sec-9">Tracing &amp; Evals</a>
+    <a href="#limitations">Limitations</a>
+    <a href="#get-started">Get Started</a>
+    <a href="#contribute">Contribute</a>
+  </nav>
+  <div class="tools">
+    <button class="icon-btn" id="theme" aria-label="Dark theme" aria-pressed="false" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <a class="eyebrow" href="#limitations">Educational tool · Local setup only — not for production</a>
+  <h1>An Open Software Factory</h1>
+
+  <div class="stage">
+    <a class="bubble one" href="#sec-2">Orchestration</a>
+    <a class="bubble two" href="#sec-9">Metrics</a>
+    <div class="fan">
+      <a class="card c1" href="#sec-1">
+        <span class="title">Platform</span><small>runs on your machine</small>
+        <div class="files">
+          <span>Kubernetes</span>
+          <span>Temporal</span>
+          <span>JetStream</span>
+          <span>Blobstore</span>
+        </div>
+      </a>
+      <a class="card c2" href="#sec-2">
+        <span class="title">Agentic<br>Workflows</span><small>source of truth</small>
+        <div class="steps">
+          <div class="row">Configurable graphs</div>
+          <div class="row">Event intake</div>
+          <div class="row">Exact re-runs</div>
+        </div>
+      </a>
+      <a class="card c3" href="#sec-3">
+        <span class="title">Teams of<br>Agents</span><small>multi-agent steps</small>
+        <div class="steps">
+          <div class="row">Lead + peers</div>
+          <div class="row">Inter-agent comms</div>
+          <div class="row">Shared files</div>
+        </div>
+      </a>
+      <a class="card c4" href="#sec-4">
+        <span class="title">Human in<br>the Loop</span><small>a person is a step</small>
+        <div class="steps">
+          <div class="row">Human review gates</div>
+          <div class="row">Interactive refinements</div>
+        </div>
+      </a>
+      <a class="card c5" href="#sec-5">
+        <span class="title">Agent<br>Registry</span><small>never overwritten</small>
+        <div class="steps">
+          <div class="row">Versioned prompts</div>
+          <div class="row">Model &amp; tools</div>
+          <div class="row">Prompt evidence</div>
+        </div>
+      </a>
+      <a class="card c6" href="#sec-6">
+        <span class="title">Agent<br>Toolbox</span><small>extend every agent</small>
+        <div class="checks"><span>Skills</span><span>MCP</span><span>Built-in tools</span></div>
+      </a>
+      <a class="card c7" href="#sec-7">
+        <span class="title">Connectors</span><small>repos &amp; sandboxes</small>
+        <div class="files"><span>Git repositories</span><span>GitHub</span><span>Dev pods</span></div>
+      </a>
+      <a class="card c8" href="#sec-8">
+        <span class="title">Context</span><small>shared knowledge</small>
+        <div class="files"><span>Policies</span><span>Skills</span><span>Artifacts</span></div>
+      </a>
+      <a class="card c9" href="#sec-9">
+        <span class="title">Tracing &amp; Evals</span><small>measure &amp; improve</small>
+        <div class="files">
+          <span>Full traces</span>
+          <span>Judge evals</span>
+          <span>Quality &amp; costs</span>
+        </div>
+      </a>
+    </div>
+  </div>
+
+  <p class="lead">A local software factory that runs on Kubernetes: agentic workflows, multi-agent teams, human gates, interactive refinement, and full tracing, evals, and cost observability in one UI.</p>
+
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/florianbuetow/opensoftwarefactory">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+    <a class="btn ghost" href="#sec-1">Read more</a>
+  </div>
+
+  <section class="topic t1" id="sec-1">
+    <div>
+      <h2>Platform</h2>
+      <p>A local Kubernetes (KIND) cluster of small, focused services managed through one justfile, with <code>factory-ui</code> as the single browser control room.</p>
+    </div>
+    <ul>
+      <li><strong>Core infrastructure:</strong> Kubernetes (KIND), <code>temporal</code>, <code>jetstream</code>, <code>blobstore</code>, <code>openobserve</code>, and <code>telemetry-collector</code>.</li>
+      <li><strong>Execution &amp; UI:</strong> <code>factory-ui</code>, <code>orchestrator</code>, <code>agent</code>, <code>evaluation</code>, and <code>devpod</code>.</li>
+      <li><strong>Registries, gateways &amp; repos:</strong> <code>agent-registry</code>, <code>policy-registry</code>, <code>skill-registry</code>, <code>llm-gateway</code>, <code>mcp-gateway</code>, <code>tool-gateway</code>, <code>connectors</code>, and <code>git-host</code>.</li>
+    </ul>
+  </section>
+
+  <section class="topic t2" id="sec-2">
+    <div>
+      <h2>Agentic workflows</h2>
+      <p>The workflow is the source of truth. Temporal executes configurable graphs of pinned agents, teams, interactive sessions, and gates, triggered manually or deterministically through event intake.</p>
+    </div>
+    <ul>
+      <li>Every step pins the exact agent, policy, and skill version it runs, with fail-fast execution and no fallbacks.</li>
+      <li><strong>Intake:</strong> Event bindings hash the event, binding, and pinned workflow version into one idempotent run ID.</li>
+      <li>Re-run any past workflow with its original input and versions to reproduce a baseline or compare changes.</li>
+    </ul>
+  </section>
+
+  <section class="topic t3 light" id="sec-3">
+    <div>
+      <h2>Teams of agents</h2>
+      <p>Coordinate multiple agents inside a single workflow step with a designated lead, direct inter-agent comms, and a shared workspace.</p>
+    </div>
+    <ul>
+      <li>Agents exchange messages via direct inter-agent comms whose full logs are stored in the blobstore.</li>
+      <li>Members collaborate on shared workspace files and emit a structured manifest as the step's output.</li>
+      <li>Inspect live or finished inter-agent comms and workspace files directly from Runs and Decisions.</li>
+    </ul>
+  </section>
+
+  <section class="topic t4 light" id="sec-4">
+    <div>
+      <h2>Human in the Loop</h2>
+      <p>A person is a first-class step in any workflow—whether reviewing and gating work before it moves forward or refining artifacts interactively with agents.</p>
+    </div>
+    <ul>
+      <li><strong>Human review gates:</strong> Pause a workflow until someone approves or rejects on Decisions; rejections can stop the run or route back to an earlier step, and repository publishes can require approval first.</li>
+      <li><strong>Interactive refinements:</strong> Pause a run in a session where a person and one or more pinned agents iterate together on shared files before continuing.</li>
+      <li>Every human decision and session record is stored as an artifact on the run's trace.</li>
+    </ul>
+  </section>
+
+  <section class="topic t5 light" id="sec-5">
+    <div>
+      <h2>Agent Registry</h2>
+      <p>Saving an agent never overwrites. Every edit writes the next immutable version beside the old one, and every run keeps its own prompt evidence.</p>
+    </div>
+    <ul>
+      <li>Each agent version pins its system prompt, model settings, and attached tools.</li>
+      <li>Workflow steps pin an exact agent version, so older runs continue loading the version they used.</li>
+      <li>Each attempt copies its source and compiled prompts to <code>runs/&lt;trace&gt;/_evidence/</code>; missing evidence is reported honestly.</li>
+    </ul>
+  </section>
+
+  <section class="topic t6" id="sec-6">
+    <div>
+      <h2>Agent Toolbox</h2>
+      <p>Equip agents with versioned skills, tightly governed MCP tools, and built-in tools.</p>
+    </div>
+    <ul>
+      <li><strong>Skills:</strong> Versioned <code>SKILL.md</code> instructions and scripts unpacked and run in the dev pod against <code>/workspace</code>.</li>
+      <li><strong>MCP &amp; tools:</strong> External MCP servers sit behind <code>mcp-gateway</code> with explicit allowlists and denylists; built-in tools run via <code>tool-gateway</code>.</li>
+      <li>A tool call is refused unless explicitly allowed; the gateway never registers servers by itself.</li>
+    </ul>
+  </section>
+
+  <section class="topic t7" id="sec-7">
+    <div>
+      <h2>Connectors</h2>
+      <p>Connect workflows to Git repositories and isolated dev pods where agents write, test, and propose code changes.</p>
+    </div>
+    <ul>
+      <li><strong>Git repositories:</strong> Connect GitHub or plain Git repositories, or use the bundled local <code>git-host</code> for experiments.</li>
+      <li><strong>Dev pods:</strong> Spin up sandboxed clones on dedicated work branches so agents can edit files and run commands safely.</li>
+      <li><strong>Access &amp; approvals:</strong> Control read/write credentials per repository and require human approval before publishing changes.</li>
+    </ul>
+  </section>
+
+  <section class="topic t8" id="sec-8">
+    <div>
+      <h2>Context</h2>
+      <p>Manage the versioned policies, skills, and stored artifacts that shape how agents behave and what they can read and produce.</p>
+    </div>
+    <ul>
+      <li><strong>Policies:</strong> Versioned rules stored in <code>policy-registry</code> and copied into each run's evidence folder when applied.</li>
+      <li><strong>Skills:</strong> Versioned skill folders in <code>skill-registry</code> carrying instructions and scripts.</li>
+      <li><strong>Artifacts:</strong> Inspect every stored blob in <code>blobstore</code> with its creator and trace ID.</li>
+    </ul>
+  </section>
+
+  <section class="topic t9" id="sec-9">
+    <div>
+      <h2>Tracing, evals &amp; observability</h2>
+      <p>Every run leaves one trace of blobs under <code>runs/&lt;trace&gt;/</code>. Judges run as ordinary scoring workflows, provider token usage stays immutable while costs recalculate from current prices, and OpenObserve captures logs, metrics, and traces.</p>
+    </div>
+    <ul>
+      <li>The trace ID is the Temporal workflow ID; every artifact carries its creator and trace ID, including nested workflows.</li>
+      <li>Judges write JSON artifacts mapped to named metrics—fix a mapping and re-extract without another model call.</li>
+      <li>Update a model price or EUR/USD rate to recalculate costs cleanly without altering usage records or double-charging.</li>
+    </ul>
+  </section>
+
+  <section class="start" id="limitations">
+    <h2>Limitations</h2>
+    <p>The factory is not meant to scale to production environments. It is an educational tool with no production hardening, built to run on a single-node KIND cluster on your workstation (defaulting to Colima's Docker socket).</p>
+    <p>Carrying a skill also lets an agent run that skill's scripts inside its dev pod, where scripts can modify any file in <code>/workspace</code>.</p>
+  </section>
+
+  <section class="start" id="get-started">
+    <h2>Run it on your machine</h2>
+    <p>Needs Colima, the Docker CLI, KIND, <code>kubectl</code>, <code>just</code>, Node.js 24+, Go 1.26+, <code>uv</code>, and LM Studio running locally with <code>qwen3.5-9b-mlx</code> loaded (or another OpenAI-compatible model provider configured in <code>services/llm-gateway/config/config.yaml</code>).</p>
+    <pre>git clone https://github.com/florianbuetow/opensoftwarefactory.git
+cd opensoftwarefactory
+just start    # bring the factory up from any state
+just info     # show each service's address and status
+just status   # show pods and services
+just help     # list every command</pre>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/florianbuetow/opensoftwarefactory">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </section>
+
+  <section class="topic t10" id="contribute">
+    <div>
+      <h2>How to contribute</h2>
+      <p>We don't accept code changes. We accept natural-language requests for changes that specify behaviors, functionality, and features.</p>
+    </div>
+    <ul>
+      <li>Describe the behavior, functionality, or feature you want—a request may include implementation suggestions.</li>
+      <li>The repository maintainers make all code changes after reviewing your request.</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="foot">
+    <p>&copy; 2026 Florian Buetow &middot; <a href="https://polyformproject.org/licenses/noncommercial/1.0.0">PolyForm Noncommercial License 1.0.0</a></p>
+    <a class="back" href="#top">Back to top ↑</a>
+    <nav class="socials" aria-label="Social links">
+      <a href="https://x.com/bytetweets/" aria-label="X" title="X"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
+      <a href="https://github.com/florianbuetow/" aria-label="GitHub" title="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+      <a href="https://www.linkedin.com/in/fbuetow/" aria-label="LinkedIn" title="LinkedIn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg></a>
+    </nav>
+  </footer>
+
+<script>
+  const root = document.documentElement;
+  const toggle = document.getElementById("theme");
+  const sync = () => toggle.setAttribute("aria-pressed", String(root.dataset.theme === "dark"));
+  sync();
+  toggle.addEventListener("click", () => {
+    const next = root.dataset.theme === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    localStorage.setItem("osf-theme", next);
+    sync();
+  });
+</script>
+</body>
+</html>
