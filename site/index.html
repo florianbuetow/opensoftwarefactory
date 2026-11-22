@@ -123,7 +123,8 @@
     font-size: clamp(12px, .9vw, 13px);
     overflow: hidden;
   }
-  .card:first-child { margin-left: 0; }
+  .c1 { margin-left: 0; }
+  .deck { position: relative; display: flex; align-items: center; }
   .card .title { display: block; font-size: 1.3em; font-weight: 600; letter-spacing: -.02em; line-height: 1.12; }
   .card small { font-size: .85em; font-weight: 500; }
   .row { background: rgba(255,255,255,.9); color: #17171a; border-radius: 10px; padding: .6em .8em; font-weight: 500; display: flex; justify-content: space-between; align-items: center; gap: .5em; }
@@ -171,8 +172,8 @@
   .bubble:hover { filter: brightness(1.12); }
   .bubble:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
   .bubble::after { content: ""; position: absolute; bottom: -9px; left: 38%; border: 9px solid transparent; border-top-color: inherit; border-bottom: 0; }
-  .bubble.one { background: #2f5fe0; border-top-color: #2f5fe0; left: 15%; top: 6px; transform: rotate(-3deg); }
-  .bubble.two { background: #227449; border-top-color: #227449; right: 5%; top: 28px; transform: rotate(5deg); }
+  .bubble.one { background: #2f5fe0; border-top-color: #2f5fe0; left: 10%; top: -64px; transform: rotate(-3deg); }
+  .bubble.two { background: #227449; border-top-color: #227449; right: 0; top: -44px; transform: rotate(5deg); }
 
   .lead { max-width: 620px; margin: 28px auto 0; padding: 0 24px; font-size: 18px; line-height: 1.45; letter-spacing: -.01em; text-wrap: pretty; }
   .cta { display: flex; justify-content: center; gap: 16px; margin-top: 56px; }
@@ -245,7 +246,7 @@
     .fan { min-height: 300px; }
     .card { width: 34vw; aspect-ratio: auto; min-height: 42vw; }
     .bubble { font-size: 15px; }
-    .bubble.one { left: 4%; } .bubble.two { right: 4%; top: 46px; }
+    .bubble.one { left: -4%; top: -58px; } .bubble.two { right: -4%; top: -30px; }
   }
   @media (prefers-reduced-motion: no-preference) {
     .card { transition: transform .2s ease-out; }
@@ -282,9 +283,10 @@
   <h1>An Open Software Factory</h1>
 
   <div class="stage">
-    <a class="bubble one" href="#sec-2">Orchestration</a>
-    <a class="bubble two" href="#sec-9">Metrics</a>
     <div class="fan">
+     <div class="deck">
+      <a class="bubble one" href="#sec-2">Orchestration</a>
+      <a class="bubble two" href="#sec-9">Metrics</a>
       <a class="card c1" href="#sec-1">
         <span class="title">Platform</span><small>runs on your machine</small>
         <div class="files">
@@ -345,6 +347,7 @@
           <span>Quality &amp; costs</span>
         </div>
       </a>
+     </div>
     </div>
   </div>
 
