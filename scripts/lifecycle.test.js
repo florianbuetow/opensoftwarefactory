@@ -34,13 +34,15 @@ case "$name:$1" in
   docker:info) [ -f "$LIFECYCLE_RUNTIME" ] && exit 0 || exit 1 ;;
   docker:ps)
     case " $* " in
-      *" -a "*|*" -aq "*) [ "\${MOCK_CLUSTER:-present}" = present ] && printf 'node-id\\n' ;;
+      *" -a "*|*" -aq "*) { [ "\${MOCK_CLUSTER:-present}" = present ] || [ -f "$LIFECYCLE_CREATED" ]; } && printf 'node-id\\n' ;;
       *) [ -f "$LIFECYCLE_STATE" ] && printf 'node-id\\n' ;;
     esac ;;
   docker:start) : > "$LIFECYCLE_STATE" ;;
   docker:stop) rm -f "$LIFECYCLE_STATE" ;;
+  docker:build) : > "$LIFECYCLE_BUILT" ;;
   docker:image)
-    [ "\${MOCK_MISSING_IMAGE:-}" = "$3" ] && exit 1 || exit 0 ;;
+    [ "\${MOCK_MISSING_IMAGE:-}" = "$3" ] && [ ! -f "$LIFECYCLE_BUILT" ] && exit 1 || exit 0 ;;
+  kind:create) : > "$LIFECYCLE_CREATED"; : > "$LIFECYCLE_STATE" ;;
 esac
 exit 0
 `;
@@ -57,6 +59,8 @@ exit 0
     LIFECYCLE_LOG: log,
     LIFECYCLE_STATE: state,
     LIFECYCLE_RUNTIME: runtime,
+    LIFECYCLE_CREATED: path.join(directory, "cluster-created"),
+    LIFECYCLE_BUILT: path.join(directory, "images-built"),
     MOCK_CLUSTER: options.cluster || "present",
     MOCK_MISSING_IMAGE: options.missingImage || "",
     MOCK_EXISTING_DEPLOYMENTS: options.existingDeployments || "",
@@ -116,23 +120,37 @@ test("deploy restarts services that existed before apply", async () => {
   } finally { await rm(f.directory, { recursive: true, force: true }); }
 });
 
-test("start fails when the cluster was not created", async () => {
-  const f = await fixture({ cluster: "missing" });
+test("start initializes the configuration before anything else", async () => {
+  const f = await fixture();
   try {
-    const output = f.run("start", false);
-    assert.match(output, /has not been created/);
-    assert.doesNotMatch(await f.calls(), /kind load|kubectl apply|docker build/);
+    f.run("start");
+    const calls = await f.calls();
+    assert.match(calls, /node scripts\/init-llm-gateway\.js/);
+    assert.ok(calls.indexOf("node scripts/init-llm-gateway.js") < calls.indexOf("docker start node-id"));
   } finally { await rm(f.directory, { recursive: true, force: true }); }
 });
 
-test("start fails without building when an existing cluster lacks a required image", async () => {
+test("start creates the cluster when it does not exist, then deploys", async () => {
+  const f = await fixture({ cluster: "missing" });
+  try {
+    f.run("start");
+    const calls = await f.calls();
+    assert.match(calls, /kind create cluster --name opensoftwarefactory/);
+    assert.ok(calls.indexOf("kind create cluster") < calls.indexOf("kind load docker-image"));
+    assert.match(calls, /apply -k infra\/kubernetes\/overlays\/local/);
+    assert.doesNotMatch(calls, /docker build/);
+  } finally { await rm(f.directory, { recursive: true, force: true }); }
+});
+
+test("start builds the images when one is missing, then deploys", async () => {
   const f = await fixture({ missingImage: "opensoftwarefactory-agent:local" });
   try {
-    const output = f.run("start", false);
-    assert.match(output, /Required images have not been built/);
+    f.run("start");
     const calls = await f.calls();
     assert.match(calls, /docker start node-id/);
-    assert.doesNotMatch(calls, /docker build|kind create cluster|kubectl apply/);
+    assert.match(calls, /docker build --tag opensoftwarefactory-agent:local services\/agent/);
+    assert.ok(calls.indexOf("docker build") < calls.indexOf("kind load docker-image"));
+    assert.doesNotMatch(calls, /kind create cluster/);
   } finally { await rm(f.directory, { recursive: true, force: true }); }
 });
 
@@ -222,22 +240,20 @@ test("status reads project pods and services without lifecycle mutations", async
   } finally { await rm(f.directory, { recursive: true, force: true }); }
 });
 
-test("update refuses an unreachable API before building images", async () => {
-  const f = await fixture({ running: true, apiDown: true });
+test("build builds the images and does nothing else", async () => {
+  const f = await fixture({ running: true });
   try {
-    assert.match(f.run("update", false), /not ready/);
-    assert.doesNotMatch(await f.calls(), /docker build|kind load|apply -k|docker start/);
+    f.run("build");
+    const calls = await f.calls();
+    assert.match(calls, /docker build --tag opensoftwarefactory-agent:local services\/agent/);
+    assert.doesNotMatch(calls, /kind |kubectl |docker start|docker stop|node /);
   } finally { await rm(f.directory, { recursive: true, force: true }); }
 });
 
-test("update explicitly builds images before deployment", async () => {
+test("update no longer exists", async () => {
   const f = await fixture({ running: true });
   try {
-    f.run("update");
-    const calls = await f.calls();
-    assert.match(calls, /docker build --tag opensoftwarefactory-agent:local services\/agent/);
-    assert.ok(calls.indexOf("docker build") < calls.indexOf("kind load docker-image"));
-    assert.ok(calls.indexOf("kind load docker-image") < calls.indexOf("apply -k"));
-    assert.doesNotMatch(calls, /kind create|kind delete|docker stop/);
+    f.run("update", false);
+    assert.doesNotMatch(await f.calls(), /docker build|kind load|apply -k/);
   } finally { await rm(f.directory, { recursive: true, force: true }); }
 });

@@ -36,7 +36,7 @@ init:
     printf "\033[0;32m✓ Local configuration initialized\033[0m\n"
     echo ""
 
-# Create the project KIND cluster only. Build and deploy with `just update`.
+# Create the project KIND cluster only. Build with `just build` and deploy with `just deploy`.
 cluster-create:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -186,10 +186,10 @@ help:
     @printf "  %-38s %s\n" "just help" "Show available commands"
     @echo ""
     @printf "\033[0;33mRun & Pipeline:\033[0m\n"
-    @printf "  %-38s %s\n" "just start" "Start the existing cluster and deploy existing images"
+    @printf "  %-38s %s\n" "just start" "Bring the factory up: run init, cluster-create, build and deploy as needed"
     @printf "  %-38s %s\n" "just stop" "Stop the project cluster and all its services"
+    @printf "  %-38s %s\n" "just build" "Build all local images"
     @printf "  %-38s %s\n" "just deploy" "Deploy existing images to the running cluster"
-    @printf "  %-38s %s\n" "just update" "Build images and deploy them"
     @printf "  %-38s %s\n" "just update-ui" "Build and deploy only the factory UI"
     @printf "  %-38s %s\n" "just status" "Show project pods and services"
     @printf "  %-38s %s\n" "just info" "Show each service's URLs and whether it is up"
@@ -208,20 +208,22 @@ help:
     @echo ""
 
 
-# Start the existing project cluster, then deploy already-built images.
+# Bring the factory up from any state. This is the only target that runs other steps for
+# you: it runs init, cluster-create and build only when they have not been done, starts a
+# stopped cluster, and deploys.
 start:
     #!/usr/bin/env bash
     set -euo pipefail
     echo ""
     trap 'printf "\033[0;31m✗ start failed\033[0m\n" >&2' ERR
-    printf "\033[0;34m=== Starting the project cluster ===\033[0m\n"
+    printf "\033[0;34m=== Starting the factory ===\033[0m\n"
     if ! docker info >/dev/null 2>&1; then colima start; fi
     just _vm-limits
+    just init
     nodes=$(docker ps -aq --filter label=io.x-k8s.kind.cluster={{cluster}})
     if [ -z "$nodes" ]; then
-        trap - ERR
-        printf "\033[0;31m✗ Cluster {{cluster}} has not been created; run just cluster-create first\033[0m\n" >&2
-        exit 1
+        just cluster-create
+        nodes=$(docker ps -aq --filter label=io.x-k8s.kind.cluster={{cluster}})
     fi
     running=$(docker ps -q --filter label=io.x-k8s.kind.cluster={{cluster}})
     for node in $nodes; do
@@ -236,8 +238,12 @@ start:
         fi
         sleep 2
     done
+    for dockerfile in services/*/Dockerfile; do
+        image="opensoftwarefactory-$(basename "$(dirname "$dockerfile")"):local"
+        if ! docker image inspect "$image" >/dev/null 2>&1; then just build; break; fi
+    done
     just deploy
-    printf "\033[0;32m✓ Project cluster and services started\033[0m\n"
+    printf "\033[0;32m✓ Factory started\033[0m\n"
     echo ""
 
 # Stop this project's KIND node containers. Cluster state and data remain intact.
@@ -325,7 +331,7 @@ deploy:
     done
     if [ "${#missing[@]}" -gt 0 ]; then
         trap - ERR
-        printf "\033[0;31m✗ Required images have not been built: %s; run just update\033[0m\n" "${missing[*]}" >&2
+        printf "\033[0;31m✗ Required images have not been built: %s; run just build\033[0m\n" "${missing[*]}" >&2
         exit 1
     fi
     just init
@@ -346,43 +352,26 @@ deploy:
     printf "\033[0;32m✓ Existing images deployed\033[0m\n"
     echo ""
 
-# Build all local images, then deploy them to the running cluster.
-update:
+# Build every services/*/Dockerfile and nothing else. `just deploy` loads the resulting images.
+build:
     #!/usr/bin/env bash
     set -euo pipefail
     echo ""
-    trap 'printf "\033[0;31m✗ update failed\033[0m\n" >&2' ERR
-    printf "\033[0;34m=== Updating local services ===\033[0m\n"
+    trap 'printf "\033[0;31m✗ build failed\033[0m\n" >&2' ERR
+    printf "\033[0;34m=== Building local images ===\033[0m\n"
     if ! docker info >/dev/null 2>&1; then colima start; fi
     # Public images need no credentials. Avoid a stale Docker Desktop helper.
     export DOCKER_CONFIG=$(mktemp -d)
     trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-    if ! docker info >/dev/null 2>&1 || ! docker ps -q --filter label=io.x-k8s.kind.cluster={{cluster}} | grep -q .; then
-        trap - ERR
-        printf "\033[0;31m✗ Cluster {{cluster}} is not running; run just start first\033[0m\n" >&2
-        exit 1
-    fi
-    if ! kubectl --context {{context}} --request-timeout=5s get nodes >/dev/null 2>&1; then
-        trap - ERR
-        printf "\033[0;31m✗ Cluster {{cluster}} is not ready; run just start first\033[0m\n" >&2
-        exit 1
-    fi
-    just _build
-    just deploy
-    # Each rebuild leaves the previous :local images behind without a name; remove them.
-    docker image prune -f >/dev/null
-    printf "\033[0;32m✓ All services updated\033[0m\n"
-    echo ""
-
-# Build every services/*/Dockerfile. `just deploy` loads the resulting images.
-_build:
-    #!/usr/bin/env bash
-    set -euo pipefail
     for dockerfile in services/*/Dockerfile; do
         dir=$(dirname "$dockerfile")
         image="opensoftwarefactory-$(basename "$dir"):local"
         docker build --tag "$image" "$dir"
     done
+    # Each rebuild leaves the previous :local images behind without a name; remove them.
+    docker image prune -f >/dev/null
+    printf "\033[0;32m✓ Local images built; deploy them with just deploy\033[0m\n"
+    echo ""
 
 # Remove only unused dangling image cache, never containers or volumes.
 _prune-image-cache:

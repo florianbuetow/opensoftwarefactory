@@ -98,7 +98,7 @@ test("help lists every public target and does not mutate state", async () => {
   const f = await fixture();
   try {
     const output = f.run(["help"]);
-    for (const target of ["cluster-create", "cluster-delete", "start", "stop", "deploy", "update", "update-ui", "reset", "reset-observe", "status", "info", "ui", "gateway", "observe", "temporal", "render", "check"])
+    for (const target of ["cluster-create", "cluster-delete", "start", "stop", "build", "deploy", "update-ui", "reset", "reset-observe", "status", "info", "ui", "gateway", "observe", "temporal", "render", "check"])
       assert.match(output, new RegExp(`just ${target}\\b`));
     assert.doesNotMatch(await f.calls(), /docker |kind |kubectl |node /);
   } finally { await rm(f.root, { recursive: true, force: true }); }
