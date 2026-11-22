@@ -10,7 +10,7 @@ const CREATOR_KEY = "factory.creator";
 const tabs = {};
 let activeTab = null;
 
-// Pages in menu order, with their titles. The Memory page keeps its old hash, #artifacts.
+// Routable pages and their navigation metadata.
 const PAGES = [
   { name: "intake", title: "Intake", icon: "connector", tip: "Triggers that start workflows from connector events" },
   { name: "workflows", title: "Workflows", icon: "workflow", tip: "Workflow graphs" },
@@ -21,17 +21,30 @@ const PAGES = [
   { name: "agents", title: "Agents", icon: "agent", tip: "Versioned agent definitions" },
   { name: "policies", title: "Policies", icon: "policy", tip: "Versioned policies" },
   { name: "mcp-gateway", title: "MCP Gateway", icon: "gateway", tip: "MCP passthrough services" },
-  { name: "artifacts", title: "Memory", icon: "memory", tip: "The blobstore: runs, tasks, templates, artifacts" },
-  { name: "evaluations", title: "Evaluations", icon: "evaluation", tip: "Saved sets of comparable runs" },
+  { name: "artifacts", title: "Blobstore", icon: "memory", tip: "Runs, tasks, templates, and artifacts" },
+  { name: "metrics", title: "Overview", icon: "metrics", tip: "Factory costs, tokens, runtime, and quality metrics" },
+  { name: "evaluations", title: "Evals", icon: "evaluation", tip: "Evaluation sets and judges" },
   { name: "connectors", title: "Connectors", icon: "connector", tip: "Git repositories and dev pods" },
   { name: "cluster", title: "Cluster", icon: "cluster", tip: "Pods, logs, and services" },
+  { name: "system-diagram", title: "System Diagram", icon: "diagram", tip: "Factory components and connections" },
 ];
 // Pages without a menu item: opened from another page, whose menu item stays the active one.
 const SUBPAGES = { teams: { name: "teams", title: "Team", menu: "runs" }, devpods: { name: "devpods", title: "Dev pod", menu: "connectors" } };
-Object.assign(SUBPAGES, { metrics: { name: "metrics", title: "Graphs", menu: "evaluations" }, judges: { name: "judges", title: "Judges", menu: "evaluations" }, pricing: { name: "pricing", title: "Prices", menu: "evaluations" } });
+Object.assign(SUBPAGES, { judges: { name: "judges", title: "Judges", menu: "evaluations" }, pricing: { name: "pricing", title: "Prices", menu: "metrics" } });
+
+// Top-level navigation groups and their destination pages.
+const NAV_GROUPS = [
+  { name: "Main", icon: "metrics", pages: ["metrics", "cluster", "system-diagram"] },
+  { name: "Factory", icon: "workflow", pages: ["intake", "workflows", "agents", "runs", "evaluations", "events"] },
+  { name: "Tasks", icon: "gate", pages: ["decisions", "sessions"] },
+  { name: "Connectors", icon: "connector", pages: ["connectors", "mcp-gateway"] },
+  { name: "Context", icon: "memory", pages: ["policies", "artifacts"], planned: [{ before: "artifacts", title: "Memory", note: "Planned feature", icon: "memory" }] },
+];
 
 // Icons: 16px, 1.5px stroke, currentColor. Static markup only.
 const ICONS = {
+  metrics: '<path d="M2 2v12h12M5 11V8M9 11V5M13 11V2"/>',
+  diagram: '<rect x="2" y="3" width="4" height="4" rx="1"/><rect x="10" y="3" width="4" height="4" rx="1"/><rect x="6" y="10" width="4" height="4" rx="1"/><path d="M6 5h4M4 7v2l4 1M12 7v2l-4 1"/>',
   workflow: '<rect x="2" y="2" width="5" height="4" rx="1"/><rect x="9" y="10" width="5" height="4" rx="1"/><path d="M4.5 6v2.5a1.5 1.5 0 0 0 1.5 1.5h3"/>',
   run: '<circle cx="8" cy="8" r="6"/><path d="M6.5 5.5v5l4-2.5z"/>',
   evaluation: '<path d="M3 3h10v10H3z"/><path d="M5.5 7.5l1.5 1.5 3.5-4M5.5 11h5"/>',
@@ -372,8 +385,8 @@ function markdownEditorSection(label, area, resize = () => {}) {
   return section;
 }
 
-// Memory evidence links are limited to valid blob IDs. They never turn arbitrary URL-looking
-// text into a link, and they always open the corresponding object on the Memory page.
+// Blobstore evidence links are limited to valid blob IDs. They never turn arbitrary URL-looking
+// text into a link, and they always open the corresponding object on the Blobstore page.
 const blobPartPattern = "[A-Za-z0-9_-](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?";
 const blobIDPattern = new RegExp("(?:^|[\\s\"'(])((?:runs|agents|policies|tasks|templates|evaluation-sets|mcp-gateway)/" + blobPartPattern + "(?:/" + blobPartPattern + ")*)", "g");
 function validBlobID(id) {
@@ -410,7 +423,7 @@ function promptEvidenceLinks(record) {
 function blobReferencePanel(text, excluded = []) {
   const skip = new Set(excluded.filter(Boolean));
   const links = blobReferences(text).filter((id) => !skip.has(id)).map((id) => h("li", {}, memoryObjectLink(id)));
-  return links.length ? h("section", { className: "memory-reference-links" }, h("h3", { className: "section-title" }, "Memory references"), h("ul", {}, ...links)) : null;
+  return links.length ? h("section", { className: "memory-reference-links" }, h("h3", { className: "section-title" }, "Blobstore references"), h("ul", {}, ...links)) : null;
 }
 
 // Times are shown relative ("3 min ago") with the full timestamp in a tooltip; timeEl
@@ -1178,6 +1191,7 @@ const PANELS = {
     { column: ".list-panel", prop: "--col-list", min: 200, max: 480 },
     { column: ".teamview-files", prop: "--col-detail", min: 320, max: 720, edge: "left" },
   ],
+  judges: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   agents: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   policies: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   "mcp-gateway": [
@@ -1209,6 +1223,7 @@ function reserveToggles() {
   document.querySelector(".content").style.setProperty("--toggles-w", `${width}px`);
   for (const p of document.querySelectorAll(".toggles-edge")) p.classList.remove("toggles-edge");
   const page = activeTab && $(`tab-${activeTab}`);
+  box.style.top = page?.classList.contains("page-sectioned") ? "48px" : "0px";
   if (!page || !width) return;
   const right = page.getBoundingClientRect().right;
   for (const p of page.querySelectorAll(":scope > .panel, :scope > .canvas-area")) {
@@ -1309,7 +1324,7 @@ function setupPanels() {
 }
 
 // Pages whose actions record the acting person: the chip turns red there when empty.
-const NEEDS_NAME = new Set(["workflows", "decisions", "sessions", "agents", "policies", "artifacts"]); // Memory: uploaded files
+const NEEDS_NAME = new Set(["workflows", "decisions", "sessions", "agents", "policies", "artifacts"]);
 
 function updateNameWarning() {
   const missing = NEEDS_NAME.has(activeTab) && !creator();
@@ -1410,12 +1425,49 @@ function setPageActions(...nodes) {
   $("page-toggles").replaceChildren(...nodes.filter(Boolean));
 }
 
+const pageHrefs = new Map();
+let navPopover = null, navTrigger = null;
+
+function closeNavPopover(returnFocus = false) {
+  if (!navPopover || navPopover.hidden) return;
+  navPopover.hidden = true;
+  navTrigger?.setAttribute("aria-expanded", "false");
+  if (returnFocus) navTrigger?.focus();
+  navTrigger = null;
+}
+
+function openNavPopover(trigger, group) {
+  if (navTrigger === trigger && !navPopover.hidden) { closeNavPopover(true); return; }
+  closeNavPopover();
+  navTrigger = trigger;
+  const entries = [];
+  for (const name of group.pages) {
+    for (const planned of (group.planned || []).filter((item) => item.before === name)) {
+      entries.push(h("div", { className: "nav-planned", role: "menuitem", "aria-disabled": "true", title: planned.note },
+        icon(planned.icon), h("span", {}, planned.title)));
+    }
+    const page = PAGES.find((item) => item.name === name);
+    const label = name === "connectors" ? "Git" : page.title;
+    const link = h("a", { href: pageHrefs.get(name) || `#${name}`, role: "menuitem", dataset: { page: name }, title: page.tip }, icon(page.icon), h("span", {}, label));
+    if (name === activeTab || SUBPAGES[activeTab]?.menu === name) link.setAttribute("aria-current", "page");
+    link.onclick = () => closeNavPopover(true);
+    entries.push(link);
+  }
+  navPopover.replaceChildren(...entries);
+  navPopover.hidden = false;
+  trigger.setAttribute("aria-expanded", "true");
+  const anchor = trigger.getBoundingClientRect(), bounds = navPopover.getBoundingClientRect();
+  navPopover.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - bounds.width - 8))}px`;
+  navPopover.style.top = `${anchor.bottom + 4}px`;
+  (navPopover.querySelector('[aria-current="page"]') || navPopover.querySelector("a"))?.focus();
+}
+
 function route() {
   let hash = location.hash.slice(1);
   try { hash = decodeURI(hash); } catch { /* keep it encoded */ }
   const name = hash.split(/[/?]/)[0];
   if (!tabs[name]) {
-    location.replace("#workflows");
+    location.replace("#metrics");
     return;
   }
   if (activeTab !== name) {
@@ -1430,31 +1482,48 @@ function route() {
     reserveToggles();
     const page = PAGES.find((p) => p.name === name) || SUBPAGES[name];
     document.title = `${page.title} · Open Software Factory`;
-    for (const a of document.querySelectorAll("#rail a")) {
-      const on = a.dataset.page === (page.menu || name);
-      a.classList.toggle("active", on);
-      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    for (const button of $("rail").querySelectorAll(".nav-trigger")) {
+      const group = NAV_GROUPS.find((item) => item.name === button.dataset.group);
+      button.classList.toggle("active", group.pages.includes(page.menu || name));
     }
-    fitMenu(); // the active page keeps its label, so the others may have to give way
+    fitMenu(); // Keep navigation within the available header width.
     updateNameWarning();
   }
   tabs[name].show(hash.slice(name.length));
 }
 
 function buildRail() {
-  $("rail").replaceChildren(...PAGES.map((p) => {
-    const a = h("a", { href: `#${p.name}`, title: p.tip, dataset: { page: p.name } }, icon(p.icon), h("span", { className: "rail-label" }, p.title));
-    if (p.name === "decisions" || p.name === "sessions") a.append(h("span", { id: `${p.name}-badge`, className: "badge", hidden: true }));
-    return a;
+  navPopover = h("div", { className: "nav-popover", role: "menu", hidden: true, "aria-label": "Pages" });
+  document.body.append(navPopover);
+  $("rail").replaceChildren(...NAV_GROUPS.map((group) => {
+    const button = h("button", { type: "button", className: "nav-trigger", dataset: { group: group.name },
+      "aria-haspopup": "menu", "aria-expanded": "false", onclick: () => openNavPopover(button, group) },
+      icon(group.icon), h("span", { className: "rail-label" }, group.name), icon("down", 12));
+    if (group.name === "Tasks") button.append(h("span", { id: "decisions-badge", className: "badge", hidden: true }), h("span", { id: "sessions-badge", className: "badge", hidden: true }));
+    return button;
   }));
+  document.addEventListener("pointerdown", (event) => {
+    if (navPopover.hidden || navPopover.contains(event.target) || navTrigger?.contains(event.target)) return;
+    closeNavPopover();
+  });
+  document.addEventListener("focusin", (event) => {
+    if (navPopover.hidden || navPopover.contains(event.target) || navTrigger?.contains(event.target)) return;
+    closeNavPopover();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (navPopover.hidden) return;
+    if (event.key === "Escape") { event.preventDefault(); closeNavPopover(true); }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const links = [...navPopover.querySelectorAll("a")], at = links.indexOf(document.activeElement);
+      links[(at + (event.key === "ArrowDown" ? 1 : -1) + links.length) % links.length]?.focus();
+    }
+  });
   fitMenu();
 }
 
-// fitMenu lets the menu give way only as far as it must to fit between the logo and the chip,
-// measured, since the labels, the two count badges, and the active page change its width: first
-// its spacing, then the product name, then the icons of the other pages, and at last their
-// labels instead (an icon alone, named by its tooltip). The active page keeps icon and label.
-const MENU_FITS = [[], ["fit-tight"], ["fit-tight", "fit-logo"], ["fit-tight", "fit-logo", "fit-labels"], ["fit-tight", "fit-logo", "fit-icons"]];
+// Keep group labels visible; the rail scrolls horizontally on narrow windows.
+const MENU_FITS = [[], ["fit-tight"], ["fit-tight", "fit-logo"]];
 function fitMenu() {
   const menu = $("rail"), bar = menu.parentElement;
   let step = 0;
@@ -1462,11 +1531,6 @@ function fitMenu() {
     bar.classList.remove("fit-tight", "fit-logo", "fit-labels", "fit-icons");
     bar.classList.add(...MENU_FITS[step]);
     if (menu.scrollWidth <= menu.clientWidth) break;
-  }
-  const icons = step >= MENU_FITS.length - 1;
-  for (const a of menu.children) {
-    const page = PAGES.find((p) => p.name === a.dataset.page);
-    a.title = icons && !a.classList.contains("active") ? page.title : page.tip; // an icon alone is named by its tooltip
   }
 }
 window.addEventListener("resize", fitMenu);
@@ -1504,11 +1568,10 @@ function startApp() {
     const pageOf = (hash) => hash.slice(1).split(/[/?]/)[0];
     const from = new URL(ev.oldURL).hash, to = location.hash;
     if (pageOf(from) !== pageOf(to)) {
-      const left = document.querySelector(`#rail a[data-page="${pageOf(from)}"]`);
-      if (left) left.href = from;
-      const entered = document.querySelector(`#rail a[data-page="${pageOf(to)}"]`);
-      if (entered) entered.href = `#${pageOf(to)}`;
+      if (PAGES.some((p) => p.name === pageOf(from))) pageHrefs.set(pageOf(from), from);
+      pageHrefs.delete(pageOf(to));
     }
+    closeNavPopover();
     route();
   });
   route();

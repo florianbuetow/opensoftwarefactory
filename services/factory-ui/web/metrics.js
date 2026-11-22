@@ -4,6 +4,8 @@
   const metric = measurementUI.select("metric-name", [["", "Not set"], ["cost", "Cost"], ["duration_ms", "Runtime"], ["input_tokens", "Input tokens"], ["output_tokens", "Output tokens"], ["cached_input_tokens", "Cached input tokens"], ["uncached_input_tokens", "Uncached input tokens"], ["quality", "Quality metric"]]);
   const quality = h("input", { id: "metric-quality", hidden: true });
   const grouping = measurementUI.select("metric-group", [["", "Not set"], ["model", "Model"], ["workflow", "Workflow"], ["agent", "Agent"], ["run", "Run"]]);
+  const range = measurementUI.select("metric-range", [["24h", "Last 24 hours"], ["7d", "Last 7 days"], ["30d", "Last 30 days"], ["custom", "Custom range"]]);
+  range.value = "7d";
   const from = h("input", { id: "metric-from", type: "datetime-local", required: true });
   const to = h("input", { id: "metric-to", type: "datetime-local", required: true });
   const currency = measurementUI.select("metric-currency", [["", "Not set"], ["EUR", "EUR"], ["USD", "USD"]]);
@@ -22,10 +24,31 @@
     grouping.value = choices.some(([value]) => value === previous) ? previous : "";
     grouping.title = metric.value === "duration_ms" ? "Whole-workflow runtime has no single model or agent attribution" : metric.value === "quality" ? "Groups findings by evaluated run or producing judge" : "";
   };
-  const submit = h("button", { type: "submit", className: "primary" }, "Show graph");
+  const fromField = measurementUI.field("From", from), toField = measurementUI.field("To", to);
+  fromField.hidden = toField.hidden = true;
+  const currencyField = measurementUI.field("Currency", currency); currencyField.hidden = true;
+  function updateRange() {
+    fromField.hidden = toField.hidden = range.value !== "custom";
+    if (range.value === "custom") return;
+    const end = new Date(), days = range.value === "24h" ? 1 : range.value === "30d" ? 30 : 7;
+    const local = date => new Date(+date - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    from.value = local(new Date(+end - days * 86400000)); to.value = local(end);
+  }
+  const updateMetric = metric.onchange;
+  metric.onchange = () => {
+    updateMetric();
+    if (!grouping.value) grouping.value = metric.value === "duration_ms" ? "workflow" : metric.value === "quality" ? "run" : "model";
+    currencyField.hidden = metric.value !== "cost";
+    if (state.active) load();
+  };
+  range.onchange = () => { updateRange(); if (state.active && range.value !== "custom") load(); };
+  grouping.onchange = currency.onchange = () => { if (state.active) load(); };
+  metric.value = "duration_ms"; metric.onchange(); updateRange();
+  const submit = h("button", { type: "submit", className: "primary" }, "Apply");
   const form = h("form", { className: "measurement-filters", onsubmit: event => { event.preventDefault(); load(); } },
-    measurementUI.field("Measurement", metric), qualityField, measurementUI.field("Group by", grouping), measurementUI.field("From", from), measurementUI.field("To", to), measurementUI.field("Currency", currency), submit);
-  body.append(form, status, legend, chart, detail, findings);
+    measurementUI.field("Measurement", metric), qualityField, measurementUI.field("Group by", grouping), measurementUI.field("Period", range), fromField, toField, currencyField, submit);
+  const valuesDetail = h("details", { className: "measurement-values" }, h("summary", {}, "Measured values"), detail);
+  body.append(form, status, legend, chart, valuesDetail, findings);
   function svgNode(tag, attrs = {}, text) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
     for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
@@ -38,6 +61,8 @@
     const start = new Date(from.value), end = new Date(to.value);
     if (!Number.isFinite(+start) || !Number.isFinite(+end) || start >= end) { status.textContent = "Select a valid time range."; return; }
     const request = ++state.request; submit.disabled = true;
+    status.textContent = "Loading measurements…";
+    chart.replaceChildren(); detail.replaceChildren(); legend.replaceChildren();
     loadFindings(start, end, request);
     try {
       const params = new URLSearchParams({ metric: metric.value === "quality" ? quality.value.trim() : metric.value, group_by: grouping.value, from: start.toISOString(), to: end.toISOString() });
@@ -106,5 +131,5 @@
     chart.replaceChildren(svg);
     detail.replaceChildren(dataTable(["Series", "Time", "Value", "State"], visible.flatMap(line => (line.points || []).slice(-100).map(p => h("tr", {}, h("td", {}, line.key), h("td", {}, p.time), h("td", { className: "num" }, p.value === null || p.value === undefined ? "Unknown" : String(p.value)), h("td", {}, p.status || "Reported"))))));
   }
-  tabs.metrics = { show() { state.active = true; }, hide() { state.active = false; ++state.request; submit.disabled = false; } };
+  tabs.metrics = { show() { state.active = true; updateRange(); load(); }, hide() { state.active = false; ++state.request; submit.disabled = false; } };
 })();

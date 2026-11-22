@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, symlink, readFile, stat, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, symlink, readFile, stat } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -46,11 +46,20 @@ test("operator seed payloads are not tracked", () => {
   assert.deepEqual(files.filter(p => p.startsWith("scratch/") || /(^|\/)seed\//.test(p) || /(^|\/)seeds\//.test(p)), []);
 });
 
-test("root Markdown and examples remain local-only", async () => {
+test("examples remain local-only", async () => {
   const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
-  const markdown = (name) => /\.(md|markdown|mdown)$/i.test(name);
-  assert.deepEqual(files.filter(p => p.startsWith("examples/") || (!p.includes("/") && markdown(p))), []);
+  assert.deepEqual(files.filter(p => p.startsWith("examples/")), []);
+  // The test writes its own file, so it does not depend on any file of the project.
   const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-  const entries = await readdir(root, { withFileTypes: true });
-  assert.deepEqual(entries.filter(entry => entry.isFile() && markdown(entry.name)).map(entry => entry.name), []);
+  const dir = path.join(root, "examples");
+  const created = await mkdir(dir, { recursive: true });
+  const file = path.join(dir, `local-only-test-${process.pid}.txt`);
+  await writeFile(file, "test\n");
+  try {
+    // git check-ignore exits 0 when the path is ignored and fails otherwise.
+    execFileSync("git", ["check-ignore", "-q", file], { cwd: root });
+  } finally {
+    await rm(file, { force: true });
+    if (created) await rm(dir, { recursive: true, force: true });
+  }
 });

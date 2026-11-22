@@ -380,7 +380,7 @@ const RunsLogic = (() => {
       tr.addEventListener("contextmenu", (ev) => openMenu(ev, [
         ["Re-run", () => rerun(r), "", runVersion(r) ? `Starts v${runVersion(r)} of the workflow, the version this run used, with its original input` : "Starts the newest version of the workflow with this run’s original input"],
         ...teamItems(),
-        ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(r.trace_id)}`; }, "", "Opens the run's objects in Memory"],
+        ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(r.trace_id)}`; }, "", "Opens the run's objects in Blobstore"],
         "-",
         ["Remove run", () => clearRuns([r]), "danger", "Removes this run with its artifacts"],
         "-",
@@ -494,7 +494,7 @@ const RunsLogic = (() => {
     const file = `${(record.workBranch || "pull-request").replace(/[^A-Za-z0-9._-]+/g, "-")}.patch`;
     return h("div", { className: "section" },
       h("div", { className: "file-head" }, h("h3", { className: "section-title" }, "Pull request"),
-        h("a", { href: memoryObjectHash(id), title: "Opens the pull request record in Memory" }, "View record"),
+        h("a", { href: memoryObjectHash(id), title: "Opens the pull request record in Blobstore" }, "View record"),
         record.url ? h("a", { href: record.url, target: "_blank", rel: "noopener" }, "Open on GitHub") : null,
         record.patch && validBlobID(record.patch) ? h("a", { className: "step-action", href: `/api/blobs/blobs/${record.patch}`, download: file, title: "Downloads the commits as a patch that git am applies" }, "Download patch") : null),
       h("p", { className: "pull-request-title" }, record.title || "Untitled"),

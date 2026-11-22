@@ -1,0 +1,74 @@
+flowchart LR
+  operator[Operator]
+
+  subgraph control[Control room]
+    ui[Factory UI]
+  end
+
+  subgraph execution[Workflow execution]
+    orchestrator[Orchestrator]
+    temporal[Temporal]
+    jetstream[JetStream events]
+  end
+
+  subgraph runtime[Agent runtime]
+    agent[Agent service]
+    llm[LLM gateway]
+    mcp[MCP gateway]
+    tools[Tool gateway]
+  end
+
+  subgraph state[State and catalogs]
+    blobs[(Blobstore)]
+    agents[Agent registry]
+    policies[Policy registry]
+    evaluation[Evaluation]
+  end
+
+  subgraph development[Git and development]
+    connectors[Connectors]
+    git[Git host]
+    pods[Dev pods]
+  end
+
+  subgraph observability[Observability]
+    telemetry[Telemetry collector]
+    observe[OpenObserve]
+  end
+
+  operator --> ui
+  ui --> orchestrator
+  ui --> agents
+  ui --> policies
+  ui --> evaluation
+  ui --> connectors
+
+  orchestrator <--> temporal
+  orchestrator --> agent
+  orchestrator --> blobs
+  orchestrator --> jetstream
+
+  agent --> agents
+  agent --> policies
+  agent --> llm
+  agent --> mcp
+  agent --> blobs
+  mcp --> tools
+  tools --> connectors
+
+  agents --> blobs
+  policies --> blobs
+  evaluation --> blobs
+  evaluation --> observe
+
+  connectors --> git
+  connectors --> pods
+  pods --> git
+
+  ui -. health and logs .-> observe
+  orchestrator -. traces .-> telemetry
+  agent -. traces .-> telemetry
+  llm -. traces .-> telemetry
+  mcp -. traces .-> telemetry
+  connectors -. traces .-> telemetry
+  telemetry --> observe

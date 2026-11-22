@@ -169,7 +169,7 @@ const DecisionsLogic = {
 
   function menuFor(c) {
     const run = ["View run", () => { location.hash = `#runs/${c.trace}`; }, "", "Opens the run on Runs"];
-    const trace = ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(c.trace)}`; }, "", "Opens the run's objects in Memory"];
+    const trace = ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(c.trace)}`; }, "", "Opens the run's objects in Blobstore"];
     if (c.kind === "pending") {
       // The gate shown in the detail is not decided from here either while its documents still load.
       const tip = DecisionsLogic.blocked(creator(), state.shown !== c.id || state.ready === c.id);

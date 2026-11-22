@@ -13,7 +13,7 @@ const source = read("connectors.js"), app = read("app.js"), html = read("index.h
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((done) => setTimeout(done, 0)); };
 
 function logic() {
-  const context = { URLSearchParams };
+  const context = { URL, URLSearchParams };
   vm.runInNewContext(`${source.slice(0, source.indexOf("// ---- Connectors page ----"))}\nglobalThis.out = ConnectorsLogic;`, context);
   return context.out;
 }
@@ -199,7 +199,7 @@ function pages({ repos = REPOS, pods = PODS, files = {}, fail = {} } = {}) {
     return tree;
   };
   const context = {
-    console, setTimeout, clearTimeout, structuredClone, URLSearchParams, h, $: byId, api, createTree,
+    console, setTimeout, clearTimeout, structuredClone, URL, URLSearchParams, h, $: byId, api, createTree,
     setInterval: () => 1, clearInterval() {},
     document: { hidden: false },
     location: { hash: "#connectors", replace(hash) { context.location.hash = hash; } },
@@ -244,10 +244,12 @@ function pages({ repos = REPOS, pods = PODS, files = {}, fail = {} } = {}) {
   return ui;
 }
 
-test("Connectors sits directly before Cluster in the menu, with its page and the dev pod view registered", () => {
+test("Git and MCP share the Connectors menu, with the dev pod view attached to Git", () => {
   const menu = app.slice(app.indexOf("const PAGES = ["), app.indexOf("];", app.indexOf("const PAGES = [")));
   const names = [...menu.matchAll(/name: "([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(names.slice(-3), ["evaluations", "connectors", "cluster"]);
+  assert.ok(names.includes("connectors"));
+  const groups = app.slice(app.indexOf("const NAV_GROUPS = ["), app.indexOf("];", app.indexOf("const NAV_GROUPS = [")));
+  assert.match(groups, /name: "Connectors"[^\n]*pages: \["connectors", "mcp-gateway"\]/);
   assert.match(menu, /\{ name: "connectors", title: "Connectors", icon: "connector", tip: "[^"]+" \}/);
   assert.match(app, /connector: '<path /, "its icon, drawn like the others");
   assert.match(app, /devpods: \{ name: "devpods", title: "Dev pod", menu: "connectors" \}/, "the pod view has no menu item of its own");
@@ -263,8 +265,8 @@ test("the page lists the Git repositories and the live dev pods", async () => {
   await ui.open();
   assert.equal(ui.context.$("connector-kinds").textContent, "Git", "the one connector kind");
   assert.deepEqual(ui.rows(0), [
-    ["claims-build", "Plain", "http://git-host:8080/claims-build.git", "main", "No credential"],
-    ["site", "GitHub", "https://github.com/acme/site.git", "trunk", "Read and write"],
+    ["claims-build", "Plain", "/git/browse/claims-build.git", "main", "No credential"],
+    ["site", "GitHub", "https://github.com/acme/site", "trunk", "Read and write"],
   ]);
   const [held, idle] = ui.rows(1);
   assert.deepEqual(held.slice(0, 5), ["Running", "claims-build", "agent/pay-1a2b3c4d", "Ex06 Implementation · 3 min ago", "Held by a run"]);
@@ -274,6 +276,31 @@ test("the page lists the Git repositories and the live dev pods", async () => {
   assert.equal(run.href, "#runs/trace-1", "a run links to Runs");
   assert.equal(find(ui.row(1, "agent/pay"), (n) => n.tag === "a" && n.textContent === "View files").href, "#devpods/pod-1");
   assert.doesNotMatch(JSON.stringify(ui.rows(0)), /token/);
+});
+
+test("repository links open in the browser without opening the settings row", async () => {
+  const ui = pages();
+  await ui.open();
+  const row = ui.row(0, "claims-build");
+  const local = find(row, (node) => node.tag === "a");
+  assert.equal(local.href, "/git/browse/claims-build.git");
+  assert.equal(local.target, "_blank");
+  assert.equal(local.rel, "noopener");
+  let stops = 0;
+  const stopPropagation = () => { stops++; };
+  await fire(local, "click", { stopPropagation });
+  await fire(local, "keydown", { key: "Enter", stopPropagation });
+  assert.equal(stops, 2);
+  assert.equal(ui.dialogs.length, 0);
+  await fire(row, "click");
+  assert.equal(ui.field("URL").value, "http://git-host:8080/claims-build.git");
+
+  const { repositoryLink } = logic();
+  assert.equal(repositoryLink("git@github.com:acme/site.git"), "https://github.com/acme/site");
+  assert.equal(repositoryLink("ssh://git@github.com/acme/site.git"), "https://github.com/acme/site");
+  assert.equal(repositoryLink("https://git.example.com/group/repo.git"), "https://git.example.com/group/repo.git");
+  assert.equal(repositoryLink("https://user:secret@git.example.com/group/repo.git"), "https://git.example.com/group/repo.git");
+  assert.equal(repositoryLink("javascript:alert(1)"), "");
 });
 
 test("empty lists and a service that does not answer are said in the page's words", async () => {

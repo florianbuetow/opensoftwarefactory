@@ -50,7 +50,7 @@
       });
       li.addEventListener("contextmenu", (ev) => openMenu(ev, [
         ["View run", () => { location.hash = `#runs/${e.trace_id}`; }, "", "Opens the run on Runs"],
-        ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(e.trace_id)}`; }, "", "Opens the run's objects in Memory"],
+        ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(e.trace_id)}`; }, "", "Opens the run's objects in Blobstore"],
       ]));
       return li;
     }));

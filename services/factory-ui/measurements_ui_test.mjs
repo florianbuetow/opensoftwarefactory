@@ -8,6 +8,8 @@ function setup(page, responder) {
   function h(tag, props = {}, ...children) {
     const node = { tag, children: [], hidden: false, disabled: false, checked: false, textContent: "", className: "", attrs: {}, parentElement: null,
       append(...items) { for (const item of items.flat().filter(x => x !== null && x !== undefined && x !== false)) { this.children.push(item); if (typeof item === "object") item.parentElement = this; } },
+      prepend(...items) { const previous = this.children; this.children = []; this.append(...items, ...previous); },
+      insertBefore(item, before) { const index = this.children.indexOf(before); this.children.splice(index < 0 ? this.children.length : index, 0, item); item.parentElement = this; },
       replaceChildren(...items) { this.children = []; this.append(...items); },
       setAttribute(k, v) { this.attrs[k] = v; },
       remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(x => x !== this); },
@@ -23,7 +25,7 @@ function setup(page, responder) {
     if (props.id) elements.set(props.id, node);
     nodes.push(node); return node;
   }
-  for (const id of ["tab-events", "tab-intake", "tab-pricing", "tab-metrics", "tab-judges", "evaluation-new-slot"]) h("div", { id });
+  for (const id of ["tab-evaluations", "tab-events", "tab-intake", "tab-pricing", "tab-metrics", "tab-judges", "evaluation-new-slot"]) h("div", { id });
   elements.get("evaluation-new-slot").parentElement = h("div");
   const context = { h, $: id => elements.get(id), tabs: {}, URLSearchParams, Date, Set, Map, JSON, Number, crypto: { randomUUID: () => "test-id" },
     localStorage: { getItem: () => null, setItem() {} },
@@ -53,7 +55,7 @@ test("event viewer bounds retained rows and closes only its viewer session", asy
 
 test("text judge findings retain target, producer and artifact links", async () => {
   const f = setup("metrics", (_, route) => route.includes("/measurements?") ? { items: [{ metric_name: "explanation", text_value: "The output preserves evidence.", target_run_id: "target", producer_run_id: "producer", artifact_id: "runs/producer/output.json", status: "derived" }] } : { series: [], coverage: { known: 0, missing: 0 } });
-  f.context.tabs.metrics.show(); f.elements.get("metric-name").value = "input_tokens"; f.elements.get("metric-group").value = "model";
+  f.context.tabs.metrics.show(); f.elements.get("metric-name").value = "input_tokens"; f.elements.get("metric-name").onchange(); f.elements.get("metric-group").value = "model";
   f.elements.get("metric-from").value = "2026-11-21T09:00"; f.elements.get("metric-to").value = "2026-11-21T11:00";
   f.nodes.find(n => n.tag === "form").onsubmit({ preventDefault() {} }); await settle();
   assert.ok(f.nodes.some(n => n.tag === "p" && n.children.includes("The output preserves evidence.")));
@@ -114,10 +116,54 @@ test("currency conversion editing preserves decimal strings and explicit currenc
 
 test("graphs keep missing values as gaps and permit multiple series", async () => {
   const f = setup("metrics", () => ({ series: [{ key: "model-a", points: [{ time: "2026-11-21T10:00:00Z", value: "1" }, { time: "2026-11-21T10:01:00Z", value: null }, { time: "2026-11-21T10:02:00Z", value: "3" }] }, { key: "model-b", points: [{ time: "2026-11-21T10:00:00Z", value: "2" }] }], coverage: { known: 3, missing: 1 } }));
-  f.context.tabs.metrics.show(); f.elements.get("metric-name").value = "input_tokens"; f.elements.get("metric-group").value = "model";
+  f.context.tabs.metrics.show(); f.elements.get("metric-name").value = "input_tokens"; f.elements.get("metric-name").onchange(); f.elements.get("metric-group").value = "model";
   f.elements.get("metric-from").value = "2026-11-21T09:00"; f.elements.get("metric-to").value = "2026-11-21T11:00";
   f.nodes.find(n => n.tag === "form").onsubmit({ preventDefault() {} }); await settle();
   const lines = f.nodes.filter(n => n.attrs.class?.startsWith("plot-line"));
   assert.equal(lines.length, 2); assert.equal((lines[0].attrs.d.match(/M/g) || []).length, 2);
   assert.ok(f.requests.some(([, path]) => path.includes("group_by=model")));
+});
+
+test("factory metrics and evaluations have separate navigation", () => {
+  const f = setup("metrics", () => ({}));
+  const navs = f.nodes.filter(n => n.tag === "nav");
+  assert.deepEqual(navs.find(n => n["aria-label"] === "Metrics").children.map(n => n.href), ["#metrics", "#pricing"]);
+  assert.deepEqual(navs.find(n => n["aria-label"] === "Evaluations").children.map(n => n.href), ["#evaluations", "#judges"]);
+  const app = fs.readFileSync(new URL("web/app.js", import.meta.url), "utf8");
+  const c = vm.createContext({});
+  vm.runInContext(app.slice(app.indexOf("const PAGES ="), app.indexOf("// Icons:")) + ";globalThis.pages=PAGES;globalThis.subpages=SUBPAGES;globalThis.groups=NAV_GROUPS;", c);
+  assert.equal(c.pages.find(p => p.name === "metrics").title, "Overview");
+  assert.equal(c.pages.find(p => p.name === "evaluations").title, "Evals");
+  assert.deepEqual(Array.from(c.groups.find(g => g.name === "Main").pages), ["metrics", "cluster", "system-diagram"]);
+  assert.equal(c.subpages.metrics, undefined);
+  assert.equal(c.subpages.pricing.menu, "metrics");
+  assert.equal(c.subpages.judges.menu, "evaluations");
+});
+
+test("metrics loads actual runtime on entry without date entry and exposes custom dates only on request", async () => {
+  const f = setup("metrics", (_, route) => route.includes("/series?") ? {series: [{key:"workflow",points:[{time:new Date().toISOString(),value:938}]}],coverage:{known:1,missing:0}} : {items:[]});
+  f.context.tabs.metrics.show(); await settle();
+  assert.equal(f.elements.get("metric-range").value, "7d");
+  assert.equal(f.elements.get("metric-name").value, "duration_ms");
+  assert.equal(f.elements.get("metric-from").parentElement.hidden, true);
+  assert.ok(f.requests.some(([,route]) => route.includes("/series?") && route.includes("metric=duration_ms") && route.includes("group_by=workflow")));
+  assert.ok(f.nodes.find(n => n.className === "measurement-chart").children.some(n => n.tag === "svg"));
+  const range = f.elements.get("metric-range"); range.value="custom"; range.onchange();
+  assert.equal(f.elements.get("metric-from").parentElement.hidden, false);
+  range.value="24h"; range.onchange(); await settle();
+  assert.equal(f.elements.get("metric-from").parentElement.hidden, true);
+});
+
+test("Sets and Judges keep category navigation above headed panels", () => {
+  const f = setup("judges", () => ({}));
+  for (const id of ["tab-evaluations", "tab-judges"]) {
+    const page = f.elements.get(id);
+    assert.equal(page.children[0].tag, "nav");
+    assert.deepEqual(page.children[0].children.map(n => n.href), ["#evaluations", "#judges"]);
+  }
+  const page = f.elements.get("tab-judges");
+  assert.equal(page.children[1].className, "panel list-panel");
+  assert.equal(page.children[2].className, "panel content-panel");
+  assert.equal(page.children[1].children[0].className, "panel-head");
+  assert.equal(page.children[2].children[0].className, "panel-head");
 });

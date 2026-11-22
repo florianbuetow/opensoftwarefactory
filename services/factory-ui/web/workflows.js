@@ -2708,7 +2708,7 @@ const WorkflowLogic = (() => {
   // ---- Deep links: #workflows/<workflow>/<step>; selecting pushes history so Back works. ----
 
   // The page without a workflow in its hash reopens the workflow and step last shown, as Agents
-  // and Memory reopen theirs; one that is gone since gives way to the current one without a notice.
+  // and Blobstore reopen theirs; one that is gone since gives way to the current one without a notice.
   const LAST_KEY = "factory.workflows.last";
 
   // currentHash names what the canvas shows; the version only when it is not the newest.

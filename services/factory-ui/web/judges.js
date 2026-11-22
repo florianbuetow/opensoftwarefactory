@@ -1,15 +1,21 @@
 "use strict";
 (() => {
   const body = measurementUI.panel("judges", true), state = { files: null, name: "", version: "", active: false, dirty: false, request: 0 };
+  const page = $("tab-judges");
+  page.classList.add("page-judge-editor");
+  const selection = h("div", { className: "panel-body judge-selection" });
+  page.insertBefore(h("div", { className: "panel list-panel" }, h("div", { className: "panel-head" }, h("h2", {}, "Judges")), selection), body.parentElement);
   const agent = h("select", { id: "judge-agent" }), version = h("select", { id: "judge-version" });
-  const editor = h("form", { className: "measurement-editor", hidden: true }), settings = h("div");
+  const editor = h("form", { className: "measurement-editor judge-editor", hidden: true }), settings = h("div");
   const prompt = h("textarea", { id: "judge-prompt", rows: 8 });
   const config = h("textarea", { id: "judge-config", rows: 8, className: "measurement-json" });
   const mappings = h("div", { className: "judge-mappings" }), problem = h("p", { className: "error-text", role: "alert" });
   const save = h("button", { type: "submit", className: "primary" }, "Save new version");
   const link = h("a", { href: "#agents" }, "Agent registry");
   const add = h("button", { type: "button", onclick: () => { mappingRow(); syncMappingConfig(); } }, "Add metric");
-  body.append(h("div", { className: "measurement-filters" }, measurementUI.field("Agent", agent), measurementUI.field("Version", version), link), editor);
+  selection.append(measurementUI.field("Agent", agent), measurementUI.field("Version", version), link);
+  const empty = emptyPanel("No judge selected");
+  body.append(empty, editor);
   editor.append(settings, measurementUI.field("System prompt", prompt), h("h2", {}, "JSON output metrics"), mappings, add,
     h("details", {}, h("summary", {}, "Agent configuration"), measurementUI.field("Config (agent.json)", config)), problem,
     h("div", { className: "measurement-actions" }, h("button", { type: "button", onclick: () => { state.dirty = false; loadAgent(); } }, "Cancel"), save));
@@ -53,7 +59,7 @@
       config.value = JSON.stringify(definition, null, 2); prompt.value = data.files["systemprompt.md"] || "";
       settings.replaceChildren(agentFields(config, {}));
       mappings.replaceChildren(); for (const item of definition.output_contract?.mappings || []) mappingRow(item);
-      editor.hidden = false; state.dirty = false; problem.textContent = "";
+      empty.hidden = true; editor.hidden = false; state.dirty = false; problem.textContent = "";
       link.href = `#agents/${state.name}/${state.version}`;
     } catch (error) { problem.textContent = `Cannot load judge: ${error.message}`; editor.hidden = false; }
   }
@@ -61,7 +67,7 @@
     try {
       const data = await api("GET", `/api/agents/agents/${agent.value.split("/").map(encodeURIComponent).join("/")}`);
       version.replaceChildren(h("option", { value: "" }, "Select version"), ...(data.versions || []).slice().reverse().map(v => h("option", { value: v.version }, v.version)));
-      editor.hidden = true;
+      editor.hidden = true; empty.hidden = false;
     } catch (error) { problem.textContent = `Cannot load versions: ${error.message}`; }
   }
   agent.onchange = () => {

@@ -35,6 +35,25 @@ const ConnectorsLogic = (() => {
     })).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // Browser links leave the stored clone URL intact for the connector and its dev pods.
+  function repositoryLink(raw) {
+    const githubSSH = /^git@github\.com:([\w.-]+\/[\w.-]+)$/i.exec(raw);
+    let url;
+    try { url = new URL(githubSSH ? `https://github.com/${githubSSH[1]}` : raw); }
+    catch { return ""; }
+    if (url.protocol === "ssh:" && url.hostname === "github.com" && /^\/[\w.-]+\/[\w.-]+$/.test(url.pathname)) {
+      return `https://github.com${url.pathname.replace(/\.git$/, "")}`;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    if (url.host === "git-host:8080") {
+      return /^\/[A-Za-z0-9][A-Za-z0-9._-]*\.git$/.test(url.pathname) ? `/git/browse${url.pathname}` : "/git/";
+    }
+    if (url.hostname === "github.com") url.pathname = url.pathname.replace(/\.git$/, "");
+    url.username = "";
+    url.password = "";
+    return url.href;
+  }
+
   // devPods reads GET /api/connectors/devpods: an array (or { devpods: [...] }) of
   //   { id, repository, name, source_branch, work_branch, runs: [<run ID>], last_activity, expires, phase }
   // runs are the open runs that hold the pod; expires is when it is deleted without one.
@@ -142,7 +161,7 @@ const ConnectorsLogic = (() => {
   }
 
   return {
-    KINDS, CREDENTIALS, kindWord, accessWord, repositories, devPods, fileList, fileContent, gitOutput,
+    KINDS, CREDENTIALS, kindWord, accessWord, repositories, repositoryLink, devPods, fileList, fileContent, gitOutput,
     repositoryBody, formProblems, timeLeft, phaseState, podHash, parsePodHash, childPath, diffLines,
   };
 })();
@@ -177,10 +196,13 @@ const ConnectorsLogic = (() => {
     if (!state.loaded) return null;
     if (!state.repos.length) return emptyPanel("No repositories yet");
     return dataTable(["Name", "Kind", "URL", "Default branch", "Access"], state.repos.map((r) => {
+      const href = L.repositoryLink(r.url);
+      const stop = (event) => event.stopPropagation();
+      const link = href ? h("a", { href, target: "_blank", rel: "noopener", onclick: stop, onkeydown: stop, oncontextmenu: stop }, href) : r.url;
       const tr = h("tr", {},
         h("td", {}, r.name),
         h("td", {}, L.kindWord(r.kind)),
-        h("td", { className: "name-cell", dataset: { full: r.url } }, r.url),
+        h("td", { className: "name-cell", dataset: { full: href || r.url } }, link),
         h("td", { className: "opt" }, r.defaultBranch),
         h("td", {}, L.accessWord(r.credential)));
       tr.addEventListener("contextmenu", (ev) => openMenu(ev, [

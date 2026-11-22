@@ -539,7 +539,7 @@ function registryTab({ tab, base, noun, files }) {
 
   // duplicate opens the New form filled with a version of an entry (its newest by default).
   // duplicate stores one version as v1 of a new entry beside it ("<name>-copy") and opens it,
-  // like Duplicate on the Workflows and Memory pages.
+  // like Duplicate on the Workflows and Blobstore pages.
   async function duplicate(source, version = "") {
     try {
       const versions = await loadVersions(source);

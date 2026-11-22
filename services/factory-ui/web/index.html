@@ -9,7 +9,7 @@
 </head>
 <body>
 <header class="topbar">
-  <a class="product" href="#workflows" aria-label="Open Software Factory: home">
+  <a class="product" href="#metrics" aria-label="Open Software Factory: home">
     <svg class="logo" width="31" height="31" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M3 25V12l5.5-4V12l5.5-4V12l5.5-4V25"/>
       <path d="M19 8V4h3.5v5.5"/>
@@ -208,6 +208,13 @@
       <div class="panel-body" id="cluster-detail"></div>
     </div>
   </section>
+
+  <section class="page page-measurements" id="tab-system-diagram" hidden>
+    <div class="panel content-panel">
+      <div class="panel-head"><h2>Components</h2></div>
+      <div class="panel-body measurement-body" id="system-diagram"></div>
+    </div>
+  </section>
 </main>
 
 <div id="saved-notice" class="saved-notice" role="status" aria-live="polite"></div>
@@ -235,5 +242,6 @@
 <script src="decisions.js"></script>
 <script src="sessions.js"></script>
 <script src="cluster.js"></script>
+<script src="system-diagram.js"></script>
 </body>
 </html>

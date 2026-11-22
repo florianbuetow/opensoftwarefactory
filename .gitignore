@@ -17,9 +17,8 @@ services/blobstore/data/
 .venv/
 __pycache__/
 .pytest_cache/
-# Local documentation and data stay private. The public UI design guide stays tracked.
+# Local documentation and data stay private.
 **/docs/*
-!/docs/DESIGN.md
 **/data/
 scratch/
 .omx/
@@ -39,8 +38,5 @@ PLAN.md
 # Locally built service binaries.
 /services/agent/agent
 /services/factory-ui/factory-ui
-# Root Markdown and examples are private, local-only material.
-/*.[mM][dD]
-/*.[mM][aA][rR][kK][dD][oO][wW][nN]
-/*.[mM][dD][oO][wW][nN]
+# Examples are private, local-only material.
 /examples/
