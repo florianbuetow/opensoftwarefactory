@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import ModuleType
 
 import factory
 import httpx
@@ -8,16 +9,22 @@ from server import load_tools
 
 TOOLS_FILE = Path(__file__).parent.parent / "tools" / "tools.py"
 
+# What a fake blobstore keeps of each PUT: the content, the creator and the trace ID, by object ID.
+type Stored = dict[str, tuple[str, str, str]]
+
 
 @pytest.fixture
-def tools():
-    return load_tools(TOOLS_FILE)
+def tools() -> ModuleType:
+    module = load_tools(TOOLS_FILE)
+    assert module is not None
+    return module
 
 
-def fake_blobstore(objects: dict[str, str], stored: dict | None = None) -> factory.Blobstore:
+def fake_blobstore(objects: dict[str, str], stored: Stored | None = None) -> factory.Blobstore:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if request.method == "PUT" and path.startswith("/blobs/"):
+            assert stored is not None
             stored[path.removeprefix("/blobs/")] = (
                 request.content.decode(),
                 request.headers["X-Creator"],
@@ -33,7 +40,7 @@ def fake_blobstore(objects: dict[str, str], stored: dict | None = None) -> facto
     return factory.Blobstore("http://blobstore", transport=httpx.MockTransport(handle))
 
 
-def test_assess_short_text(tools):
+def test_assess_short_text(tools: ModuleType) -> None:
     result = tools._assess("Add a button. It must be blue.")
     assert result == {
         "words": 7,
@@ -45,7 +52,7 @@ def test_assess_short_text(tools):
     }
 
 
-def test_assess_complex_text(tools):
+def test_assess_complex_text(tools: ModuleType) -> None:
     names = "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliet"
     lines = [f"The service must call {name} and should log it." for name in names.split()]
     text = "\n".join(lines) + "\n" + "word " * 300
@@ -57,11 +64,11 @@ def test_assess_complex_text(tools):
     assert len(result["reasons"]) == 3
 
 
-def test_assess_ignores_sentence_initial_capitals(tools):
+def test_assess_ignores_sentence_initial_capitals(tools: ModuleType) -> None:
     assert tools._assess("The API needs Redis. Then it shall stop.")["components"] == 2
 
 
-def test_analyze_task_complexity_reads_artifact(tools, monkeypatch):
+def test_analyze_task_complexity_reads_artifact(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_blobstore({"runs/1/task.md": "We need a Kafka consumer."}))
     result = tools.analyze_task_complexity("runs/1/task.md")
     assert result["object_id"] == "runs/1/task.md"
@@ -69,8 +76,8 @@ def test_analyze_task_complexity_reads_artifact(tools, monkeypatch):
     assert result["components"] == 1
 
 
-def test_artifact_round_trip(tools, monkeypatch):
-    stored: dict = {}
+def test_artifact_round_trip(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    stored: Stored = {}
     monkeypatch.setattr(tools, "blobstore", fake_blobstore({"a/b": "hello"}, stored))
     assert tools.get_artifact("a/b") == "hello"
     assert tools.put_artifact("a/c", "text", "agent", "t1") == "a/c"
@@ -81,12 +88,12 @@ def test_artifact_round_trip(tools, monkeypatch):
 
 
 @pytest.mark.parametrize("object_id", ["", "../x", "a//b", ".hidden", "a/b c"])
-def test_invalid_object_ids_are_rejected(object_id):
+def test_invalid_object_ids_are_rejected(object_id: str) -> None:
     with pytest.raises(ValueError):
         fake_blobstore({}).get(object_id)
 
 
-def test_get_policy(tools, monkeypatch):
+def test_get_policy(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/policies/coding/latest":
             body = {"name": "coding", "version": "v2", "created": "", "creator": "", "files": {"policy.md": "# Rules"}}
@@ -102,12 +109,13 @@ def test_get_policy(tools, monkeypatch):
 SESSION = "user-sessions/t1/step-a"
 
 
-def fake_session_store(files: dict[str, str], stored: dict | None = None, session: str = SESSION) -> factory.Blobstore:
+def fake_session_store(files: dict[str, str], stored: Stored | None = None, session: str = SESSION) -> factory.Blobstore:
     prefix = f"{session}/files"
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if request.method == "PUT" and path.startswith(f"/blobs/{prefix}/"):
+            assert stored is not None
             stored[path.removeprefix("/blobs/")] = (
                 request.content.decode(),
                 request.headers["X-Creator"],
@@ -124,7 +132,7 @@ def fake_session_store(files: dict[str, str], stored: dict | None = None, sessio
     return factory.Blobstore("http://blobstore", transport=httpx.MockTransport(handle))
 
 
-def test_list_session_files(tools, monkeypatch):
+def test_list_session_files(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"notes.md": "héllo", "data.json": "{}"}))
     assert tools.list_session_files(SESSION) == {
         "session": SESSION,
@@ -132,12 +140,12 @@ def test_list_session_files(tools, monkeypatch):
     }
 
 
-def test_list_session_files_empty_session(tools, monkeypatch):
+def test_list_session_files_empty_session(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({}))
     assert tools.list_session_files(SESSION) == {"session": SESSION, "files": []}
 
 
-def test_read_session_file_numbers_lines(tools, monkeypatch):
+def test_read_session_file_numbers_lines(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"notes.md": "one\ntwo\nthree\nfour\n"}))
     assert tools.read_session_file(SESSION, "notes.md") == "     1\tone\n     2\ttwo\n     3\tthree\n     4\tfour"
     assert tools.read_session_file(SESSION, "notes.md", 2, 3) == "     2\ttwo\n     3\tthree"
@@ -146,7 +154,7 @@ def test_read_session_file_numbers_lines(tools, monkeypatch):
     assert tools.read_session_file(SESSION, "notes.md", 4, 99) == "     4\tfour"
 
 
-def test_read_session_file_range_outside_file(tools, monkeypatch):
+def test_read_session_file_range_outside_file(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"notes.md": "one\ntwo\n", "empty.txt": ""}))
     assert tools.read_session_file(SESSION, "notes.md", 3) == "Line 3 is outside notes.md, which has 2 lines."
     assert "end_line 1 is before start_line 2" in tools.read_session_file(SESSION, "notes.md", 2, 1)
@@ -156,7 +164,7 @@ def test_read_session_file_range_outside_file(tools, monkeypatch):
         tools.read_session_file(SESSION, "missing.md")
 
 
-def test_search_session_files(tools, monkeypatch):
+def test_search_session_files(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     files = {"notes.md": "Alpha\nbeta 12\n", "data.json": '{"beta": 7}\n'}
     monkeypatch.setattr(tools, "blobstore", fake_session_store(files))
     assert tools.search_session_files(SESSION, r"beta\W+\d") == {
@@ -166,14 +174,12 @@ def test_search_session_files(tools, monkeypatch):
         ],
         "truncated": False,
     }
-    assert tools.search_session_files(SESSION, "(?i)ALPHA", "notes.md")["matches"] == [
-        {"file": "notes.md", "line": 1, "text": "Alpha"}
-    ]
+    assert tools.search_session_files(SESSION, "(?i)ALPHA", "notes.md")["matches"] == [{"file": "notes.md", "line": 1, "text": "Alpha"}]
     assert tools.search_session_files(SESSION, "beta", "data.json")["matches"][0]["file"] == "data.json"
     assert tools.search_session_files(SESSION, "nothing") == {"matches": [], "truncated": False}
 
 
-def test_search_session_files_caps_matches(tools, monkeypatch):
+def test_search_session_files_caps_matches(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"a.txt": "x\n" * 200, "b.txt": "x\n"}))
     exact = tools.search_session_files(SESSION, "x", "a.txt")
     assert len(exact["matches"]) == 200
@@ -184,21 +190,23 @@ def test_search_session_files_caps_matches(tools, monkeypatch):
     assert capped["matches"][-1] == {"file": "a.txt", "line": 200, "text": "x"}
 
 
-def test_search_session_files_invalid_regex(tools, monkeypatch):
+def test_search_session_files_invalid_regex(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"a.txt": "x"}))
     with pytest.raises(ValueError, match="invalid regular expression"):
         tools.search_session_files(SESSION, "(unclosed")
 
 
 @pytest.mark.parametrize("pattern", ["a{99999999999}", "(" * 5000 + ")" * 5000])
-def test_search_session_files_rejects_patterns_that_do_not_compile(tools, monkeypatch, pattern):
+def test_search_session_files_rejects_patterns_that_do_not_compile(
+    tools: ModuleType, monkeypatch: pytest.MonkeyPatch, pattern: str
+) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"a.txt": "x"}))
     with pytest.raises(ValueError, match="invalid regular expression"):
         tools.search_session_files(SESSION, pattern)
 
 
-def test_write_session_file(tools, monkeypatch):
-    stored: dict = {}
+def test_write_session_file(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    stored: Stored = {}
     session = "user-sessions/t1/route/step-a"
     monkeypatch.setattr(tools, "blobstore", fake_session_store({}, stored, session))
     assert tools.write_session_file(session, "plan.md", "# Plan") == f"{session}/files/plan.md"
@@ -224,8 +232,8 @@ def test_write_session_file(tools, monkeypatch):
         "user-sessions/t1\n/step-a",
     ],
 )
-def test_session_tools_reject_invalid_session(tools, monkeypatch, session):
-    stored: dict = {}
+def test_session_tools_reject_invalid_session(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, session: str) -> None:
+    stored: Stored = {}
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"a.md": "x"}, stored))
     for call in (
         lambda: tools.list_session_files(session),
@@ -243,8 +251,8 @@ def test_session_tools_reject_invalid_session(tools, monkeypatch, session):
     "name",
     ["", "a", "a.yaml", "a.png", ".hidden.md", "-a.md", "../a.md", "sub/a.md", "a b.md", "a.md/", "a.MD", "a" * 101 + ".md", "a.md\n"],
 )
-def test_session_tools_reject_invalid_file_name(tools, monkeypatch, name):
-    stored: dict = {}
+def test_session_tools_reject_invalid_file_name(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    stored: Stored = {}
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"a.md": "x"}, stored))
     with pytest.raises(ValueError, match="invalid file name"):
         tools.read_session_file(SESSION, name)
@@ -256,7 +264,7 @@ def test_session_tools_reject_invalid_file_name(tools, monkeypatch, name):
     assert stored == {}
 
 
-def test_search_session_files_stops_a_runaway_pattern(tools, monkeypatch):
+def test_search_session_files_stops_a_runaway_pattern(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "blobstore", fake_session_store({"a.txt": "a" * 60 + "b\n"}))
     monkeypatch.setattr(tools, "SEARCH_SECONDS", 0.5)
     with pytest.raises(ValueError, match="took too long"):
@@ -266,7 +274,7 @@ def test_search_session_files_stops_a_runaway_pattern(tools, monkeypatch):
 
 
 TEAM = "teams/t1/build"
-TEAM_INFO = {
+TEAM_INFO: dict[str, object] = {
     "lead": "lead",
     "members": [
         {"name": "lead", "kind": "agent", "ref": "demo/lead@v1", "description": "Leads the team."},
@@ -283,7 +291,13 @@ TEAM_INFO = {
 }
 
 
-def fake_team_store(objects: dict[str, object], team: str = TEAM) -> tuple[factory.Blobstore, dict[str, str]]:
+class TeamStore(factory.Blobstore):
+    """A blobstore that also records the creator and the trace ID of each PUT, by object ID."""
+
+    creators: dict[str, tuple[str, str]]
+
+
+def fake_team_store(objects: dict[str, object], team: str = TEAM) -> tuple[TeamStore, dict[str, str]]:
     """A blobstore holding one team; objects maps paths below the team to text or JSON values."""
     blobs = {
         f"{team}/{path}": value if isinstance(value, str) else json.dumps(value)
@@ -306,21 +320,20 @@ def fake_team_store(objects: dict[str, object], team: str = TEAM) -> tuple[facto
                 return httpx.Response(200, json={"prefix": prefix, "directories": [], "objects": found})
         return httpx.Response(404, text="object not found")
 
-    store = factory.Blobstore("http://blobstore", transport=httpx.MockTransport(handle))
+    store = TeamStore("http://blobstore", transport=httpx.MockTransport(handle))
     store.creators = creators
     return store, blobs
 
 
-def queue_blob(channel: str, sender: str, to: str, *messages: tuple[str, str]) -> dict:
+def queue_blob(channel: str, sender: str, to: str, *messages: tuple[str, str]) -> dict[str, object]:
     """The queue of one sender; each message is (text, seconds of its send time)."""
     stored = [
-        {"seq": seq, "text": text, "sent": f"2026-01-01T00:00:{second}.000000Z"}
-        for seq, (text, second) in enumerate(messages, start=1)
+        {"seq": seq, "text": text, "sent": f"2026-01-01T00:00:{second}.000000Z"} for seq, (text, second) in enumerate(messages, start=1)
     ]
     return {"channel": channel, "from": sender, "to": to, "messages": stored}
 
 
-def test_send_message_appends_to_the_senders_own_queue(tools, monkeypatch):
+def test_send_message_appends_to_the_senders_own_queue(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, blobs = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     assert tools.send_message(TEAM, "lead", "coder--lead", "Write main.py") == {
@@ -349,7 +362,7 @@ def test_send_message_appends_to_the_senders_own_queue(tools, monkeypatch):
 
 
 @pytest.mark.parametrize("text", ["", "  \n", "x" * 100001])
-def test_send_message_refuses_empty_and_oversized_text(tools, monkeypatch, text):
+def test_send_message_refuses_empty_and_oversized_text(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     store, blobs = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     with pytest.raises(ValueError, match="text"):
@@ -358,7 +371,7 @@ def test_send_message_refuses_empty_and_oversized_text(tools, monkeypatch, text)
     assert tools.send_message(TEAM, "lead", "coder--lead", "x" * 100000)["seq"] == 1
 
 
-def test_team_tools_refuse_unknown_member_and_foreign_channel(tools, monkeypatch):
+def test_team_tools_refuse_unknown_member_and_foreign_channel(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, blobs = fake_team_store({"files/main.py": "x"})
     monkeypatch.setattr(tools, "blobstore", store)
     before = dict(blobs)
@@ -387,7 +400,7 @@ def test_team_tools_refuse_unknown_member_and_foreign_channel(tools, monkeypatch
     "team",
     ["", "teams", "teams/t1", "teams/t1/", "teams//build", "teams/../build", "teams/t1/build\n", "user-sessions/t1/build", "runs/t1/build"],
 )
-def test_team_tools_reject_invalid_team(tools, monkeypatch, team):
+def test_team_tools_reject_invalid_team(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, team: str) -> None:
     store, blobs = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     before = dict(blobs)
@@ -402,20 +415,18 @@ def test_team_tools_reject_invalid_team(tools, monkeypatch, team):
     assert blobs == before
 
 
-def test_team_tools_report_a_team_that_does_not_exist(tools, monkeypatch):
+def test_team_tools_report_a_team_that_does_not_exist(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, _ = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     with pytest.raises(ValueError, match="does not exist"):
         tools.list_channels("teams/t1/other", "lead")
 
 
-def test_list_channels_counts_unread_from_the_other_side(tools, monkeypatch):
+def test_list_channels_counts_unread_from_the_other_side(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, _ = fake_team_store(
         {
             "channels/coder--lead/lead.json": queue_blob("coder--lead", "lead", "coder", ("a", "01"), ("d", "04")),
-            "channels/coder--lead/coder.json": queue_blob(
-                "coder--lead", "coder", "lead", ("b", "02"), ("c", "03"), ("e", "05")
-            ),
+            "channels/coder--lead/coder.json": queue_blob("coder--lead", "coder", "lead", ("b", "02"), ("c", "03"), ("e", "05")),
             "channels/lead--workflow/workflow.json": queue_blob("lead--workflow", "workflow", "lead", ("task", "00")),
             # The marker counts in the other side's queue: the lead was given the coder's first message.
             "members/lead.json": {"member": "lead", "agent": "demo/lead@v1", "read": {"coder--lead": 1}, "messages": []},
@@ -439,7 +450,7 @@ def test_list_channels_counts_unread_from_the_other_side(tools, monkeypatch):
     }
 
 
-def test_read_messages_merges_both_queues_by_send_time(tools, monkeypatch):
+def test_read_messages_merges_both_queues_by_send_time(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, _ = fake_team_store(
         {
             "channels/coder--lead/lead.json": queue_blob("coder--lead", "lead", "coder", ("a", "01"), ("c", "03")),
@@ -457,7 +468,7 @@ def test_read_messages_merges_both_queues_by_send_time(tools, monkeypatch):
     assert tools.read_messages(TEAM, "lead", "lead--tester") == {"channel": "lead--tester", "messages": []}
 
 
-def test_finish_team_writes_finished_json(tools, monkeypatch):
+def test_finish_team_writes_finished_json(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, blobs = fake_team_store({"files/main.py": "x", "files/test_main.py": "y"})
     monkeypatch.setattr(tools, "blobstore", store)
     result = tools.finish_team(TEAM, "lead", ["main.py", "test_main.py"], "Calculator with tests.")
@@ -470,7 +481,7 @@ def test_finish_team_writes_finished_json(tools, monkeypatch):
     assert store.creators[f"{TEAM}/finished.json"] == ("tool-gateway", "t1")
 
 
-def test_finish_team_refusals(tools, monkeypatch):
+def test_finish_team_refusals(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, blobs = fake_team_store({"files/main.py": "x"})
     monkeypatch.setattr(tools, "blobstore", store)
     with pytest.raises(ValueError, match="only the lead 'lead' can finish"):
@@ -484,7 +495,7 @@ def test_finish_team_refusals(tools, monkeypatch):
     assert f"{TEAM}/finished.json" not in blobs
 
 
-def test_session_file_tools_accept_a_team_workspace(tools, monkeypatch):
+def test_session_file_tools_accept_a_team_workspace(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, blobs = fake_team_store({"files/notes.md": "plan\n", "files/image.png": "x"})
     monkeypatch.setattr(tools, "blobstore", store)
     assert tools.write_session_file(TEAM, "main.py", "print(1)\n") == f"{TEAM}/files/main.py"
@@ -501,10 +512,37 @@ def test_session_file_tools_accept_a_team_workspace(tools, monkeypatch):
 
 @pytest.mark.parametrize(
     "extension",
-    ["md", "txt", "json", "py", "go", "js", "ts", "tsx", "jsx", "java", "kt", "rs", "c", "h", "cpp", "cs", "rb", "php", "sh", "sql", "html", "css", "yaml", "yml", "toml", "xml"],
+    [
+        "md",
+        "txt",
+        "json",
+        "py",
+        "go",
+        "js",
+        "ts",
+        "tsx",
+        "jsx",
+        "java",
+        "kt",
+        "rs",
+        "c",
+        "h",
+        "cpp",
+        "cs",
+        "rb",
+        "php",
+        "sh",
+        "sql",
+        "html",
+        "css",
+        "yaml",
+        "yml",
+        "toml",
+        "xml",
+    ],
 )
-def test_team_workspace_extensions(tools, monkeypatch, extension):
-    store, blobs = fake_team_store({})
+def test_team_workspace_extensions(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, extension: str) -> None:
+    store, _ = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     assert tools.write_session_file(TEAM, f"a.{extension}", "x") == f"{TEAM}/files/a.{extension}"
     if extension not in ("md", "txt", "json"):
@@ -513,7 +551,7 @@ def test_team_workspace_extensions(tools, monkeypatch, extension):
 
 
 @pytest.mark.parametrize("name", ["", "a", "a.png", "a.exe", ".hidden.py", "../a.py", "sub/a.py", "a b.py", "a.PY", "a.py\n"])
-def test_team_workspace_rejects_invalid_file_name(tools, monkeypatch, name):
+def test_team_workspace_rejects_invalid_file_name(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     store, blobs = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     before = dict(blobs)
@@ -525,7 +563,7 @@ def test_team_workspace_rejects_invalid_file_name(tools, monkeypatch, name):
 
 
 @pytest.mark.parametrize("team", ["teams/t1", "teams/t1/", "teams/../build", "teams/t1/build\n"])
-def test_session_file_tools_reject_invalid_team_path(tools, monkeypatch, team):
+def test_session_file_tools_reject_invalid_team_path(tools: ModuleType, monkeypatch: pytest.MonkeyPatch, team: str) -> None:
     store, blobs = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     before = dict(blobs)
@@ -539,7 +577,7 @@ def test_session_file_tools_reject_invalid_team_path(tools, monkeypatch, team):
     assert blobs == before
 
 
-def test_a_one_way_channel_refuses_the_receiver_as_sender(tools, monkeypatch):
+def test_a_one_way_channel_refuses_the_receiver_as_sender(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     channels = [{"id": "coder--lead", "members": ["coder", "lead"], "from": "lead"}]
     store, blobs = fake_team_store({"team.json": {**TEAM_INFO, "channels": channels}})
     monkeypatch.setattr(tools, "blobstore", store)
@@ -551,7 +589,7 @@ def test_a_one_way_channel_refuses_the_receiver_as_sender(tools, monkeypatch):
     assert [c["direction"] for c in tools.list_channels(TEAM, "coder")["channels"]] == ["receive"]
 
 
-def test_list_channels_names_a_two_way_channel_both(tools, monkeypatch):
+def test_list_channels_names_a_two_way_channel_both(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     store, _ = fake_team_store({})
     monkeypatch.setattr(tools, "blobstore", store)
     assert {c["direction"] for c in tools.list_channels(TEAM, "lead")["channels"]} == {"both"}

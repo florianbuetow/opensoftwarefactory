@@ -448,7 +448,7 @@ func (g *Gateway) deliverOutbox(ctx context.Context, outbox *usageOutbox) error 
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			err = readErr
 			continue

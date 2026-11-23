@@ -1,4 +1,5 @@
 """Tests of the git-helper. Run: python3 -m unittest discover -s services/devpod/tests"""
+
 import base64
 import json
 import os
@@ -11,23 +12,31 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import githelper  # noqa: E402
 import podhttp  # noqa: E402
-from podhttp import Refusal  # noqa: E402
+from podhttp import JsonObject, RefusalError  # noqa: E402
 
-GIT_ENV = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-           "GIT_AUTHOR_NAME": "Tester", "GIT_AUTHOR_EMAIL": "tester@example.com",
-           "GIT_COMMITTER_NAME": "Tester", "GIT_COMMITTER_EMAIL": "tester@example.com", "HOME": "/nonexistent"}
+GIT_ENV = {
+    "PATH": os.environ.get("PATH", ""),
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "Tester",
+    "GIT_AUTHOR_EMAIL": "tester@example.com",
+    "GIT_COMMITTER_NAME": "Tester",
+    "GIT_COMMITTER_EMAIL": "tester@example.com",
+    "HOME": "/nonexistent",
+}
 
 
-def run(*args, cwd):
+def run(*args: str, cwd: str) -> str:
     done = subprocess.run(list(args), cwd=cwd, env=GIT_ENV, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if done.returncode != 0:
-        raise AssertionError("%s failed: %s" % (" ".join(args), done.stdout))
+        raise AssertionError("{} failed: {}".format(" ".join(args), done.stdout))
     return done.stdout.strip()
 
 
@@ -49,36 +58,44 @@ class HelperCase(unittest.TestCase):
         run("git", "commit", "-q", "-m", "First commit", cwd=seed)
         self.first = run("git", "rev-parse", "HEAD", cwd=seed)
         run("git", "clone", "-q", "--bare", seed, self.origin, cwd=self.base)
-        values = {"WORKSPACE": self.workspace, "STATE_DIR": os.path.join(self.base, "state"),
-                  "CREDENTIAL_FILE": os.path.join(self.base, "credential", "token"),
-                  "HELPER_HOME": os.path.join(self.base, "home")}
+        values = {
+            "WORKSPACE": self.workspace,
+            "STATE_DIR": os.path.join(self.base, "state"),
+            "CREDENTIAL_FILE": os.path.join(self.base, "credential", "token"),
+            "HELPER_HOME": os.path.join(self.base, "home"),
+        }
         for name, value in values.items():
             patch = mock.patch.object(githelper, name, value)
             patch.start()
             self.addCleanup(patch.stop)
 
-    def clone(self, **changes):
-        body = {"url": self.origin, "source_branch": "main", "work_branch": "agent/work-1",
-                "author_name": "course/feature-builder@v2", "author_email": "agent@opensoftwarefactory.local"}
+    def clone(self, **changes: str) -> JsonObject:
+        body: JsonObject = {
+            "url": self.origin,
+            "source_branch": "main",
+            "work_branch": "agent/work-1",
+            "author_name": "course/feature-builder@v2",
+            "author_email": "agent@opensoftwarefactory.local",
+        }
         body.update(changes)
         return githelper.clone(body)
 
-    def commit(self, name="notes.txt", content="a note\n", message="Add a note"):
+    def commit(self, name: str = "notes.txt", content: str = "a note\n", message: str = "Add a note") -> str:
         with open(os.path.join(self.workspace, name), "w") as handle:
             handle.write(content)
         env = {key: value for key, value in GIT_ENV.items() if "AUTHOR" not in key and "COMMITTER" not in key}
         for args in (["git", "add", "-A"], ["git", "commit", "-q", "-m", message]):
-            subprocess.run(args, cwd=self.workspace, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(args, cwd=self.workspace, env=env, check=True, capture_output=True)
         return run("git", "rev-parse", "HEAD", cwd=self.workspace)
 
-    def set_credential(self, token="tok-SECRET-123"):
+    def set_credential(self, token: str = "tok-SECRET-123") -> str:
         os.makedirs(os.path.dirname(githelper.CREDENTIAL_FILE), exist_ok=True)
         with open(githelper.CREDENTIAL_FILE, "w") as handle:
             handle.write(token + "\n")
         return token
 
-    def refused(self, function, body, *words):
-        with self.assertRaises(Refusal) as caught:
+    def refused(self, function: Callable[[JsonObject], JsonObject], body: JsonObject, *words: str) -> None:
+        with self.assertRaises(RefusalError) as caught:
             function(body)
         for word in words:
             self.assertIn(word, str(caught.exception))
@@ -98,8 +115,9 @@ class CloneTest(HelperCase):
     def test_commit_in_the_pod_carries_the_agent_identity(self):
         self.clone()
         self.commit()
-        self.assertEqual(run("git", "log", "-1", "--format=%an <%ae>", cwd=self.workspace),
-                         "course/feature-builder@v2 <agent@opensoftwarefactory.local>")
+        self.assertEqual(
+            run("git", "log", "-1", "--format=%an <%ae>", cwd=self.workspace), "course/feature-builder@v2 <agent@opensoftwarefactory.local>"
+        )
 
     def test_clone_continues_a_work_branch_that_exists_in_the_repository(self):
         self.clone()
@@ -121,12 +139,11 @@ class CloneTest(HelperCase):
         self.assertEqual(again["start_commit"], self.first)
         self.refused(self.clone_other, {}, "already holds a clone")
 
-    def clone_other(self, _):
+    def clone_other(self, _: JsonObject) -> JsonObject:
         return self.clone(work_branch="agent/other")
 
     def test_work_branch_equal_to_source_branch_is_refused(self):
-        self.refused(githelper.clone, {"url": self.origin, "source_branch": "main", "work_branch": "main"},
-                     "same as the source branch")
+        self.refused(githelper.clone, {"url": self.origin, "source_branch": "main", "work_branch": "main"}, "same as the source branch")
         self.assertEqual(os.listdir(self.workspace), [])
 
     def test_unknown_source_branch_gives_a_sentence_and_an_empty_workspace(self):
@@ -149,7 +166,7 @@ class CloneTest(HelperCase):
         self.refused(self.clone_with, {"url": "ssh://example.com/a.git"}, "not supported")
         self.refused(self.clone_with, {"url": "--upload-pack=id"}, "not valid")
 
-    def clone_with(self, changes):
+    def clone_with(self, changes: JsonObject) -> JsonObject:
         return self.clone(**changes)
 
     def test_workspace_with_other_files_is_refused(self):
@@ -167,27 +184,27 @@ class CredentialTest(HelperCase):
         self.assertEqual(config, [("http.https://github.com/.extraHeader", "Authorization: Basic " + expected)])
         self.assertEqual(secrets, [token, expected])
         self.assertEqual(githelper.auth(self.origin), ([], []))
-        self.assertEqual(githelper.scrub("a %s b %s" % (token, expected), secrets), "a *** b ***")
+        self.assertEqual(githelper.scrub(f"a {token} b {expected}", secrets), "a *** b ***")
 
     def test_credential_is_sent_as_a_header_and_never_stored(self):
         token = self.set_credential()
-        seen = []
+        seen: list[str | None] = []
 
         class Recorder(BaseHTTPRequestHandler):
-            def do_GET(self):
+            def do_GET(self) -> None:
                 seen.append(self.headers.get("Authorization"))
                 self.send_response(404)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
-            def log_message(self, *args):
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
         server = HTTPServer(("127.0.0.1", 0), Recorder)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        result = self.clone(url="http://127.0.0.1:%d/claims.git" % server.server_address[1])
+        result = self.clone(url=f"http://127.0.0.1:{server.server_address[1]}/claims.git")
         self.assertFalse(result["ok"])
         expected = "Basic " + base64.b64encode(("x-access-token:" + token).encode()).decode()
         self.assertIn(expected, seen)
@@ -247,12 +264,12 @@ class PushTest(HelperCase):
         hook = os.path.join(self.workspace, ".git", "hooks", "pre-push")
         os.makedirs(os.path.dirname(hook), exist_ok=True)
         with open(hook, "w") as handle:
-            handle.write("#!/bin/sh\ntouch '%s'\nexit 1\n" % marker)
+            handle.write(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
         os.chmod(hook, 0o755)
         elsewhere = os.path.join(self.base, "elsewhere.git")
         run("git", "init", "-q", "--bare", elsewhere, cwd=self.base)
         run("git", "remote", "set-url", "origin", elsewhere, cwd=self.workspace)
-        run("git", "config", "url.%s.insteadOf" % elsewhere, self.origin, cwd=self.workspace)
+        run("git", "config", f"url.{elsewhere}.insteadOf", self.origin, cwd=self.workspace)
         result = githelper.push({"branch": "agent/work-1"})
         self.assertTrue(result["ok"], result)
         self.assertFalse(os.path.exists(marker))
@@ -304,8 +321,9 @@ class PatchAndViewTest(HelperCase):
         with open(patch_file, "w") as handle:
             handle.write(result["patch"])
         run("git", "am", patch_file, cwd=fresh)
-        self.assertEqual(run("git", "log", "--format=%s", cwd=fresh).splitlines(),
-                         ["Show no payment planned", "Show the payment date", "First commit"])
+        self.assertEqual(
+            run("git", "log", "--format=%s", cwd=fresh).splitlines(), ["Show no payment planned", "Show the payment date", "First commit"]
+        )
         self.assertTrue(os.path.exists(os.path.join(fresh, "more.txt")))
 
     def test_patch_without_commits_is_empty(self):
@@ -328,8 +346,7 @@ class PatchAndViewTest(HelperCase):
         self.assertIn("+a note", diff["output"])
         self.assertIn("notes.txt", githelper.view({"args": ["ls-files"]})["output"])
         self.assertIn("Add a note", githelper.view({"args": ["show", "HEAD"]})["output"])
-        self.assertEqual(githelper.view({"args": ["rev-parse", "--abbrev-ref", "HEAD"]})["output"].strip(),
-                         "agent/work-1")
+        self.assertEqual(githelper.view({"args": ["rev-parse", "--abbrev-ref", "HEAD"]})["output"].strip(), "agent/work-1")
         bad = githelper.view({"args": ["log", "no-such-branch"]})
         self.assertFalse(bad["ok"])
         self.assertIn("git log failed", bad["error"])
@@ -347,8 +364,17 @@ class PatchAndViewTest(HelperCase):
 class ProtectTest(HelperCase):
     def tree(self):
         root = os.path.join(self.base, "tree")
-        files = ["tests/test_a.py", "tests/sub/test_b.py", "verify.sh", "src/panel.py", "docs/guide/rules.md",
-                 "docs/readme.md", ".git/config", ".git/hooks/pre-commit", "checks/check_cl7.py"]
+        files = [
+            "tests/test_a.py",
+            "tests/sub/test_b.py",
+            "verify.sh",
+            "src/panel.py",
+            "docs/guide/rules.md",
+            "docs/readme.md",
+            ".git/config",
+            ".git/hooks/pre-commit",
+            "checks/check_cl7.py",
+        ]
         for relative in files:
             path = os.path.join(root, relative)
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -359,7 +385,7 @@ class ProtectTest(HelperCase):
         return root
 
     def test_glob_patterns(self):
-        def match(pattern, path):
+        def match(pattern: str, path: str) -> bool:
             return bool(githelper.glob_regex(pattern).fullmatch(path))
 
         self.assertTrue(match("tests/**", "tests/sub/test_b.py"))
@@ -380,10 +406,12 @@ class ProtectTest(HelperCase):
     def test_plan_names_protected_entries_and_the_folders_that_hold_them(self):
         root = self.tree()
         folders, files, holders, unmatched = githelper.plan_protection(
-            root, ["tests/**", "verify.sh", "docs/**/rules.md", "checks", "missing/*"])
+            root, ["tests/**", "verify.sh", "docs/**/rules.md", "checks", "missing/*"]
+        )
         self.assertEqual(folders, ["checks", "tests", "tests/sub"])
-        self.assertEqual(sorted(files), ["checks/check_cl7.py", "docs/guide/rules.md", "tests/sub/test_b.py",
-                                         "tests/test_a.py", "verify.sh"])
+        self.assertEqual(
+            sorted(files), ["checks/check_cl7.py", "docs/guide/rules.md", "tests/sub/test_b.py", "tests/test_a.py", "verify.sh"]
+        )
         self.assertEqual(holders, ["", "docs", "docs/guide"])
         self.assertEqual(unmatched, ["missing/*"])
 
@@ -397,12 +425,13 @@ class ProtectTest(HelperCase):
     def test_apply_sets_owner_sticky_bit_and_modes(self):
         root = self.tree()
         os.chmod(root, 0o755)
-        owned = {}
+        owned: dict[str, tuple[int, int]] = {}
         folders, files, holders, _ = githelper.plan_protection(root, ["tests/**", "verify.sh", "docs/**/rules.md"])
-        githelper.apply_protection(root, folders, files, holders,
-                                   chown=lambda path, uid, gid: owned.__setitem__(os.path.relpath(path, root), (uid, gid)))
+        githelper.apply_protection(
+            root, folders, files, holders, chown=lambda path, uid, gid: owned.__setitem__(os.path.relpath(path, root), (uid, gid))
+        )
 
-        def mode(relative):
+        def mode(relative: str) -> int:
             return stat.S_IMODE(os.lstat(os.path.join(root, relative)).st_mode)
 
         self.assertEqual(mode("."), 0o1777)
@@ -416,8 +445,22 @@ class ProtectTest(HelperCase):
         self.assertEqual(mode("src/panel.py"), 0o664)
         self.assertEqual(mode("docs/readme.md"), 0o664)
         self.assertEqual(set(owned.values()), {(2000, 2000)})
-        self.assertEqual(sorted(owned), sorted([".", "docs", "docs/guide", "docs/guide/rules.md", "tests", "tests/sub",
-                                                "tests/sub/test_b.py", "tests/test_a.py", "verify.sh"]))
+        self.assertEqual(
+            sorted(owned),
+            sorted(
+                [
+                    ".",
+                    "docs",
+                    "docs/guide",
+                    "docs/guide/rules.md",
+                    "tests",
+                    "tests/sub",
+                    "tests/sub/test_b.py",
+                    "tests/test_a.py",
+                    "verify.sh",
+                ]
+            ),
+        )
 
     def test_protect_checks_its_input(self):
         self.refused(githelper.protect, {"paths": "tests/**"}, "list of glob patterns")
@@ -427,10 +470,10 @@ class ProtectTest(HelperCase):
         self.refused(githelper.protect, {"paths": ["./.git/hooks"]}, "not allowed")
         self.refused(githelper.protect, {"paths": ["../x"]}, "not allowed")
 
-    @unittest.skipIf(os.geteuid() == 0, "only meaningful without root")
     def test_protect_without_root_says_so(self):
         self.clone()
-        self.refused(githelper.protect, {"paths": ["verify.sh"]}, "does not run as root")
+        with mock.patch.object(githelper.os, "geteuid", return_value=githelper.WORK_UID):
+            self.refused(githelper.protect, {"paths": ["verify.sh"]}, "does not run as root")
 
 
 class HttpTest(HelperCase):
@@ -439,9 +482,9 @@ class HttpTest(HelperCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        url = "http://127.0.0.1:%d" % server.server_address[1]
+        url = f"http://127.0.0.1:{server.server_address[1]}"
 
-        def call(path, body, token):
+        def call(path: str, body: JsonObject, token: str | None) -> tuple[int, JsonObject]:
             request = urllib.request.Request(url + path, data=json.dumps(body).encode())
             if token:
                 request.add_header("X-Pod-Token", token)

@@ -1,6 +1,9 @@
 import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import factory
 import httpx
@@ -25,13 +28,20 @@ DEVPOD_TOOLS = [
 ]
 WHO = ("pod1", "course/builder@v1", "run-1")
 
+# The calls a fake connector service received: the URL path and the JSON body of each.
+type Calls = list[tuple[str, dict[str, Any]]]
+# What a fake connector service answers: a JSON body, a whole response, or a function of the request body.
+type Answer = dict[str, object] | httpx.Response | Callable[[dict[str, Any]], object]
+
 
 @pytest.fixture
-def tools():
-    return load_tools(TOOLS_FILE)
+def tools() -> ModuleType:
+    module = load_tools(TOOLS_FILE)
+    assert module is not None
+    return module
 
 
-def fake_connectors(answer, calls: list) -> factory.Connectors:
+def fake_connectors(answer: Answer, calls: Calls) -> factory.Connectors:
     """A connector service that records every call and answers with answer(body), or with answer itself."""
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -45,7 +55,7 @@ def fake_connectors(answer, calls: list) -> factory.Connectors:
     return factory.Connectors("http://connectors", transport=httpx.MockTransport(handle))
 
 
-def test_every_dev_pod_tool_exists_with_the_identity_arguments_first(tools):
+def test_every_dev_pod_tool_exists_with_the_identity_arguments_first(tools: ModuleType) -> None:
     functions = {fn.__name__: fn for fn in public_functions(tools)}
     for name in DEVPOD_TOOLS:
         assert name in functions, name
@@ -55,8 +65,8 @@ def test_every_dev_pod_tool_exists_with_the_identity_arguments_first(tools):
         assert "Example:" in functions[name].__doc__, name
 
 
-def test_each_tool_forwards_its_arguments_with_pod_agent_and_run(tools, monkeypatch):
-    calls: list = []
+def test_each_tool_forwards_its_arguments_with_pod_agent_and_run(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: Calls = []
     monkeypatch.setattr(tools, "connectors", fake_connectors({"ok": True, "result": {"done": True}}, calls))
     tools.list_files(*WHO)
     tools.list_files(*WHO, path="src")
@@ -96,7 +106,7 @@ def test_each_tool_forwards_its_arguments_with_pod_agent_and_run(tools, monkeypa
     ]
 
 
-def test_results_are_returned_as_the_connector_service_gave_them(tools, monkeypatch):
+def test_results_are_returned_as_the_connector_service_gave_them(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     results = {
         "list_files": {"path": ".", "entries": [{"name": "src", "type": "dir"}], "truncated": False},
         "run_command": {"exit_code": 1, "stdout": "", "stderr": "FAILED"},
@@ -105,9 +115,7 @@ def test_results_are_returned_as_the_connector_service_gave_them(tools, monkeypa
         "push_branch": "Recorded. A person must approve before this is published.",
         "create_pull_request": {"pull_request": "runs/run-1/pull-request.json", "commits": 1},
     }
-    monkeypatch.setattr(
-        tools, "connectors", fake_connectors(lambda body: {"ok": True, "result": results[body["tool"]]}, [])
-    )
+    monkeypatch.setattr(tools, "connectors", fake_connectors(lambda body: {"ok": True, "result": results[body["tool"]]}, []))
     assert tools.list_files(*WHO) == results["list_files"]
     # A command that fails is a result, not an error: the agent reads the exit code.
     assert tools.run_command(*WHO, command="./verify.sh") == results["run_command"]
@@ -117,22 +125,20 @@ def test_results_are_returned_as_the_connector_service_gave_them(tools, monkeypa
     assert json.loads(tools.create_pull_request(*WHO, title="T", body="B")) == results["create_pull_request"]
 
 
-def test_read_file_returns_the_text_without_line_numbers(tools, monkeypatch):
+def test_read_file_returns_the_text_without_line_numbers(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     files = {
         "a.py": {"path": "a.py", "content": "one\ntwo\n", "start_line": 1, "end_line": 2, "total_lines": 2},
         "empty.txt": {"path": "empty.txt", "content": "", "start_line": 0, "end_line": 0, "total_lines": 0},
         "long.txt": {"path": "long.txt", "content": "x" * 10, "total_lines": 1, "note": "The content was cut."},
     }
-    monkeypatch.setattr(
-        tools, "connectors", fake_connectors(lambda body: {"ok": True, "result": files[body["args"]["path"]]}, [])
-    )
+    monkeypatch.setattr(tools, "connectors", fake_connectors(lambda body: {"ok": True, "result": files[body["args"]["path"]]}, []))
     assert tools.read_file(*WHO, path="a.py") == "one\ntwo\n"
     assert tools.read_file(*WHO, path="empty.txt") == "empty.txt is empty."
     assert tools.read_file(*WHO, path="long.txt") == "xxxxxxxxxx\n[The content was cut.]"
 
 
-def test_a_refusal_is_raised_with_the_message_for_the_agent(tools, monkeypatch):
-    calls: list = []
+def test_a_refusal_is_raised_with_the_message_for_the_agent(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: Calls = []
     refusal = 'Refused: the command "rm -rf tests" is not one of this agent\'s allowed commands. Run an allowed command.'
     monkeypatch.setattr(tools, "connectors", fake_connectors({"ok": False, "error": refusal}, calls))
     with pytest.raises(ValueError) as raised:
@@ -148,8 +154,8 @@ def test_a_refusal_is_raised_with_the_message_for_the_agent(tools, monkeypatch):
             call()
 
 
-def test_a_run_without_a_dev_pod_is_told_so_and_nothing_is_sent(tools, monkeypatch):
-    calls: list = []
+def test_a_run_without_a_dev_pod_is_told_so_and_nothing_is_sent(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: Calls = []
     monkeypatch.setattr(tools, "connectors", fake_connectors({"ok": True, "result": "x"}, calls))
     for pod in ("", "../other", "a/b"):
         with pytest.raises(ValueError, match="this run has no dev pod"):
@@ -157,13 +163,13 @@ def test_a_run_without_a_dev_pod_is_told_so_and_nothing_is_sent(tools, monkeypat
     assert calls == []
 
 
-def test_a_connector_service_that_fails_is_an_error_not_a_refusal(tools, monkeypatch):
+def test_a_connector_service_that_fails_is_an_error_not_a_refusal(tools: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "connectors", fake_connectors(httpx.Response(503, text="still starting"), []))
     with pytest.raises(RuntimeError, match="HTTP 503: still starting"):
         tools.list_files(*WHO)
 
 
-def test_a_long_refusal_reaches_the_model_whole(monkeypatch):
+def test_a_long_refusal_reaches_the_model_whole(monkeypatch: pytest.MonkeyPatch) -> None:
     refusal = "Refused: the command joins several commands. " + "Allowed: git status*. " * 40 + "Call report_blocked."
     assert 500 < len(refusal) < 2000
     monkeypatch.setattr(factory, "connectors", fake_connectors({"ok": False, "error": refusal}, []))

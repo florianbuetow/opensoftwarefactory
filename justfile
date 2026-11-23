@@ -360,7 +360,9 @@ deploy:
     kind load docker-image "${images[@]}" --name {{cluster}}
     existing=""
     if kubectl --context {{context}} --namespace {{namespace}} get namespace {{namespace}} >/dev/null 2>&1; then
-        existing=$(kubectl --context {{context}} --namespace {{namespace}} get deployment -o name 2>/dev/null || true)
+        if ! existing=$(kubectl --context {{context}} --namespace {{namespace}} get deployment -o name 2>/dev/null); then
+            existing=""
+        fi
     fi
     kubectl --context {{context}} apply -k infra/kubernetes/overlays/local
     for service in {{services}}; do
@@ -549,7 +551,9 @@ _openobserve-login:
     #!/usr/bin/env bash
     set -euo pipefail
     env_file=services/openobserve/config/openobserve.env
-    [ -f "$env_file" ] || exit 0
+    if [ ! -f "$env_file" ]; then
+        exit 0
+    fi
     printf '%s %s\n' "$(sed -n 's/^ZO_ROOT_USER_EMAIL=//p' "$env_file")" \
         "$(sed -n 's/^ZO_ROOT_USER_PASSWORD=//p' "$env_file")"
 

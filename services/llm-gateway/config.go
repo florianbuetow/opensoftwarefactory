@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -38,7 +39,7 @@ type route struct {
 
 func loadConfig(path string) (Config, error) {
 	c := Config{LogLevel: "DEBUG"}
-	f, err := os.Open(path)
+	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return c, err
 	}

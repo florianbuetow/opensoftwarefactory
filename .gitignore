@@ -41,3 +41,4 @@ PLAN.md
 /services/factory-ui/factory-ui
 # Examples are private, local-only material.
 /examples/
+.impeccable/

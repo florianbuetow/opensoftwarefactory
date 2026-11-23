@@ -9,15 +9,24 @@ import json
 import multiprocessing
 import re
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from factory import NotFoundError, blobstore, connectors, evidence, policies, valid_id
 
 SEARCH_SECONDS = 5.0
 
+# The return type of the tools that answer with a JSON object. At run time it is the bare
+# dict: the MCP library derives an output schema from dict[str, Any] and then validates the
+# answer and adds structured content, while a bare dict keeps the answer as text only.
+if TYPE_CHECKING:
+    JsonObject = dict[str, Any]
+else:
+    JsonObject = dict
 
-def read_trace(run_id: str, execution_id: str, trace_id: str = "", cursor: str = "", limit: int = 100) -> dict:
+
+def read_trace(run_id: str, execution_id: str, trace_id: str = "", cursor: str = "", limit: int = 100) -> JsonObject:
     """Read target workflow execution spans and artifact references without modifying them.
 
     Supply the business run UUID and target execution ID from the workflow event.
@@ -29,7 +38,7 @@ def read_trace(run_id: str, execution_id: str, trace_id: str = "", cursor: str =
     return evidence.read(run_id, execution_id, trace_id, cursor, limit)
 
 
-def read_trace_artifact(run_id: str, execution_id: str, artifact_id: str) -> dict:
+def read_trace_artifact(run_id: str, execution_id: str, artifact_id: str) -> JsonObject:
     """Read an artifact only within the target workflow execution's evidence scope.
 
     Use an artifact_id returned by read_trace. The factory verifies its run and
@@ -37,6 +46,7 @@ def read_trace_artifact(run_id: str, execution_id: str, artifact_id: str) -> dic
     This operation cannot read arbitrary blob namespaces or modify artifacts.
     """
     return evidence.artifact(run_id, execution_id, artifact_id)
+
 
 REQUIREMENT = re.compile(r"\b(must|should|shall|needs?)\b", re.IGNORECASE)
 WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'_-]*")
@@ -69,7 +79,8 @@ def get_policy(policy_id: str, version: str = "latest") -> str:
         policy = policies.get(policy_id, version)
     except NotFoundError:
         return f"Policy {policy_id!r} version {version!r} does not exist."
-    return policy["files"]["policy.md"]
+    text: str = policy["files"]["policy.md"]
+    return text
 
 
 def get_artifact(object_id: str) -> str:
@@ -93,7 +104,7 @@ def put_artifact(object_id: str, content: str, creator: str = "tool-gateway", tr
     return object_id
 
 
-def list_artifacts(prefix: str = "") -> dict:
+def list_artifacts(prefix: str = "") -> JsonObject:
     """List the immediate children of a prefix in the blobstore.
 
     prefix is a slash-separated directory such as "runs/42", or "" for the top
@@ -103,7 +114,7 @@ def list_artifacts(prefix: str = "") -> dict:
     return blobstore.list(prefix)
 
 
-def analyze_task_complexity(object_id: str) -> dict:
+def analyze_task_complexity(object_id: str) -> JsonObject:
     """Estimate how complex the task described in a blobstore artifact is.
 
     The assessment is a deterministic heuristic, not a judgement of meaning:
@@ -119,7 +130,7 @@ def analyze_task_complexity(object_id: str) -> dict:
     return {"object_id": object_id, **_assess(blobstore.get(object_id))}
 
 
-def list_session_files(session: str) -> dict:
+def list_session_files(session: str) -> JsonObject:
     """List the files of an interactive chat session.
 
     session is the session path given in your instructions, for example
@@ -162,7 +173,7 @@ def read_session_file(session: str, name: str, start_line: int = 0, end_line: in
     return "\n".join(f"{number:6d}\t{lines[number - 1]}" for number in range(first, last + 1))
 
 
-def search_session_files(session: str, pattern: str, name: str = "") -> dict:
+def search_session_files(session: str, pattern: str, name: str = "") -> JsonObject:
     """Search the session files line by line with a regular expression.
 
     session is the session path (or team path) given in your instructions.
@@ -197,7 +208,7 @@ def _search(regex: re.Pattern[str], texts: list[tuple[str, str]]) -> dict[str, A
     return {"matches": matches, "truncated": False}
 
 
-def _within(seconds: float, work: Any, message: str) -> Any:
+def _within[T](seconds: float, work: Callable[[], T], message: str) -> T:
     """Run work in a child process and stop it after seconds.
 
     Python's re has no timeout, and a pattern such as (a+)+$ can run for hours on
@@ -226,7 +237,8 @@ def _within(seconds: float, work: Any, message: str) -> Any:
         receiver.close()
     if not ok:
         raise ValueError(value)
-    return value
+    result: T = value
+    return result
 
 
 def write_session_file(session: str, name: str, content: str) -> str:
@@ -250,7 +262,7 @@ def write_session_file(session: str, name: str, content: str) -> str:
     return object_id
 
 
-def list_channels(team: str, member: str) -> dict:
+def list_channels(team: str, member: str) -> JsonObject:
     """List your message channels in a team: who is on the other end and how many unread messages wait.
 
     team is the team path given in your instructions, for example
@@ -270,7 +282,7 @@ def list_channels(team: str, member: str) -> dict:
     _team_member(info, member)
     descriptions = {entry["name"]: entry.get("description", "") for entry in info.get("members", [])}
     read = _read_markers(team, member)
-    channels = []
+    channels: list[dict[str, Any]] = []
     for channel in info.get("channels", []):
         if member not in channel["members"]:
             continue
@@ -278,13 +290,18 @@ def list_channels(team: str, member: str) -> dict:
         marker = read.get(channel["id"], 0)
         unread = sum(1 for message in _queue(team, channel["id"], other) if message["seq"] > marker)
         channels.append(
-            {"id": channel["id"], "with": other, "description": descriptions.get(other, ""), "unread": unread,
-             "direction": _direction(channel, member)}
+            {
+                "id": channel["id"],
+                "with": other,
+                "description": descriptions.get(other, ""),
+                "unread": unread,
+                "direction": _direction(channel, member),
+            }
         )
     return {"team": team, "member": member, "channels": channels}
 
 
-def send_message(team: str, member: str, channel: str, text: str) -> dict:
+def send_message(team: str, member: str, channel: str, text: str) -> JsonObject:
     """Send a message to the other member of one of your team channels.
 
     team is the team path and member is your own member name, both given in
@@ -304,7 +321,7 @@ def send_message(team: str, member: str, channel: str, text: str) -> dict:
     info = _team(team)
     _team_member(info, member)
     entry = _team_channel(info, member, channel)
-    if not isinstance(text, str) or not text.strip():
+    if not _is_text(text) or not text.strip():
         raise ValueError("text is empty: pass the complete message as text")
     if len(text) > MAX_MESSAGE_TEXT:
         raise ValueError(
@@ -329,7 +346,7 @@ def send_message(team: str, member: str, channel: str, text: str) -> dict:
     return {"channel": channel, "seq": seq, "to": to}
 
 
-def read_messages(team: str, member: str, channel: str, after: int = 0) -> dict:
+def read_messages(team: str, member: str, channel: str, after: int = 0) -> JsonObject:
     """Re-read the messages of one of your team channels, both directions, oldest first.
 
     New messages are given to you automatically at the start of a turn, so use
@@ -374,11 +391,8 @@ def finish_team(team: str, member: str, files: list[str], summary: str) -> str:
     info = _team(team)
     _team_member(info, member)
     if member != info.get("lead"):
-        raise ValueError(
-            f"only the lead {info.get('lead')!r} can finish the team: send your result to the lead "
-            "with send_message instead"
-        )
-    if not isinstance(files, list) or not files or not all(isinstance(name, str) for name in files):
+        raise ValueError(f"only the lead {info.get('lead')!r} can finish the team: send your result to the lead with send_message instead")
+    if not _is_text_list(files) or not files:
         raise ValueError('files is empty: pass the names of the result files, for example ["main.py"]')
     for name in files:
         _team_file(team, name)
@@ -401,7 +415,7 @@ def finish_team(team: str, member: str, files: list[str], summary: str) -> str:
 # passes for them is replaced.
 
 
-def list_files(pod: str, agent: str, run: str, path: str = ".") -> dict:
+def list_files(pod: str, agent: str, run: str, path: str = ".") -> JsonObject:
     """List the files and folders in one folder of the repository you work on.
 
     pod, agent and run are filled in by the system; do not pass them.
@@ -412,7 +426,7 @@ def list_files(pod: str, agent: str, run: str, path: str = ".") -> dict:
     "truncated"}. Fails with a message if the folder does not exist.
     Example: list_files(path="src").
     """
-    return _devpod(pod, agent, run, "list_files", {"path": path or "."})
+    return _devpod_object(pod, agent, run, "list_files", {"path": path or "."})
 
 
 def read_file(pod: str, agent: str, run: str, path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -436,16 +450,17 @@ def read_file(pod: str, agent: str, run: str, path: str, start_line: int = 0, en
     result = _devpod(pod, agent, run, "read_file", args)
     if not isinstance(result, dict):
         return str(result)
-    content = result.get("content", "")
-    if not content and not result.get("total_lines"):
-        return f"{result.get('path', path)} is empty."
-    if result.get("note"):
-        content = f"{content}\n[{result['note']}]"
+    answer = cast(dict[str, Any], result)
+    content: str = answer.get("content", "")
+    if not content and not answer.get("total_lines"):
+        return f"{answer.get('path', path)} is empty."
+    if answer.get("note"):
+        content = f"{content}\n[{answer['note']}]"
     return content
 
 
-def write_file(pod: str, agent: str, run: str, path: str, content: str) -> dict:
-    """Write a whole file in the repository you work on, creating it or replacing its content.
+def write_file(pod: str, agent: str, run: str, path: str, content: str) -> JsonObject:
+    r"""Write a whole file in the repository you work on, creating it or replacing its content.
 
     pod, agent and run are filled in by the system; do not pass them.
     path is the file relative to the repository root, for example
@@ -458,10 +473,10 @@ def write_file(pod: str, agent: str, run: str, path: str, content: str) -> dict:
     another way.
     Example: write_file(path="notes/plan.md", content="# Plan\\n").
     """
-    return _devpod(pod, agent, run, "write_file", {"path": path, "content": content})
+    return _devpod_object(pod, agent, run, "write_file", {"path": path, "content": content})
 
 
-def edit_file(pod: str, agent: str, run: str, path: str, old_text: str, new_text: str) -> dict:
+def edit_file(pod: str, agent: str, run: str, path: str, old_text: str, new_text: str) -> JsonObject:
     """Replace one piece of text in a file of the repository you work on.
 
     pod, agent and run are filled in by the system; do not pass them.
@@ -476,10 +491,10 @@ def edit_file(pod: str, agent: str, run: str, path: str, old_text: str, new_text
     message says why and what to do instead.
     Example: edit_file(path="src/panel.py", old_text="total = 0", new_text="total = 1").
     """
-    return _devpod(pod, agent, run, "edit_file", {"path": path, "old_text": old_text, "new_text": new_text})
+    return _devpod_object(pod, agent, run, "edit_file", {"path": path, "old_text": old_text, "new_text": new_text})
 
 
-def search(pod: str, agent: str, run: str, pattern: str, path: str = "") -> dict:
+def search(pod: str, agent: str, run: str, pattern: str, path: str = "") -> JsonObject:
     """Search the files of the repository you work on for a regular expression.
 
     pod, agent and run are filled in by the system; do not pass them.
@@ -491,13 +506,13 @@ def search(pod: str, agent: str, run: str, pattern: str, path: str = "") -> dict
     empty list.
     Example: search(pattern="payment_date", path="src").
     """
-    args = {"pattern": pattern}
+    args: dict[str, Any] = {"pattern": pattern}
     if path:
         args["path"] = path
-    return _devpod(pod, agent, run, "search", args)
+    return _devpod_object(pod, agent, run, "search", args)
 
 
-def run_command(pod: str, agent: str, run: str, command: str, timeout_seconds: int = 0) -> dict:
+def run_command(pod: str, agent: str, run: str, command: str, timeout_seconds: int = 0) -> JsonObject:
     """Run one shell command in the root of the repository you work on.
 
     pod, agent and run are filled in by the system; do not pass them.
@@ -516,7 +531,7 @@ def run_command(pod: str, agent: str, run: str, command: str, timeout_seconds: i
     args: dict[str, Any] = {"command": command}
     if timeout_seconds:
         args["timeout_seconds"] = timeout_seconds
-    return _devpod(pod, agent, run, "run_command", args)
+    return _devpod_object(pod, agent, run, "run_command", args)
 
 
 def report_blocked(pod: str, agent: str, run: str, reason: str) -> str:
@@ -577,7 +592,7 @@ def update_pull_request(pod: str, agent: str, run: str, title: str = "", body: s
     message if there is no pull request yet.
     Example: update_pull_request(body="Adds the payment date. Checked with ./verify.sh.").
     """
-    args = {}
+    args: dict[str, Any] = {}
     if title:
         args["title"] = title
     if body:
@@ -608,12 +623,20 @@ def comment_on_pull_request(pod: str, agent: str, run: str, body: str) -> str:
     return _devpod_text(_devpod(pod, agent, run, "comment_on_pull_request", {"body": body}))
 
 
-def _devpod(pod: str, agent: str, run: str, tool: str, args: dict[str, Any]) -> Any:
+def _devpod(pod: str, agent: str, run: str, tool: str, args: dict[str, Any]) -> object:
     """Forward a dev pod tool call to the connector service; a refusal is raised with its message."""
     return connectors.tool(pod, tool, args, agent, run)
 
 
-def _devpod_text(result: Any) -> str:
+def _devpod_object(pod: str, agent: str, run: str, tool: str, args: dict[str, Any]) -> JsonObject:
+    """Forward a dev pod tool call that the connector service answers with a JSON object.
+
+    The answer is passed on as it is, without a check of its type.
+    """
+    return cast(JsonObject, _devpod(pod, agent, run, tool, args))
+
+
+def _devpod_text(result: object) -> str:
     """Return a result as text: a sentence as it is, anything else as JSON."""
     if isinstance(result, str):
         return result
@@ -629,11 +652,13 @@ def read_skill(pod: str, agent: str, run: str, version: str, skill: str, file: s
     instructions to read any further files it names.
     Example: read_skill(skill="git", file="release/SKILL.md").
     """
-    return connectors.skill(pod, agent, run, version, skill, "read_skill", {"file": file})
+    # The connector service answers read_skill with the text of the file.
+    return cast(str, connectors.skill(pod, agent, run, version, skill, "read_skill", {"file": file}))
 
 
-def run_skill_script(pod: str, agent: str, run: str, version: str, skill: str, script: str,
-                     args: list[str] = [], timeout_seconds: int = 0) -> dict:
+def run_skill_script(
+    pod: str, agent: str, run: str, version: str, skill: str, script: str, args: list[str] | None = None, timeout_seconds: int = 0
+) -> JsonObject:
     """Run one script from a skill carried by this agent in the run's dev pod.
 
     pod, agent, run, version and timeout_seconds are filled in by the system; do
@@ -642,8 +667,25 @@ def run_skill_script(pod: str, agent: str, run: str, version: str, skill: str, s
     The exit code and the retained ends of standard output and error are returned.
     Example: run_skill_script(skill="git", script="release/scripts/tag.sh", args=["1.4.0"]).
     """
-    return connectors.skill(pod, agent, run, version, skill, "run_skill_script",
-                            {"script": script, "args": args, "timeout_seconds": timeout_seconds})
+    if args is None:
+        args = []
+    # The connector service answers run_skill_script with a JSON object.
+    return cast(
+        JsonObject,
+        connectors.skill(
+            pod, agent, run, version, skill, "run_skill_script", {"script": script, "args": args, "timeout_seconds": timeout_seconds}
+        ),
+    )
+
+
+def _is_text(value: object) -> bool:
+    """Report whether an argument is a string; a direct call can pass any value."""
+    return isinstance(value, str)
+
+
+def _is_text_list(value: object) -> bool:
+    """Report whether an argument is a list of strings; a direct call can pass any value."""
+    return isinstance(value, list) and all(isinstance(item, str) for item in cast(list[object], value))
 
 
 def _now() -> str:
@@ -665,10 +707,7 @@ def _is_team(path: str) -> bool:
 def _team_path(team: str) -> str:
     segments = team.split("/")
     if len(segments) < 3 or segments[0] != TEAM_ROOT or "\n" in team or not valid_id(team):
-        raise ValueError(
-            f"invalid team {team!r}: use the team path given in your instructions, "
-            f'such as "{TEAM_ROOT}/<trace-id>/<step-id>"'
-        )
+        raise ValueError(f'invalid team {team!r}: use the team path given in your instructions, such as "{TEAM_ROOT}/<trace-id>/<step-id>"')
     return team
 
 
@@ -683,23 +722,20 @@ def _team_file(team: str, name: str) -> str:
 
 def _team(team: str) -> dict[str, Any]:
     try:
-        return json.loads(blobstore.get(f"{_team_path(team)}/team.json"))
+        info: dict[str, Any] = json.loads(blobstore.get(f"{_team_path(team)}/team.json"))
+        return info
     except NotFoundError:
-        raise ValueError(
-            f"team {team!r} does not exist: use the team path given in your instructions unchanged"
-        ) from None
+        raise ValueError(f"team {team!r} does not exist: use the team path given in your instructions unchanged") from None
 
 
 def _team_member(info: dict[str, Any], member: str) -> None:
     names = [entry["name"] for entry in info.get("members", [])]
     if member not in names:
-        raise ValueError(
-            f"{member!r} is not a member of this team: pass your own member name as member. Members: {names}"
-        )
+        raise ValueError(f"{member!r} is not a member of this team: pass your own member name as member. Members: {names}")
 
 
 def _team_channel(info: dict[str, Any], member: str, channel: str) -> dict[str, Any]:
-    own = [entry for entry in info.get("channels", []) if member in entry["members"]]
+    own: list[dict[str, Any]] = [entry for entry in info.get("channels", []) if member in entry["members"]]
     for entry in own:
         if entry["id"] == channel:
             return entry
@@ -728,14 +764,16 @@ def _queue_id(team: str, channel: str, sender: str) -> str:
 def _queue(team: str, channel: str, sender: str) -> list[dict[str, Any]]:
     """Return the messages sender sent on the channel; none when sender sent nothing yet."""
     try:
-        return json.loads(blobstore.get(_queue_id(team, channel, sender))).get("messages") or []
+        messages: list[dict[str, Any]] = json.loads(blobstore.get(_queue_id(team, channel, sender))).get("messages") or []
+        return messages
     except NotFoundError:
         return []
 
 
 def _read_markers(team: str, member: str) -> dict[str, int]:
     try:
-        return json.loads(blobstore.get(f"{team}/members/{member}.json")).get("read") or {}
+        markers: dict[str, int] = json.loads(blobstore.get(f"{team}/members/{member}.json")).get("read") or {}
+        return markers
     except NotFoundError:
         return {}
 
@@ -747,8 +785,7 @@ def _session(session: str) -> str:
     # valid_id anchors with "$", which also matches before a trailing newline in a segment.
     if len(segments) < 3 or segments[0] != SESSION_ROOT or "\n" in session or not valid_id(session):
         raise ValueError(
-            f"invalid session {session!r}: use the session path given in your instructions, "
-            f'such as "{SESSION_ROOT}/<trace-id>/<step-id>"'
+            f'invalid session {session!r}: use the session path given in your instructions, such as "{SESSION_ROOT}/<trace-id>/<step-id>"'
         )
     return session
 
@@ -783,7 +820,7 @@ def _assess(text: str) -> dict[str, Any]:
     words = len(WORD.findall(text))
     requirements = sum(1 for s in sentences if REQUIREMENT.search(s))
     components = {w for s in sentences for w in WORD.findall(s)[1:] if CAPITALIZED.match(w)}
-    reasons = []
+    reasons: list[str] = []
     if words > 200:
         reasons.append(f"more than 200 words ({words})")
     if words > 800:

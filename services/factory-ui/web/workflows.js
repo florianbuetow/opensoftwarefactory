@@ -1108,12 +1108,13 @@ const WorkflowLogic = (() => {
     pathLine.replaceChildren(...parts);
   }
 
-  // The canvas head: the version on the canvas, a note for an older version, and Save, the
-  // page's one primary button.
+  // The canvas head: the version on the canvas, a note for an older version, and the page's one
+  // primary button: Run… for a stored version without unsaved edits, Save once there are edits.
   const versionSelect = h("select", { className: "fit wf-version", "aria-label": "Version" });
   const versionNote = h("span", { className: "wf-version-note", role: "status" });
   const saveButton = h("button", { type: "button", className: "primary wf-save", onclick: () => save() }, "Save");
-  document.querySelector("#tab-workflows .canvas-head").append(versionSelect, versionNote, saveButton);
+  const runButton = h("button", { type: "button", className: "primary wf-run", onclick: () => openInputs() }, "Run…");
+  document.querySelector("#tab-workflows .canvas-head").append(versionSelect, versionNote, runButton, saveButton);
   versionSelect.addEventListener("change", async () => {
     const e = entry();
     if (!e) return;
@@ -1131,9 +1132,16 @@ const WorkflowLogic = (() => {
     }
     versionNote.hidden = !w || !head.note;
     versionNote.textContent = w ? head.note : "";
-    saveButton.hidden = !w;
+    const runs = !!w && !isDraft(e) && !state.dirty && !state.saving; // nothing to save: the button runs
+    const blocked = runs ? runBlocker() : "";
+    const swapFocus = document.activeElement === (runs ? saveButton : runButton); // the keyboard stays on the slot
+    runButton.hidden = !runs;
+    runButton.disabled = !!blocked;
+    runButton.title = blocked || `Opens Select Inputs to start runs of v${shownVersion()}`;
+    saveButton.hidden = !w || runs;
     saveButton.disabled = !head.canSave || !!descriptionEdit;
     saveButton.title = descriptionEdit?.saving ? "Stores the description now" : descriptionEdit ? "Needs the description saved or cancelled first" : head.saveTip;
+    if (swapFocus) (runs ? runButton : saveButton).focus();
   }
 
   // The selected version's description is editable independently of its execution graph.

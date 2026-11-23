@@ -391,8 +391,23 @@ test("the rounds of a step are listed oldest first, the newest with the step's o
   ]);
   assert.equal(roundRows(kept, 3).at(-1).round, 3);
   assert.equal(roundRows([kept[0]], 4).at(-1).round, 4, "the status knows how often the step ran");
-  assert.match(runs, /const rounds = passes\.length \? \[\] : RunsLogic\.roundRows\(st\.rounds\?\.\[id\], st\.roundCounts\?\.\[id\]\);/);
+  assert.match(runs, /const rounds = passes\.length \? \[\] : RunsLogic\.roundRows\(st\.rounds\?\.\[id\], st\.roundCounts\?\.\[id\], failedAt\(id\) \? artifactOf\(id\) \|\| "" : ""\);/);
+  // A step rejected once that timed out in its second round: round 1 left the step's own result.
+  assert.deepEqual(plain(roundRows(undefined, 2, "runs/t/review")), [
+    { round: 1, artifact: "runs/t/review", current: false }, { round: 2, artifact: "", current: true },
+  ], "the failed round is the newest, the result before it round 1");
+  assert.deepEqual(plain(roundRows([kept[0]], 3, "runs/t/build")).map((r) => r.round), [1, 2, 3]);
   assert.match(runs, /h\("span", \{ className: "step-name" \}, `Round \$\{r\.round\}`\), link\)/);
+});
+
+test("a failed step is never shown completed, and a run that failed outside its steps says so last", () => {
+  const { runEndLine } = runsLogic();
+  assert.equal(runEndLine("TimedOut", "Review"), "Run timed out after Review");
+  assert.equal(runEndLine("Terminated", "Build"), "Run was terminated after Build");
+  assert.equal(runEndLine("Failed"), "Run failed");
+  assert.match(runs, /if \(failedAt\(id\)\) return "failed";[^\n]*\n\s*if \(artifactOf\(id\)\) return "done";/, "the failure wins over an earlier round's result");
+  assert.match(runs, /return failedAt\(step\) \? null : outputLink\(step, output\);/, "a failed step does not link an earlier round's output as its own");
+  assert.match(runs, /const runEnd = failedRun && !rows\.some\(\(\{ id \}\) => stepState\(id\) === "failed"\)/);
 });
 
 test("a pull request record is read in one place", () => {

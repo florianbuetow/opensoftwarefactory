@@ -1,4 +1,5 @@
 """Tests of the pod tool server. Run: python3 -m unittest discover -s services/devpod/tests"""
+
 import json
 import os
 import shutil
@@ -9,13 +10,14 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import podhttp  # noqa: E402
 import toolserver  # noqa: E402
-from podhttp import Refusal  # noqa: E402
+from podhttp import JsonObject, RefusalError  # noqa: E402
 
 
 class WorkspaceCase(unittest.TestCase):
@@ -29,24 +31,26 @@ class WorkspaceCase(unittest.TestCase):
         self.put(".git/config", "[core]\n")
         home = os.path.join(self.base, "home")
         os.makedirs(home)
-        patches = [mock.patch.object(toolserver, "WORKSPACE", self.root),
-                   mock.patch.dict(os.environ, {"HOME": home, "POD_TOKEN": "must-not-leak"})]
+        patches = [
+            mock.patch.object(toolserver, "WORKSPACE", self.root),
+            mock.patch.dict(os.environ, {"HOME": home, "POD_TOKEN": "must-not-leak"}),
+        ]
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
 
-    def put(self, relative, content):
+    def put(self, relative: str, content: str) -> None:
         path = os.path.join(self.root, relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(content)
 
-    def get(self, relative):
+    def get(self, relative: str) -> str:
         with open(os.path.join(self.root, relative), encoding="utf-8") as handle:
             return handle.read()
 
-    def refused(self, function, args, *words):
-        with self.assertRaises(Refusal) as caught:
+    def refused(self, function: Callable[[JsonObject], object], args: JsonObject, *words: str) -> str:
+        with self.assertRaises(RefusalError) as caught:
             function(args)
         for word in words:
             self.assertIn(word, str(caught.exception))
@@ -239,18 +243,34 @@ class CommandTest(WorkspaceCase):
 
 
 class SkillScriptTest(WorkspaceCase):
-    def run_script(self, script, files=None, args=None, timeout=5, max_lines=1000, max_bytes=10240):
-        skill_files = {"scripts/run.sh": script} if files is None else files
-        return toolserver.run_skill_script({"files": skill_files, "script": "scripts/run.sh", "args": args or [],
-                                            "timeout_seconds": timeout, "max_lines": max_lines,
-                                            "max_bytes": max_bytes})
+    def run_script(
+        self,
+        script: str,
+        files: JsonObject | None = None,
+        args: object = None,
+        timeout: object = 5,
+        max_lines: object = 1000,
+        max_bytes: object = 10240,
+    ) -> JsonObject:
+        skill_files: JsonObject = {"scripts/run.sh": script} if files is None else files
+        return toolserver.run_skill_script(
+            {
+                "files": skill_files,
+                "script": "scripts/run.sh",
+                "args": args or [],
+                "timeout_seconds": timeout,
+                "max_lines": max_lines,
+                "max_bytes": max_bytes,
+            }
+        )
 
     def test_runs_directly_with_arguments_in_workspace_and_cleans_up(self):
-        scratch = lambda: {name for name in os.listdir("/tmp") if name.startswith("factory-skill-")}
+        def scratch():
+            return {name for name in os.listdir("/tmp") if name.startswith("factory-skill-")}
+
         before = scratch()
         arguments = ["a b; c", '"quotes"', "$(echo not-expanded)", "line\nbreak"]
-        result = self.run_script("#!/bin/sh\nprintf '%s\\n' \"$PWD\"\nprintf '<%s>' \"$@\"\nprintf 'problem' >&2\nexit 7\n",
-                                 args=arguments)
+        result = self.run_script("#!/bin/sh\nprintf '%s\\n' \"$PWD\"\nprintf '<%s>' \"$@\"\nprintf 'problem' >&2\nexit 7\n", args=arguments)
         self.assertEqual(result["exit_code"], 7)
         self.assertEqual(result["stdout"], self.root + "\n" + "".join(f"<{value}>" for value in arguments))
         self.assertEqual(result["stderr"], "problem")
@@ -258,13 +278,16 @@ class SkillScriptTest(WorkspaceCase):
         self.assertEqual(scratch(), before)
 
     def test_files_with_shebangs_are_executable_and_other_files_are_available(self):
-        result = self.run_script('#!/bin/sh\ncat "$(dirname "$0")/../data.txt"\n',
-                          {"scripts/run.sh": '#!/bin/sh\ncat "$(dirname "$0")/../data.txt"\n', "data.txt": "hello\n"})
+        result = self.run_script(
+            '#!/bin/sh\ncat "$(dirname "$0")/../data.txt"\n',
+            {"scripts/run.sh": '#!/bin/sh\ncat "$(dirname "$0")/../data.txt"\n', "data.txt": "hello\n"},
+        )
         self.assertEqual(result["stdout"], "hello\n")
 
     def test_output_keeps_the_last_byte_and_line_windows(self):
-        result = self.run_script("#!/bin/sh\nprintf 'first\\nsecond-long\\nthird\\n'\nprintf 'a\\nb\\nc\\n' >&2\n",
-                          max_lines=2, max_bytes=13)
+        result = self.run_script(
+            "#!/bin/sh\nprintf 'first\\nsecond-long\\nthird\\n'\nprintf 'a\\nb\\nc\\n' >&2\n", max_lines=2, max_bytes=13
+        )
         self.assertEqual(result["stdout"], "third\n")
         self.assertEqual(result["stderr"], "b\nc\n")
         self.assertTrue(result["stdout_cut"])
@@ -307,27 +330,42 @@ class SkillScriptTest(WorkspaceCase):
         self.assertIn("before", result["stdout"])
 
     def test_missing_shebang_and_invalid_input_are_refused(self):
-        self.refused(self.run_script, "echo no", "missing a shebang")
-        self.refused(toolserver.run_skill_script,
-                     {"files": {"../run.sh": "#!/bin/sh\n"}, "script": "../run.sh", "args": [],
-                      "timeout_seconds": 1, "max_lines": 1, "max_bytes": 1}, "invalid")
-        self.refused(toolserver.run_skill_script,
-                     {"files": {"run.sh": "#!/bin/sh\n"}, "script": "run.sh", "args": [1],
-                      "timeout_seconds": 1, "max_lines": 1, "max_bytes": 1}, "list of text")
+        self.refused(lambda _: self.run_script("echo no"), {}, "missing a shebang")
+        self.refused(
+            toolserver.run_skill_script,
+            {
+                "files": {"../run.sh": "#!/bin/sh\n"},
+                "script": "../run.sh",
+                "args": [],
+                "timeout_seconds": 1,
+                "max_lines": 1,
+                "max_bytes": 1,
+            },
+            "invalid",
+        )
+        self.refused(
+            toolserver.run_skill_script,
+            {"files": {"run.sh": "#!/bin/sh\n"}, "script": "run.sh", "args": [1], "timeout_seconds": 1, "max_lines": 1, "max_bytes": 1},
+            "list of text",
+        )
 
 
 class HttpTest(WorkspaceCase):
     def setUp(self):
         super().setUp()
-        self.server = podhttp.serve(0, "secret-token",
-                                   {"/op": toolserver.handle_op, "/skill-script": toolserver.handle_skill_script},
-                                   host="127.0.0.1", unbounded_paths=("/skill-script",))
+        self.server = podhttp.serve(
+            0,
+            "secret-token",
+            {"/op": toolserver.handle_op, "/skill-script": toolserver.handle_skill_script},
+            host="127.0.0.1",
+            unbounded_paths=("/skill-script",),
+        )
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
-    def call(self, path, body=None, token=None, raw=None):
+    def call(self, path: str, body: JsonObject | None = None, token: str | None = None, raw: bytes | None = None) -> tuple[int, JsonObject]:
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         request = urllib.request.Request(self.url + path, data=data)
         if token is not None:
@@ -342,10 +380,16 @@ class HttpTest(WorkspaceCase):
         self.assertEqual(self.call("/healthz"), (200, {"ok": True}))
 
     def test_skill_operation_has_no_regular_request_limit(self):
-        body = {"op": "run_skill_script", "args": {
-            "files": {"run.sh": "#!/bin/sh\necho hello"}, "script": "run.sh",
-            "timeout_seconds": 1, "max_lines": 2, "max_bytes": 16,
-        }}
+        body = {
+            "op": "run_skill_script",
+            "args": {
+                "files": {"run.sh": "#!/bin/sh\necho hello"},
+                "script": "run.sh",
+                "timeout_seconds": 1,
+                "max_lines": 2,
+                "max_bytes": 16,
+            },
+        }
         with mock.patch.object(podhttp, "MAX_BODY_BYTES", 32):
             self.assertEqual(self.call("/op", body, token="secret-token")[0], 413)
             self.assertEqual(self.call("/skill-script", body, token="wrong")[0], 401)
@@ -366,7 +410,7 @@ class HttpTest(WorkspaceCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        self.url = "http://127.0.0.1:%d" % server.server_address[1]
+        self.url = f"http://127.0.0.1:{server.server_address[1]}"
         self.assertEqual(self.call("/op", {"op": "list_files"}, token="")[0], 401)
 
     def test_op_answers_in_the_contract_shape(self):

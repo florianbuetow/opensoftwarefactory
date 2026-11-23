@@ -170,13 +170,8 @@ const DecisionsLogic = {
   function menuFor(c) {
     const run = ["View run", () => { location.hash = `#runs/${c.trace}`; }, "", "Opens the run on Runs"];
     const trace = ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(c.trace)}`; }, "", "Opens the run's objects in Blobstore"];
-    if (c.kind === "pending") {
-      // The gate shown in the detail is not decided from here either while its documents still load.
-      const tip = DecisionsLogic.blocked(creator(), state.shown !== c.id || state.ready === c.id);
-      // A rejection that goes back to the team needs its reason, which is typed in the detail.
-      const reject = returns(c) ? ["Reject", () => {}, "danger", tip || "Needs a reason", true] : ["Reject", () => decide(c, "rejected", ""), "danger", tip, !!tip];
-      return [["Approve", () => decide(c, "approved", ""), "", tip, !!tip], reject, "-", run, trace, "-", clearItem(state.filter)];
-    }
+    // A gate is decided only in its detail, under the evidence it exists to show: never from a row.
+    if (c.kind === "pending") return [run, trace, "-", clearItem(state.filter)];
     return [run, trace, "-", ["Remove decision", () => removeDecided(c), "danger", "Removes this decision from the list"], "-", clearItem(state.filter)];
   }
 

@@ -1,4 +1,5 @@
 """Read-only repository browser checks against a real bare Git repository."""
+
 import importlib.util
 import os
 import subprocess
@@ -7,6 +8,8 @@ import unittest
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("git_host_server", Path(__file__).with_name("server.py"))
+assert spec is not None
+assert spec.loader is not None
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 
@@ -31,7 +34,7 @@ class BrowserTest(unittest.TestCase):
         subprocess.run(["git", "clone", "-q", "--bare", str(source), str(self.repo)], check=True)
 
     @staticmethod
-    def git(source, *args):
+    def git(source: Path, *args: str) -> None:
         subprocess.run(["git", "-C", str(source), *args], check=True)
 
     def test_browse_files_commits_and_branches(self):

@@ -6,6 +6,8 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "httpx>=0.28.1",
     "mcp>=2.3.0,<3",
+    "mcp-types>=2.3.0,<3",
+    "starlette>=1.10.0,<2",
     "uvicorn>=0.54.0",
 ]
 

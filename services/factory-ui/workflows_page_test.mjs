@@ -173,6 +173,7 @@ function page() {
   const ui = {
     context, server, notices, questions, inputs, answers, byId, dialogs,
     save: () => find(head, (n) => n.className === "primary wf-save"),
+    runButton: () => find(head, (n) => n.className === "primary wf-run"),
     versions: () => find(head, (n) => n.tag === "select"),
     note: () => find(head, (n) => n.className === "wf-version-note"),
     shownVersion: () => ui.versions().children.find((o) => o.selected)?.textContent,
@@ -400,6 +401,12 @@ test("the page opens the newest version, lists the versions, and saves nothing b
   assert.deepEqual(ui.tiles(), ["plan", "build"]);
   assert.equal(ui.save().disabled, true);
   assert.equal(ui.save().title, "No unsaved edits");
+  // Without unsaved edits the one primary button runs the version on the canvas.
+  assert.equal(ui.save().hidden, true, "Save gives its place to Run…");
+  assert.equal(ui.runButton().hidden, false);
+  assert.equal(ui.runButton().disabled, false);
+  assert.equal(ui.runButton().textContent, "Run…");
+  assert.equal(ui.runButton().title, "Opens Select Inputs to start runs of v3");
   assert.equal(ui.note().hidden, true);
   assert.equal(ui.context.location.hash, "#workflows/demo/plan", "the newest version needs no version in the hash");
   assert.deepEqual(ui.posts(), [], "loading writes nothing");
@@ -415,6 +422,8 @@ test("an edit stays unsaved until Save, which stores the next version and shows 
   assert.deepEqual(ui.tiles(), ["plan", "build", "step-1"]);
   assert.equal(ui.save().disabled, false);
   assert.equal(ui.save().title, "Stores the workflow as v4");
+  assert.equal(ui.save().hidden, false, "an edit turns Run… into Save");
+  assert.equal(ui.runButton().hidden, true);
   await settle();
   assert.deepEqual(ui.posts(), [], "no autosave");
   // Selecting another node keeps the unsaved edit.

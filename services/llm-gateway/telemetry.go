@@ -12,7 +12,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 const (
@@ -30,7 +30,7 @@ func initTelemetry(ctx context.Context, config TelemetryConfig) (func(context.Co
 
 	endpoint := strings.TrimSpace(config.Endpoint)
 	if endpoint == "" {
-		otel.SetTracerProvider(trace.NewNoopTracerProvider())
+		otel.SetTracerProvider(noop.NewTracerProvider())
 		return func(context.Context) error { return nil }, nil
 	}
 	if err := validateTelemetryEndpoint(endpoint); err != nil {

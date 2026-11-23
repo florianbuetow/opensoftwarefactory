@@ -801,10 +801,10 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .wf-path a, .wf-path-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .wf-path-current { font-weight: 600; }
 .wf-path-sep { flex: none; color: var(--muted); }
-/* The canvas head: the path, the version on the canvas, a note for an older version, then Save at the right. */
+/* The canvas head: the path, the version on the canvas, a note for an older version, then Run… or Save at the right. */
 .canvas-head .wf-version { flex: none; }
 .canvas-head .wf-version-note { min-width: 0; font-size: .8125rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.canvas-head .wf-save { flex: none; margin-left: auto; }
+.canvas-head .wf-save, .canvas-head .wf-run { flex: none; margin-left: auto; }
 .step-form .field-row .field [data-field="max_turns"] { width: 56px; }
 /* Team panel: the members on a ring, the lead at the top, the channels as lines between them. */
 .team-panel .file-head { margin-bottom: 16px; }

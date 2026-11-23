@@ -173,6 +173,13 @@ test("a gate that returns rejections to a team asks for a reason and does not sa
   assert.match(decisions, /Records your rejection and ends the run/);
 });
 
+test("a waiting gate is decided only in its detail, never from its row's menu", () => {
+  const decisions = read("decisions.js");
+  const menu = decisions.slice(decisions.indexOf("function menuFor("), decisions.indexOf("\n  }\n", decisions.indexOf("function menuFor(")));
+  assert.match(menu, /if \(c\.kind === "pending"\) return \[run, trace, "-", clearItem\(state\.filter\)\];/);
+  assert.doesNotMatch(menu, /"Approve"|"Reject"|decide\(/);
+});
+
 // ---- Regressions from the browser walk-through ----
 
 test("another team in the hash is read at once: a load of the earlier team neither blocks nor overwrites it", async () => {

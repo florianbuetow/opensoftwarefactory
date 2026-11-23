@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
+from typing import Any
 
+import pytest
 from server import build_app, load_tools, public_functions
 from starlette.testclient import TestClient
 
@@ -27,25 +29,26 @@ def write(tmp_path: Path, source: str) -> Path:
     return path
 
 
-def rpc(client: TestClient, method: str, params: dict | None = None, id: int | None = 1):
-    body = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+def rpc(client: TestClient, method: str, params: dict[str, Any] | None = None, id: int | None = 1):
+    body: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params or {}}
     if id is not None:
         body["id"] = id
     return client.post("/mcp", json=body, headers=HEADERS)
 
 
-def test_loader_registers_public_functions_only(tmp_path):
+def test_loader_registers_public_functions_only(tmp_path: Path) -> None:
     module = load_tools(write(tmp_path, "from pathlib import Path\n" + TOOLS))
+    assert module is not None
     assert [fn.__name__ for fn in public_functions(module)] == ["shout"]
 
 
-def test_syntax_error_still_serves_http(tmp_path):
+def test_syntax_error_still_serves_http(tmp_path: Path) -> None:
     with TestClient(build_app(write(tmp_path, "def broken(:\n"))) as client:
         assert client.get("/healthz").status_code == 200
         assert rpc(client, "tools/list").json()["result"]["tools"] == []
 
 
-def test_mcp_stateless_json(tmp_path):
+def test_mcp_stateless_json(tmp_path: Path) -> None:
     with TestClient(build_app(write(tmp_path, TOOLS))) as client:
         init = rpc(
             client,
@@ -92,10 +95,10 @@ def works(member: str) -> dict:
 '''
 
 
-def test_a_failed_tool_call_returns_the_message_the_tool_raised(tmp_path, capsys):
+def test_a_failed_tool_call_returns_the_message_the_tool_raised(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     with TestClient(build_app(write(tmp_path, FAILING_TOOLS))) as client:
 
-        def call(name: str, arguments: dict) -> dict:
+        def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             return rpc(client, "tools/call", {"name": name, "arguments": arguments}).json()["result"]
 
         refused = call("refuse", {"member": "coder"})

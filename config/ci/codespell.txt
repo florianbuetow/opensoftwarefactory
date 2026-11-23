@@ -37,3 +37,8 @@ uuid
 uuids
 uvicorn
 weaviate
+# Identifiers in this repository.
+filetest
+inport
+policys
+te

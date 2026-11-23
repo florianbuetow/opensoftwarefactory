@@ -191,12 +191,21 @@ const RunsLogic = (() => {
   // roundRows lists the rounds of a step that ran again after a rejection, oldest first: the
   // kept ones ([{ round, artifact, record }], stored as <step>.round-<n>) and the newest, whose
   // result has the step's own name (current). count is how often the run status says the step
-  // ran; 0 when it does not say. A step that ran once has no rows.
-  function roundRows(kept, count = 0) {
+  // ran; 0 when it does not say. A step that ran once has no rows. earlier is the step's own
+  // result when its newest round failed before replacing it: that result is the round before's.
+  function roundRows(kept, count = 0, earlier = "") {
     const rows = (kept || []).map((r) => ({ round: r.round, artifact: r.artifact || "", current: false }));
+    if (earlier) rows.push({ round: Math.max(rows.length ? rows[rows.length - 1].round + 1 : 1, (Math.floor(Number(count)) || 0) - 1), artifact: earlier, current: false });
     if (!rows.length) return [];
     rows.push({ round: Math.max(rows[rows.length - 1].round + 1, Math.floor(Number(count)) || 0), artifact: "", current: true });
     return rows;
+  }
+
+  // runEndLine names a run that failed outside its steps, after the last one that finished
+  // ("Run timed out after Review"). It is never shown beside a failed step.
+  function runEndLine(status, last = "") {
+    const how = { TimedOut: "timed out", Terminated: "was terminated", Canceled: "was canceled" }[status] || "failed";
+    return `Run ${how}${last ? ` after ${last}` : ""}`;
   }
 
   // pullRequest is the one place that reads a pull request record, runs/<run>/pull-request.json:
@@ -258,7 +267,7 @@ const RunsLogic = (() => {
     return found.size ? [...found].sort((x, y) => x - y).map((pass) => ({ team: `${base}.pass-${pass}`, pass })) : [{ team: base, pass: 0 }];
   }
 
-  return { isNode, nodeView, countdown, nodeLines, nodeState, forwardedBy, passSource, passRows, stepLabel, recordKey, teamPaths, roundRows, pullRequest, stepDocument };
+  return { isNode, nodeView, countdown, nodeLines, nodeState, forwardedBy, passSource, passRows, stepLabel, recordKey, teamPaths, roundRows, runEndLine, pullRequest, stepDocument };
 })();
 
 (() => {
@@ -844,6 +853,7 @@ const RunsLogic = (() => {
     const artifactOf = (id) => artifacts[id] || nestedArtifacts[id];
     const teamOf = (id) => TeamsLogic.teamPath(trace, id);
     const failedNested = new Set(failedStep ? TeamsLogic.failedPaths(st.error) : []);
+    const failedAt = (id) => (id.includes("/") ? failedNested.has(id) : id === failedStep);
     // A gate waits at the step whose output it will write; a nested session at its own path.
     // A gate that runs in passes waits at the output of its pass, <step>.pass-<n>.
     // A publish decision (<step>.publish-<n>) waits at the step whose agent asked to publish.
@@ -857,7 +867,7 @@ const RunsLogic = (() => {
     const passRowsOf = (id) => {
       const s = definedStep(id);
       if (RunsLogic.isNode(s)) return [];
-      const failedHere = id.includes("/") ? failedNested.has(id) : id === failedStep;
+      const failedHere = failedAt(id);
       const source = s ? RunsLogic.passSource(defAround(id), id.split("/").pop()) : "";
       const stored = st.passes?.[id] || [];
       if (!source) return RunsLogic.passRows(stored, 0, st.status, true, failedHere); // a step whose definition is not known still lists its stored passes
@@ -888,8 +898,8 @@ const RunsLogic = (() => {
       if (RunsLogic.isNode(definedStep(id))) return (child ? failedNested.has(id) : id === failedStep) ? "failed" : RunsLogic.nodeState(nodeOf(id), st.status);
       const passStates = passEntries(id).map((p) => p.state); // of a later pass too, when its earlier output exists
       for (const found of ["waiting", "running", "failed"]) if (passStates.includes(found)) return found;
+      if (failedAt(id)) return "failed"; // also when an earlier round of it left a result
       if (artifactOf(id)) return "done";
-      if (child ? failedNested.has(id) : id === failedStep) return "failed";
       if (st.status === "Completed") return "done";
       if (st.status === "Running") {
         if (waitingGateOf(id)) return "waiting";
@@ -924,6 +934,13 @@ const RunsLogic = (() => {
     const passArtifacts = Object.fromEntries([...Object.values(st.passes || {}), ...Object.values(st.rounds || {})].flat().filter((p) => p.record && p.artifact).map((p) => [p.record, p.artifact]));
     const now = Date.now();
     const gates = new Set((def?.steps || []).filter((s) => s.service === "gate").map((s) => s.id));
+    // A run that failed while none of its steps did (a run timeout, a termination) says so in a
+    // last row of its own, so the error never stands above nothing but completed steps.
+    const failedRun = st.status && !["Running", "Completed", "Blocked"].includes(st.status) && !st.gone;
+    const lastDone = rows.filter(({ id, depth }) => !depth && stepState(id) === "done").at(-1);
+    const runEnd = failedRun && !rows.some(({ id }) => stepState(id) === "failed")
+      ? h("li", { className: "no-agent no-link step-end" }, statusChip("failed"), h("span", { className: "step-name" }, RunsLogic.runEndLine(st.status, lastDone ? titleCase(lastDone.id) : "")))
+      : null;
     detail.replaceChildren(
       h("div", { className: "panel-head" }),
       h("div", { className: "panel-body" },
@@ -957,7 +974,7 @@ const RunsLogic = (() => {
               const nested = child && (sessionsState.pending.some((p) => p.session === nestedSession(step)) || (service === "interactive" && output)) && ChatLogic.validSession(nestedSession(step));
               const session = child ? (nested ? nestedSession(step) : "") : stepSession(sessionsState.pending, sessions, trace, step);
               if (session) return h("a", { className: "step-output", href: ChatLogic.sessionHash(session) }, "View session");
-              return outputLink(step, output);
+              return failedAt(step) ? null : outputLink(step, output); // a failed step's result is an earlier round's
             };
             // outputLink leads to a gate's decision or to any other step's output.
             const outputLink = (step, output) => {
@@ -979,7 +996,7 @@ const RunsLogic = (() => {
             const [name, version] = ref.split("@");
             // A step that ran again after a rejection has one entry per round under it; the
             // newest round carries the step's own link.
-            const rounds = passes.length ? [] : RunsLogic.roundRows(st.rounds?.[id], st.roundCounts?.[id]);
+            const rounds = passes.length ? [] : RunsLogic.roundRows(st.rounds?.[id], st.roundCounts?.[id], failedAt(id) ? artifactOf(id) || "" : "");
             const ownLink = stepLink(id);
             const link = rounds.length ? null : ownLink;
             // A step without an agent or a link gives its name those columns (see .step-list).
@@ -1004,7 +1021,7 @@ const RunsLogic = (() => {
               return h("li", { className: `no-agent step-child step-pass step-round${link ? "" : " no-link"}`, style: `--step-depth:${depth + 1}` }, statusChip(r.current ? stepState(id) : "done"),
                 h("span", { className: "step-name" }, `Round ${r.round}`), link);
             })];
-          })))));
+          }), runEnd)))));
   }
 
   // refresh loads new runs and the statuses of the visible ones; running runs are

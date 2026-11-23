@@ -1,3 +1,5 @@
+from typing import Any
+
 import httpx
 import pytest
 from factory import TraceEvidence
@@ -5,10 +7,10 @@ from factory import TraceEvidence
 RUN = "12345678-1234-1234-1234-123456789abc"
 
 
-def test_read_only_scoped_request_and_unknown_evidence():
-    seen = []
+def test_read_only_scoped_request_and_unknown_evidence() -> None:
+    seen: list[httpx.Request] = []
 
-    def handle(request):
+    def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(200, json={"spans": [], "source_status": "unknown", "query_complete": True, "next_cursor": "page2"})
 
@@ -21,19 +23,28 @@ def test_read_only_scoped_request_and_unknown_evidence():
     assert result["next_cursor"] == "page2"
 
 
-@pytest.mark.parametrize("args", [dict(run_id="bad", execution_id="x"), dict(run_id=RUN, execution_id=""), dict(run_id=RUN, execution_id="x", limit=501), dict(run_id=RUN, execution_id="x", trace_id="not-a-trace")])
-def test_invalid_scope_never_reaches_backend(args):
-    def unexpected(request):
+@pytest.mark.parametrize(
+    "args",
+    [
+        dict(run_id="bad", execution_id="x"),
+        dict(run_id=RUN, execution_id=""),
+        dict(run_id=RUN, execution_id="x", limit=501),
+        dict(run_id=RUN, execution_id="x", trace_id="not-a-trace"),
+    ],
+)
+def test_invalid_scope_never_reaches_backend(args: dict[str, Any]) -> None:
+    def unexpected(request: httpx.Request) -> httpx.Response:
         raise AssertionError("invalid request reached backend")
+
     client = TraceEvidence("http://evaluation", httpx.MockTransport(unexpected))
     with pytest.raises(ValueError):
         client.read(**args)
 
 
-def test_artifact_reads_use_scoped_endpoint_and_preserve_denial():
-    seen = []
+def test_artifact_reads_use_scoped_endpoint_and_preserve_denial() -> None:
+    seen: list[httpx.Request] = []
 
-    def handle(request):
+    def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(403, text="artifact outside target execution")
 

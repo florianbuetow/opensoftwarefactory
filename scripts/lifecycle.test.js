@@ -41,7 +41,8 @@ case "$name:$1" in
   docker:stop) rm -f "$LIFECYCLE_STATE" ;;
   docker:build) : > "$LIFECYCLE_BUILT" ;;
   docker:image)
-    [ "\${MOCK_MISSING_IMAGE:-}" = "$3" ] && [ ! -f "$LIFECYCLE_BUILT" ] && exit 1 || exit 0 ;;
+    if [ "\${MOCK_MISSING_IMAGE:-}" = "$3" ] && [ ! -f "$LIFECYCLE_BUILT" ]; then exit 1; fi
+    exit 0 ;;
   kind:create) : > "$LIFECYCLE_CREATED"; : > "$LIFECYCLE_STATE" ;;
 esac
 exit 0
