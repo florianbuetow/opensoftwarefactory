@@ -13,23 +13,18 @@ run_dir=$(mktemp -d)
 trap 'rm -rf "$run_dir"' EXIT
 log="$run_dir/check.log"
 
-failed=0
 run_check() {
-    local name=$1 status=0
+    local name=$1
     shift
     if [[ $mode == verbose ]]; then
         printf '\n=== %s ===\n' "$name"
-        "$@" || status=$?
+        "$@"
     else
-        "$@" >"$log" 2>&1 || status=$?
-    fi
-    if (( status != 0 )); then
-        printf 'FAIL %s (exit %d)\n' "$name" "$status" >&2
-        if [[ $mode == quiet ]]; then
+        "$@" >"$log" 2>&1 || {
+            printf 'FAIL %s\n' "$name" >&2
             cat "$log" >&2
-        fi
-        failed=$((failed + 1))
-    else
+            exit 1
+        }
         printf 'PASS %s\n' "$name"
     fi
 }
@@ -53,8 +48,4 @@ for stage in format style mypy pyright security deps audit test architecture cov
     run_check "Python $stage" bash scripts/ci-python.sh "$stage"
 done
 
-if (( failed != 0 )); then
-    printf '\n%d CI checks failed\n' "$failed" >&2
-    exit 1
-fi
 printf '\nAll CI checks passed\n'
