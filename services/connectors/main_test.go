@@ -361,10 +361,10 @@ func TestProtectedPathsAndRulesBlockWrites(t *testing.T) {
 		args map[string]any
 		want []string
 	}{
-		{"write_file", map[string]any{"path": "tests/test_panel.py", "content": "x"}, []string{"Refused: write_file", `"tests/test_panel.py"`, `"tests/**"`, "protected", "report_blocked"}},
-		{"edit_file", map[string]any{"path": "/workspace/verify.sh", "old_text": "a", "new_text": "b"}, []string{"Refused: edit_file", `"verify.sh"`, "protected"}},
+		{"write_file", map[string]any{"path": "tests/test_panel.py", "content": "x"}, []string{"refused: write_file", `"tests/test_panel.py"`, `"tests/**"`, "protected", "report_blocked"}},
+		{"edit_file", map[string]any{"path": "/workspace/verify.sh", "old_text": "a", "new_text": "b"}, []string{"refused: edit_file", `"verify.sh"`, "protected"}},
 		{"write_file", map[string]any{"path": "src/../tests/deep/x.py", "content": "x"}, []string{"protected"}},
-		{"write_file", map[string]any{"path": "src/panel/view.py", "content": "show the rejection reason"}, []string{"Refused: write_file", `"src/panel/view.py"`, "Blocked by CL-7", "Remove the text"}},
+		{"write_file", map[string]any{"path": "src/panel/view.py", "content": "show the rejection reason"}, []string{"refused: write_file", `"src/panel/view.py"`, "Blocked by CL-7", "Remove the text"}},
 		{"edit_file", map[string]any{"path": "src/panel/view.py", "old_text": "a", "new_text": "rejectionreason"}, []string{"Blocked by CL-7 (edit)."}},
 		{"write_file", map[string]any{"path": "generated/a/b.json", "content": "{}"}, []string{"Generated files are built"}},
 		{"write_file", map[string]any{"content": "x"}, []string{"needs a path"}},
@@ -430,7 +430,7 @@ func TestOnlyAllowedCommandsRun(t *testing.T) {
 	}
 	before := len(w.pod.called())
 	refused := map[string][]string{
-		"rm -rf tests":                      {`Refused: the command "rm -rf tests"`, "not one of this agent's allowed commands", "git status*", "report_blocked"},
+		"rm -rf tests":                      {`refused: the command "rm -rf tests"`, "not one of this agent's allowed commands", "git status*", "report_blocked"},
 		"./verify.sh --fast":                {"not one of this agent's allowed commands"},
 		"verify.sh":                         {"not one of this agent's allowed commands"},
 		"git status; rm -rf tests":          {"joins several commands", "Run one allowed command per call"},
@@ -863,7 +863,7 @@ func TestAReadOnlyCredentialRefusesThePush(t *testing.T) {
 	if ok || w.pod.count("push") != 0 {
 		t.Fatalf("ok %v, calls %v", ok, w.pod.called())
 	}
-	mustContain(t, msg, "Refused", `"claims-build"`, "may only read", "create_pull_request")
+	mustContain(t, msg, "refused", `"claims-build"`, "may only read", "create_pull_request")
 	// The patch record still works.
 	if ok, _, msg = w.tool(id, "run-1", builder, "create_pull_request", map[string]any{"title": "T", "body": "B"}); !ok {
 		t.Fatal(msg)

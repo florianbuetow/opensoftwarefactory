@@ -122,7 +122,7 @@ func hasShellOperator(command string) bool {
 func commandAllowed(patterns []string, command string) error {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		return errors.New(`Refused: run_command needs a command. Pass the command to run, for example "git status".`)
+		return errors.New(`refused: run_command needs a command. Pass the command to run, for example "git status"`)
 	}
 	allowed := "This agent has no allowed commands."
 	if len(patterns) > 0 {
@@ -134,14 +134,14 @@ func commandAllowed(patterns []string, command string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("Refused: the command %q joins several commands with ;, &&, ||, |, backticks, $( or a line break, and that is only allowed when an allowed command is exactly this text. Run one allowed command per call. %s If the task cannot be done this way, call report_blocked with the reason.", command, allowed)
+		return fmt.Errorf("refused: the command %q joins several commands with ;, &&, ||, |, backticks, $( or a line break, and that is only allowed when an allowed command is exactly this text. Run one allowed command per call. %s If the task cannot be done this way, call report_blocked with the reason", command, allowed)
 	}
 	for _, pattern := range patterns {
 		if commandMatches(strings.TrimSpace(pattern), command) {
 			return nil
 		}
 	}
-	return fmt.Errorf("Refused: the command %q is not one of this agent's allowed commands. %s Run an allowed command instead. If the task cannot be done with them, call report_blocked with the reason.", command, allowed)
+	return fmt.Errorf("refused: the command %q is not one of this agent's allowed commands. %s Run an allowed command instead. If the task cannot be done with them, call report_blocked with the reason", command, allowed)
 }
 
 type cachedCommands struct {

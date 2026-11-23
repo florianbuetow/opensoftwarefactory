@@ -206,10 +206,10 @@ func (g githubProvider) comment(ctx context.Context, repo *repository, pr *pullR
 func (s *service) gitTool(ctx context.Context, p *devPod, in toolInput) (any, error) {
 	stored, err := s.loadRepository(ctx, p.Repository)
 	if err != nil {
-		return nil, fmt.Errorf("%s failed: the repository %q of this dev pod could not be read (%v). Try again; if it keeps failing, call report_blocked with the reason.", in.Tool, p.Repository, err)
+		return nil, fmt.Errorf("%s failed: the repository %q of this dev pod could not be read (%v). Try again; if it keeps failing, call report_blocked with the reason", in.Tool, p.Repository, err)
 	}
 	repo := &stored
-	const noPullRequest = "Refused: this dev pod has no pull request yet. Call create_pull_request with a title and a body first. If you did that already and were told a person must approve, the pull request is created after the approval; call create_pull_request again to change its title or body."
+	const noPullRequest = "refused: this dev pod has no pull request yet. Call create_pull_request with a title and a body first. If you did that already and were told a person must approve, the pull request is created after the approval; call create_pull_request again to change its title or body"
 	switch in.Tool {
 	case "push_branch":
 		err = pushAllowed(repo)
@@ -223,10 +223,10 @@ func (s *service) gitTool(ctx context.Context, p *devPod, in toolInput) (any, er
 	case "create_pull_request":
 		title, body := strings.TrimSpace(in.text("title")), in.text("body")
 		if title == "" {
-			return nil, errors.New("Refused: create_pull_request needs a title. Pass a short title that says what the change does, and the description as body.")
+			return nil, errors.New("refused: create_pull_request needs a title. Pass a short title that says what the change does, and the description as body")
 		}
 		if p.PullRequest != nil {
-			return nil, errors.New("Refused: this dev pod already has a pull request. Call update_pull_request to change its title or body, or get_pull_request to read it.")
+			return nil, errors.New("refused: this dev pod already has a pull request. Call update_pull_request to change its title or body, or get_pull_request to read it")
 		}
 		if repo.Kind == kindGitHub {
 			err = pushAllowed(repo)
@@ -243,7 +243,7 @@ func (s *service) gitTool(ctx context.Context, p *devPod, in toolInput) (any, er
 			return nil, errors.New(noPullRequest)
 		}
 		if !in.has("title") && !in.has("body") {
-			return nil, errors.New("Refused: update_pull_request needs a new title, a new body, or both.")
+			return nil, errors.New("refused: update_pull_request needs a new title, a new body, or both")
 		}
 		pr := *p.PullRequest
 		if in.has("title") && strings.TrimSpace(in.text("title")) != "" {
@@ -262,7 +262,7 @@ func (s *service) gitTool(ctx context.Context, p *devPod, in toolInput) (any, er
 		}
 		body := strings.TrimSpace(in.text("body"))
 		if body == "" {
-			return nil, errors.New("Refused: comment_on_pull_request needs a body: the text of the comment.")
+			return nil, errors.New("refused: comment_on_pull_request needs a body: the text of the comment")
 		}
 		pr := *p.PullRequest
 		if err = s.provider(repo).comment(ctx, repo, &pr, body); err != nil {
@@ -304,7 +304,7 @@ func pushAllowed(repo *repository) error {
 	if repo.Kind == kindGitHub {
 		instead = "Your commits stay in the dev pod. Call report_blocked and say that the repository needs a credential that may write."
 	}
-	return fmt.Errorf("Refused: the branch cannot be published, because the repository %q %s. %s", repo.Name, why, instead)
+	return fmt.Errorf("refused: the branch cannot be published, because the repository %q %s. %s", repo.Name, why, instead)
 }
 
 // push makes git-helper push the work branch.
@@ -336,10 +336,10 @@ func (s *service) createPullRequest(ctx context.Context, p *devPod, repo *reposi
 		return nil, fmt.Errorf("create_pull_request failed: the commits of the work branch could not be read: %v", err)
 	}
 	if len(changes.Commits) == 0 {
-		return nil, errors.New("Refused: the work branch has no commits yet, so there is nothing to put into a pull request. Commit your changes first (git add, then git commit), then call create_pull_request again.")
+		return nil, errors.New("refused: the work branch has no commits yet, so there is nothing to put into a pull request. Commit your changes first (git add, then git commit), then call create_pull_request again")
 	}
 	if repo.Kind == kindGitHub && !p.Pushed {
-		return nil, errors.New("Refused: the work branch is not on GitHub yet. Call push_branch first, then create_pull_request again.")
+		return nil, errors.New("refused: the work branch is not on GitHub yet. Call push_branch first, then create_pull_request again")
 	}
 	number, address, err := s.provider(repo).open(ctx, p, repo, title, body)
 	if err != nil {
@@ -410,7 +410,7 @@ func (s *service) requestPublish(ctx context.Context, p *devPod, in toolInput, k
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("The request could not be recorded: %v. Call %s again.", err, in.Tool)
+		return nil, fmt.Errorf("the request could not be recorded: %v. Call %s again", err, in.Tool)
 	}
 	return awaitingApproval, nil
 }

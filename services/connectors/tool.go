@@ -65,16 +65,16 @@ func (s *service) tool(w http.ResponseWriter, r *http.Request) {
 func (s *service) runTool(ctx context.Context, id string, in toolInput) (any, error) {
 	p, ok := s.pod(id)
 	if !ok {
-		return nil, errors.New("Refused: the dev pod of this run does not exist any more. A dev pod is deleted when no agent used it for its idle time or when a person destroyed it. Nothing can be done in it; say so in your answer and stop.")
+		return nil, errors.New("refused: the dev pod of this run does not exist any more. A dev pod is deleted when no agent used it for its idle time or when a person destroyed it. Nothing can be done in it; say so in your answer and stop")
 	}
 	if p.State != stateReady {
-		return nil, errors.New("Refused: the dev pod is still being created. Try again in a moment.")
+		return nil, errors.New("refused: the dev pod is still being created. Try again in a moment")
 	}
 	if in.Run == "" || !contains(p.Users, in.Run) {
-		return nil, fmt.Errorf("Refused: run %q does not use this dev pod, so it may not call tools on it. A run can only work in the dev pod its own workflow created.", in.Run)
+		return nil, fmt.Errorf("refused: run %q does not use this dev pod, so it may not call tools on it. A run can only work in the dev pod its own workflow created", in.Run)
 	}
 	if !contains(devpodTools, in.Tool) {
-		return nil, fmt.Errorf("Refused: %q is not a dev pod tool. The tools are: %s.", in.Tool, strings.Join(devpodTools, ", "))
+		return nil, fmt.Errorf("refused: %q is not a dev pod tool. The tools are: %s", in.Tool, strings.Join(devpodTools, ", "))
 	}
 	s.active(ctx, id)
 	defer s.active(ctx, id)
@@ -104,11 +104,11 @@ func (s *service) active(ctx context.Context, id string) {
 // checkWrite refuses a write to a protected path and a write a rule blocks.
 func checkWrite(p *devPod, in toolInput) error {
 	if strings.TrimSpace(in.text("path")) == "" {
-		return fmt.Errorf(`Refused: %s needs a path. Pass the file's path relative to the workspace, for example "src/panel.py".`, in.Tool)
+		return fmt.Errorf(`refused: %s needs a path. Pass the file's path relative to the workspace, for example "src/panel.py"`, in.Tool)
 	}
 	file := workspacePath(in.text("path"))
 	if pattern := protectedBy(p.Protected, file); pattern != "" {
-		return fmt.Errorf("Refused: %s on %q. The file is protected in this dev pod (protected: %q), so an agent may not change it. Leave it as it is and change other files. If the task cannot be done without changing it, call report_blocked with the reason.", in.Tool, file, pattern)
+		return fmt.Errorf("refused: %s on %q. The file is protected in this dev pod (protected: %q), so an agent may not change it. Leave it as it is and change other files. If the task cannot be done without changing it, call report_blocked with the reason", in.Tool, file, pattern)
 	}
 	content := in.text("content")
 	if in.Tool == "edit_file" {
@@ -116,7 +116,7 @@ func checkWrite(p *devPod, in toolInput) error {
 	}
 	for _, rl := range p.Rules {
 		if rl.applies(in.Tool, file, content) {
-			return fmt.Errorf("Refused: %s on %q was blocked by a rule of this dev pod. %s", in.Tool, file, rl.Message)
+			return fmt.Errorf("refused: %s on %q was blocked by a rule of this dev pod. %s", in.Tool, file, rl.Message)
 		}
 	}
 	return nil
@@ -128,7 +128,7 @@ func (s *service) agentCommand(ctx context.Context, p *devPod, in toolInput) (an
 	command := in.text("command")
 	patterns, err := s.allowedCommands(ctx, in.Agent)
 	if err != nil {
-		return nil, fmt.Errorf("Refused: the command %q was not run, because the allowed commands of the agent %q could not be read: %v. Try again; if it keeps failing, call report_blocked with the reason.", command, in.Agent, err)
+		return nil, fmt.Errorf("refused: the command %q was not run, because the allowed commands of the agent %q could not be read: %v. Try again; if it keeps failing, call report_blocked with the reason", command, in.Agent, err)
 	}
 	err = commandAllowed(patterns, command)
 	if err != nil {
@@ -136,7 +136,7 @@ func (s *service) agentCommand(ctx context.Context, p *devPod, in toolInput) (an
 	}
 	for _, rl := range p.Rules {
 		if rl.applies(toolRunCommand, "", command) {
-			return nil, fmt.Errorf("Refused: the command %q was blocked by a rule of this dev pod. %s", strings.TrimSpace(command), rl.Message)
+			return nil, fmt.Errorf("refused: the command %q was blocked by a rule of this dev pod. %s", strings.TrimSpace(command), rl.Message)
 		}
 	}
 	s.setAuthor(ctx, p, in.Agent)
@@ -166,14 +166,14 @@ func (s *service) setAuthor(ctx context.Context, p *devPod, agent string) {
 func (s *service) reportBlocked(ctx context.Context, p *devPod, in toolInput) (any, error) {
 	reason := strings.TrimSpace(in.text("reason"))
 	if reason == "" {
-		return nil, errors.New("Refused: report_blocked needs a reason. Say in one or two sentences what stops the work and what would be needed to continue.")
+		return nil, errors.New("refused: report_blocked needs a reason. Say in one or two sentences what stops the work and what would be needed to continue")
 	}
 	_, err := s.change(ctx, p.ID, func(p *devPod) error {
 		p.Blocked = append(p.Blocked, blockedReport{Run: in.Run, Agent: in.Agent, Reason: reason, Time: s.now()})
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("The blocked report could not be recorded: %v. Call report_blocked again.", err)
+		return nil, fmt.Errorf("the blocked report could not be recorded: %v. Call report_blocked again", err)
 	}
 	return "Recorded. The work ends here as blocked with your reason. Do not call any more tools.", nil
 }

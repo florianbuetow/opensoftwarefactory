@@ -122,7 +122,7 @@ func (k *kubeClient) do(ctx context.Context, method, path string, in, out any) (
 		if status.Message == "" {
 			status.Message = resp.Status
 		}
-		return resp.StatusCode, fmt.Errorf("Kubernetes API %s %s: %s", method, path, status.Message)
+		return resp.StatusCode, fmt.Errorf("the Kubernetes API %s %s: %s", method, path, status.Message)
 	}
 	if out != nil {
 		return resp.StatusCode, json.Unmarshal(data, out)
