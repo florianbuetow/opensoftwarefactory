@@ -363,8 +363,10 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 			attribute.String("gen_ai.request.model", def.Models[0]), attribute.Int("factory.turn", calls))
 		modelRequest := def.chatRequest(history.modelMessages(), tools)
 		inputEstimate := estimateJSONTokens(modelRequest)
-		modelEvent := TurnEvent{Kind: "model_call", Name: "chat completion", Model: def.Models[0], Turn: calls, Started: event.Started,
-			EstimatedInputTokens: &inputEstimate, EstimationMethod: tokenEstimationMethod}
+		modelEvent := TurnEvent{
+			Kind: "model_call", Name: "chat completion", Model: def.Models[0], Turn: calls, Started: event.Started,
+			EstimatedInputTokens: &inputEstimate, EstimationMethod: tokenEstimationMethod,
+		}
 		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, modelRequest)
 		if err != nil {
 			finishEventSpan(event, eventTrace, "failed", err)
@@ -385,8 +387,10 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 			eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_call", Started: time.Now().UTC()}, "agent.tool_call",
 				attribute.String("gen_ai.tool.name", tc.Function.Name), attribute.String("factory.mcp_service", service), attribute.Int("factory.turn", calls))
 			toolInputEstimate := estimateJSONTokens(map[string]string{"name": tc.Function.Name, "arguments": tc.Function.Arguments})
-			toolEvent := TurnEvent{Kind: "tool_call", Name: tc.Function.Name, Turn: calls, Started: event.Started,
-				EstimatedInputTokens: &toolInputEstimate, EstimationMethod: tokenEstimationMethod}
+			toolEvent := TurnEvent{
+				Kind: "tool_call", Name: tc.Function.Name, Turn: calls, Started: event.Started,
+				EstimatedInputTokens: &toolInputEstimate, EstimationMethod: tokenEstimationMethod,
+			}
 			text, toolFailed, err := s.runTurnTool(eventCtx, routes, tc)
 			if err != nil {
 				finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})

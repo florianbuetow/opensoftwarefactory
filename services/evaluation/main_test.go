@@ -164,6 +164,7 @@ func testEvaluation(t *testing.T, blob, orch string) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
+
 func request(t *testing.T, method, url, body string) (int, []byte) {
 	t.Helper()
 	req, _ := http.NewRequest(method, url, strings.NewReader(body))

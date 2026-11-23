@@ -1,8 +1,9 @@
 package main
 
 import (
-	"github.com/nats-io/nats.go/jetstream"
 	"testing"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestBindingValidationRequiresPinnedGroupedDestination(t *testing.T) {

@@ -13,9 +13,11 @@ import (
 	"go.temporal.io/sdk/temporal"
 )
 
-const skillAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_retries":3}`
-const skillRootText = "---\nname: git\ndescription: Read the release checklist.\n---\nRead release/SKILL.md."
-const skillScriptResult = `{"exit_code":0,"stdout":"tail","stderr":"","warning":"Standard output was longer than the limit."}`
+const (
+	skillAgentJSON    = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_retries":3}`
+	skillRootText     = "---\nname: git\ndescription: Read the release checklist.\n---\nRead release/SKILL.md."
+	skillScriptResult = `{"exit_code":0,"stdout":"tail","stderr":"","warning":"Standard output was longer than the limit."}`
+)
 
 func skillFakes(t *testing.T, f *fakes) *podGateway {
 	t.Helper()
@@ -95,8 +97,10 @@ func TestSkillPromptToolsAndEvidence(t *testing.T) {
 	if _, err := f.svc.Process(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]any{"skill": "tools/git", "script": "test.sh", "pod": "pod-1",
-		"agent": "intake@v1", "run": "t1", "version": "v3", "timeout_seconds": float64(75)}
+	want := map[string]any{
+		"skill": "tools/git", "script": "test.sh", "pod": "pod-1",
+		"agent": "intake@v1", "run": "t1", "version": "v3", "timeout_seconds": float64(75),
+	}
 	if len(g.calls) != 1 || !reflect.DeepEqual(g.calls[0], want) {
 		t.Fatalf("forwarded calls: %v", g.calls)
 	}
@@ -203,8 +207,10 @@ func TestReadSkillWorksWithoutPod(t *testing.T) {
 	if _, err := f.svc.Process(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]any{"skill": "tools/git", "file": "release/SKILL.md", "pod": "",
-		"agent": "intake@v1", "run": "t1", "version": "v3"}
+	want := map[string]any{
+		"skill": "tools/git", "file": "release/SKILL.md", "pod": "",
+		"agent": "intake@v1", "run": "t1", "version": "v3",
+	}
 	if len(g.calls) != 1 || !reflect.DeepEqual(g.calls[0], want) {
 		t.Fatalf("forwarded calls: %v", g.calls)
 	}

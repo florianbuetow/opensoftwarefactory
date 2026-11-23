@@ -18,8 +18,10 @@ import (
 
 const bindingPrefix = "intake-bindings"
 
-var intakeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-var workflowNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
+var (
+	intakeIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	workflowNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
+)
 
 type IntakeBinding struct {
 	ID              string   `json:"id"`
@@ -380,6 +382,7 @@ func (s *service) setBindingError(id string, err error) {
 	st.LastError = err.Error()
 	s.intakeStatus[id] = st
 }
+
 func (s *service) setBindingAccepted(id string) {
 	s.intakeMu.Lock()
 	defer s.intakeMu.Unlock()

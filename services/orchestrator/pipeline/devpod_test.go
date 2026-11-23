@@ -195,10 +195,12 @@ func podEnv(t *testing.T, definitions ...Definition) (*testsuite.TestWorkflowEnv
 	store := listStore{newSyncStore()}
 	connectors := &fakeConnectors{exec: map[string]PodExecResult{}}
 	agents := &agentStub{store: store, blocked: map[string]string{}}
-	env.RegisterActivity(&Activities{Store: store, Connectors: connectors, LoadDefinitions: func() ([]Definition, error) { return definitions, nil },
+	env.RegisterActivity(&Activities{
+		Store: store, Connectors: connectors, LoadDefinitions: func() ([]Definition, error) { return definitions, nil },
 		LoadAgentSettings: func(context.Context, string) (AgentExecutionSettings, error) {
 			return AgentExecutionSettings{Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}, nil
-		}})
+		},
+	})
 	env.RegisterWorkflowWithOptions(Pipeline, workflow.RegisterOptions{Name: WorkflowName})
 	env.RegisterWorkflowWithOptions(Team, workflow.RegisterOptions{Name: TeamWorkflowName})
 	env.RegisterActivityWithOptions(agents.process, activity.RegisterOptions{Name: DefaultActivity})
@@ -930,18 +932,28 @@ func TestValidateDevPodStepsAndBackEdges(t *testing.T) {
 		"back to command":     {def(pod, agentStep("code", "pod"), command, gate("verify", "verify")), "on_reject must name an agent, interactive, team, or workflow step"},
 		"back to pod":         {def(pod, agentStep("code", "pod"), gate("pod", "code")), "on_reject must name an agent, interactive, team, or workflow step"},
 		"back to stop":        {def(pod, agentStep("code", "pod"), command, stop, gate("stop", "stop")), "on_reject must name an agent, interactive, team, or workflow step"},
-		"back to merge": {def(work("a"), Step{ID: "collect", Service: MergeService, DependsOn: []string{"a"}}, agentStep("code", "collect"), gate("collect", "code")),
-			"on_reject must name an agent, interactive, team, or workflow step"},
-		"back to batch": {def(work("a"), Step{ID: "gather", Service: BatchService, Size: 1, DependsOn: []string{"a"}}, agentStep("code", "gather"), gate("gather", "code")),
-			"on_reject must name an agent, interactive, team, or workflow step"},
+		"back to merge": {
+			def(work("a"), Step{ID: "collect", Service: MergeService, DependsOn: []string{"a"}}, agentStep("code", "collect"), gate("collect", "code")),
+			"on_reject must name an agent, interactive, team, or workflow step",
+		},
+		"back to batch": {
+			def(work("a"), Step{ID: "gather", Service: BatchService, Size: 1, DependsOn: []string{"a"}}, agentStep("code", "gather"), gate("gather", "code")),
+			"on_reject must name an agent, interactive, team, or workflow step",
+		},
 		"pod between":  {def(agentStep("plan"), change(pod, func(s *Step) { s.DependsOn = []string{"plan"} }), agentStep("code", "pod"), gate("plan", "code")), `the devpod step "pod" lies between them`},
 		"stop between": {def(pod, agentStep("code", "pod"), change(stop, func(s *Step) { s.DependsOn = []string{"code"} }), gate("code", "stop")), `the devpod-stop step "stop" lies between them`},
-		"merge between": {def(agentStep("code"), Step{ID: "collect", Service: MergeService, DependsOn: []string{"code"}}, agentStep("sum", "collect"), gate("code", "sum")),
-			`the merge step "collect" lies between them`},
-		"batch between": {def(agentStep("code"), Step{ID: "gather", Service: BatchService, Size: 1, DependsOn: []string{"code"}}, agentStep("sum", "gather"), gate("code", "sum")),
-			`the batch step "gather" lies between them`},
-		"merge collects a step that runs again": {def(agentStep("code"), agentStep("check", "code"), gate("code", "check"), Step{ID: "collect", Service: MergeService, DependsOn: []string{"check"}}),
-			`the merge step "collect" lies between them or collects a step that runs again`},
+		"merge between": {
+			def(agentStep("code"), Step{ID: "collect", Service: MergeService, DependsOn: []string{"code"}}, agentStep("sum", "collect"), gate("code", "sum")),
+			`the merge step "collect" lies between them`,
+		},
+		"batch between": {
+			def(agentStep("code"), Step{ID: "gather", Service: BatchService, Size: 1, DependsOn: []string{"code"}}, agentStep("sum", "gather"), gate("code", "sum")),
+			`the batch step "gather" lies between them`,
+		},
+		"merge collects a step that runs again": {
+			def(agentStep("code"), agentStep("check", "code"), gate("code", "check"), Step{ID: "collect", Service: MergeService, DependsOn: []string{"check"}}),
+			`the merge step "collect" lies between them or collects a step that runs again`,
+		},
 	} {
 		if err := Validate(tc.def); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error %v", name, err)

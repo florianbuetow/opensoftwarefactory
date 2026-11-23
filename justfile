@@ -201,10 +201,28 @@ help:
     @printf "  %-38s %s\n" "just temporal" "Open the Temporal UI at localhost:8233"
     @printf "  %-38s %s\n" "just render" "Render the central Kubernetes configuration"
     @echo ""
+    @printf "\033[0;33mCode Quality:\033[0m\n"
+    @printf "  %-38s %s\n" "just code-format" "Auto-fix Go and Python formatting and Ruff findings"
+    @printf "  %-38s %s\n" "just code-style" "Check Go and Python style without editing files"
+    @printf "  %-38s %s\n" "just code-typecheck" "Run go vet and mypy"
+    @printf "  %-38s %s\n" "just code-lspchecks" "Run Staticcheck and Pyright"
+    @printf "  %-38s %s\n" "just code-security" "Run gosec and Bandit"
+    @printf "  %-38s %s\n" "just code-deptry" "Check Go module tidiness and Python imports"
+    @printf "  %-38s %s\n" "just code-spell" "Check spelling in code and documentation"
+    @printf "  %-38s %s\n" "just code-semgrep" "Run the Go and Python Semgrep rules"
+    @printf "  %-38s %s\n" "just code-audit" "Audit Go and Python dependencies"
+    @printf "  %-38s %s\n" "just code-architecture" "Run arch-go and pytestarch"
+    @printf "  %-38s %s\n" "just code-stats" "Write a source statistics report with pygount"
+    @printf "  %-38s %s\n" "just lint" "Run golangci-lint"
+    @echo ""
     @printf "\033[0;33mCI & Testing:\033[0m\n"
     @printf "  %-38s %s\n" "just check" "Check scripts, manifests, Go race tests, and Python tests"
-    @printf "  %-38s %s\n" "just ci" "Run Go and Python guardrails with summaries and failure output"
-    @printf "  %-38s %s\n" "just ci-verbose" "Run the same guardrails and stream all output"
+    @printf "  %-38s %s\n" "just ci-check" "Check guardrail tool prerequisites"
+    @printf "  %-38s %s\n" "just ci-init" "Prepare the Go and Python CI tools"
+    @printf "  %-38s %s\n" "just test" "Run the Go and Python test suites"
+    @printf "  %-38s %s\n" "just test-coverage" "Measure Go and Python test coverage"
+    @printf "  %-38s %s\n" "just ci" "Run the guardrails quietly (also ci-quiet)"
+    @printf "  %-38s %s\n" "just ci-verbose" "Run the guardrails and stream their output"
     @echo ""
     @printf "\033[0;32m✓ Available commands shown\033[0m\n"
     @echo ""
@@ -630,10 +648,126 @@ check:
     printf "\033[0;32m✓ All checks passed\033[0m\n"
     echo ""
 
-# Run the template guardrails, showing details when a check fails.
-ci:
-    @bash scripts/ci.sh quiet
+# Check prerequisites for the guardrails independently of the local cluster.
+ci-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for tool in git go uv codespell semgrep; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            printf 'Required CI tool is missing: %s\n' "$tool" >&2
+            exit 1
+        fi
+    done
 
-# Run the same guardrails, streaming the tools' output.
+# Prepare the pinned development tools used by the guardrails.
+ci-init:
+    @bash scripts/ci-go.sh init
+    @uv sync --project config/ci/python --locked
+
+# Auto-fix code style and formatting.
+code-format:
+    @bash scripts/ci-go.sh format-fix
+    @bash scripts/ci-python.sh format-fix
+
+# Check code style and formatting without rewriting files.
+code-style:
+    @bash scripts/ci-go.sh format
+    @bash scripts/ci-python.sh style
+    @bash scripts/ci-python.sh format
+
+# Run go vet and mypy.
+code-typecheck:
+    @bash scripts/ci-go.sh vet
+    @bash scripts/ci-python.sh mypy
+
+# Run Staticcheck and Pyright.
+code-lspchecks:
+    @bash scripts/ci-go.sh staticcheck
+    @bash scripts/ci-python.sh pyright
+
+# Run gosec and Bandit.
+code-security:
+    @bash scripts/ci-go.sh security
+    @bash scripts/ci-python.sh security
+
+# Check Go module tidiness and Python imports.
+code-deptry:
+    @bash scripts/ci-go.sh deps
+    @bash scripts/ci-python.sh deps
+
+# Check spelling in code and documentation.
+code-spell:
+    @git ls-files --cached --others --exclude-standard -z -- \
+        '*.go' '*.py' '*.sh' '*.bash' '*.js' '*.mjs' '*.md' '*.toml' justfile \
+        ':(exclude,glob)**/vendor/**' | \
+        xargs -0 codespell --check-filenames --ignore-words config/ci/codespell.txt
+
+# Apply the Go and Python Semgrep policies.
+code-semgrep:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    semgrep_config_home=$(mktemp -d)
+    trap 'rm -rf "$semgrep_config_home"' EXIT
+    XDG_CONFIG_HOME="$semgrep_config_home" \
+        semgrep scan --config config/ci/semgrep --error --metrics off --disable-version-check .
+
+# Audit Go and Python dependencies.
+code-audit:
+    @bash scripts/ci-go.sh audit
+    @bash scripts/ci-python.sh audit
+
+# Run the template's Go meta-linter.
+lint:
+    @bash scripts/ci-go.sh lint
+
+# Run Go and Python architecture checks.
+code-architecture:
+    @bash scripts/ci-go.sh architecture
+    @bash scripts/ci-python.sh architecture
+
+# Generate the Python template's source statistics report.
+code-stats:
+    @mkdir -p reports
+    @git ls-files -z -- '*.go' '*.py' '*.sh' '*.md' '*.toml' '*.yaml' '*.yml' \
+        ':(exclude,glob)**/vendor/**' | \
+        xargs -0 uv run --project config/ci/python --locked pygount --format=summary | tee reports/code-stats.txt
+
+# Run the Go and Python test suites.
+test:
+    @bash scripts/ci-go.sh test
+    @bash scripts/ci-python.sh test
+
+# Run the tests and enforce the template coverage thresholds.
+test-coverage:
+    @bash scripts/ci-go.sh coverage
+    @bash scripts/ci-python.sh coverage
+
+ci-checks := "ci-check ci-init code-format code-style code-typecheck code-security code-deptry code-spell code-semgrep code-audit test code-architecture lint code-lspchecks test-coverage"
+
+alias ci-quiet := ci
+
+# Run the guardrail recipes quietly and show the first failure's output.
+ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ci_log=$(mktemp)
+    trap 'rm -f "$ci_log"' EXIT
+    for check in {{ci-checks}}; do
+        just "$check" > "$ci_log" 2>&1 || {
+            printf 'FAIL %s\n' "$check" >&2
+            cat "$ci_log" >&2
+            exit 1
+        }
+        printf 'PASS %s\n' "$check"
+    done
+    printf 'All CI checks passed\n'
+
+# Run the same guardrail recipes with their output visible.
 ci-verbose:
-    @bash scripts/ci.sh verbose
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for check in {{ci-checks}}; do
+        printf '\n=== %s ===\n' "$check"
+        just "$check"
+    done
+    printf '\nAll CI checks passed\n'

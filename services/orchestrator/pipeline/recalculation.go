@@ -14,8 +14,10 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-const RecalculationWorkflowName = "MeasurementRecalculation"
-const RecalculationBatchActivity = "RecalculationBatch"
+const (
+	RecalculationWorkflowName  = "MeasurementRecalculation"
+	RecalculationBatchActivity = "RecalculationBatch"
+)
 
 type RecalculationInput struct {
 	ID              string     `json:"id"`
@@ -43,8 +45,10 @@ func Recalculation(ctx workflow.Context, in RecalculationInput) error {
 	if in.Limit <= 0 {
 		in.Limit = 100
 	}
-	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: TaskQueue, StartToCloseTimeout: time.Minute,
-		RetryPolicy: &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 2, MaximumInterval: time.Minute, MaximumAttempts: 0}})
+	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue: TaskQueue, StartToCloseTimeout: time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 2, MaximumInterval: time.Minute, MaximumAttempts: 0},
+	})
 	for {
 		var batch RecalculationBatchResult
 		if err := workflow.ExecuteActivity(activityCtx, RecalculationBatchActivity, in).Get(activityCtx, &batch); err != nil {

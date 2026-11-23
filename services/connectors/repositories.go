@@ -140,8 +140,10 @@ func (s *service) putRepository(w http.ResponseWriter, r *http.Request) {
 
 // repository checks the input and fills in the defaults.
 func (in repositoryInput) repository(name string, hasToken bool) (repository, error) {
-	repo := repository{Name: name, Kind: in.Kind, URL: strings.TrimSpace(in.URL), DefaultBranch: strings.TrimSpace(in.DefaultBranch),
-		SetupCommand: in.SetupCommand, IdleMinutes: 30, Credential: in.Credential}
+	repo := repository{
+		Name: name, Kind: in.Kind, URL: strings.TrimSpace(in.URL), DefaultBranch: strings.TrimSpace(in.DefaultBranch),
+		SetupCommand: in.SetupCommand, IdleMinutes: 30, Credential: in.Credential,
+	}
 	if repo.URL == "" {
 		return repo, errors.New("url is required")
 	}

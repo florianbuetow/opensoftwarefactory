@@ -33,6 +33,7 @@ func (s *eventMemoryStore) Put(_ context.Context, id string, data []byte, _ pipe
 	s.data[id] = append([]byte{}, data...)
 	return nil
 }
+
 func (s *eventMemoryStore) Get(_ context.Context, id string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -42,10 +43,12 @@ func (s *eventMemoryStore) Get(_ context.Context, id string) ([]byte, error) {
 	}
 	return append([]byte{}, data...), nil
 }
+
 func (s *eventMemoryStore) GetWithRevision(ctx context.Context, id string) ([]byte, string, error) {
 	data, err := s.Get(ctx, id)
 	return data, "r", err
 }
+
 func (s *eventMemoryStore) PutIfAbsent(_ context.Context, id string, data []byte, _ pipeline.Meta) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,15 +58,18 @@ func (s *eventMemoryStore) PutIfAbsent(_ context.Context, id string, data []byte
 	s.data[id] = append([]byte{}, data...)
 	return "r", nil
 }
+
 func (s *eventMemoryStore) PutIfMatch(_ context.Context, id string, data []byte, _ pipeline.Meta, _ string) (string, error) {
 	return "", errors.New("unused")
 }
+
 func (s *eventMemoryStore) Delete(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data, id)
 	return nil
 }
+
 func (s *eventMemoryStore) List(_ context.Context, prefix string) ([]string, []string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -146,6 +152,7 @@ type eventTemporalFake struct {
 func (f eventTemporalFake) DescribeWorkflowExecution(context.Context, string, string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
 	return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: f.info}, nil
 }
+
 func (f eventTemporalFake) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
 	return &workflowservice.ListWorkflowExecutionsResponse{}, nil
 }

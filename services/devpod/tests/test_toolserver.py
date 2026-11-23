@@ -248,7 +248,7 @@ class SkillScriptTest(WorkspaceCase):
     def test_runs_directly_with_arguments_in_workspace_and_cleans_up(self):
         scratch = lambda: {name for name in os.listdir("/tmp") if name.startswith("factory-skill-")}
         before = scratch()
-        arguments = ["a b; c", "\"quotes\"", "$(echo not-expanded)", "line\nbreak"]
+        arguments = ["a b; c", '"quotes"', "$(echo not-expanded)", "line\nbreak"]
         result = self.run_script("#!/bin/sh\nprintf '%s\\n' \"$PWD\"\nprintf '<%s>' \"$@\"\nprintf 'problem' >&2\nexit 7\n",
                                  args=arguments)
         self.assertEqual(result["exit_code"], 7)
@@ -258,8 +258,8 @@ class SkillScriptTest(WorkspaceCase):
         self.assertEqual(scratch(), before)
 
     def test_files_with_shebangs_are_executable_and_other_files_are_available(self):
-        result = self.run_script("#!/bin/sh\ncat \"$(dirname \"$0\")/../data.txt\"\n",
-                          {"scripts/run.sh": "#!/bin/sh\ncat \"$(dirname \"$0\")/../data.txt\"\n", "data.txt": "hello\n"})
+        result = self.run_script('#!/bin/sh\ncat "$(dirname "$0")/../data.txt"\n',
+                          {"scripts/run.sh": '#!/bin/sh\ncat "$(dirname "$0")/../data.txt"\n', "data.txt": "hello\n"})
         self.assertEqual(result["stdout"], "hello\n")
 
     def test_output_keeps_the_last_byte_and_line_windows(self):

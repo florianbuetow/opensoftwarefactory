@@ -157,7 +157,7 @@ func TestPrometheusValueIgnoresFluentBitTimestamp(t *testing.T) {
 
 func TestLoadObservabilityReadsLocalCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "openobserve.env")
-	if err := os.WriteFile(path, []byte("ZO_ROOT_USER_EMAIL=ada@example.test\nZO_ROOT_USER_PASSWORD=safe\nZO_COMPACT_DATA_RETENTION_DAYS=7\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("ZO_ROOT_USER_EMAIL=ada@example.test\nZO_ROOT_USER_PASSWORD=safe\nZO_COMPACT_DATA_RETENTION_DAYS=7\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := loadObservability("http://openobserve:5080", path, "http://logs:2020", "http://traces:13133", "http://traces:8888/metrics")

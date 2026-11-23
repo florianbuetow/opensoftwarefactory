@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 spec = importlib.util.spec_from_file_location("git_host_server", Path(__file__).with_name("server.py"))
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)

@@ -58,6 +58,7 @@ func (s blobStore) names(ctx context.Context) ([]string, error) {
 	err = json.Unmarshal(data, &listing)
 	return listing.Directories, err
 }
+
 func (s blobStore) load(ctx context.Context, name string) (Config, error) {
 	var c Config
 	targets := []any{&c.MCPConfig, &c.Allowlist, &c.Denylist}
@@ -73,6 +74,7 @@ func (s blobStore) load(ctx context.Context, name string) (Config, error) {
 	c.normalize()
 	return c, c.validate()
 }
+
 func (s blobStore) save(ctx context.Context, name string, c Config) error {
 	for i, v := range []any{c.MCPConfig, c.Allowlist, c.Denylist} {
 		data, err := json.MarshalIndent(v, "", "  ")
@@ -85,6 +87,7 @@ func (s blobStore) save(ctx context.Context, name string, c Config) error {
 	}
 	return nil
 }
+
 func (s blobStore) remove(ctx context.Context, name string) error {
 	for _, file := range configFiles {
 		_, err := s.request(ctx, "DELETE", "/blobs/"+configPrefix+name+"/"+file, nil)

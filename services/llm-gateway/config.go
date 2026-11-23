@@ -55,6 +55,7 @@ func loadConfig(path string) (Config, error) {
 	_, err = routes(&c)
 	return c, err
 }
+
 func routes(c *Config) (map[string]route, error) {
 	out := make(map[string]route)
 	names := make(map[string]bool)

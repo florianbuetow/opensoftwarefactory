@@ -137,6 +137,7 @@ func (s *service) executionScope(ctx context.Context, executionID string) (execu
 	}
 	return scope, nil
 }
+
 func (s *service) executionForArtifact(ctx context.Context, runID, artifact string) (executionScope, error) {
 	ids, err := s.listObjects(ctx, "workflow-executions")
 	if err != nil {
@@ -162,6 +163,7 @@ func (s *service) executionForArtifact(ctx context.Context, runID, artifact stri
 	}
 	return matches[0], nil
 }
+
 func artifactInScope(artifact, prefix string) bool {
 	return artifact == prefix || strings.HasPrefix(artifact, strings.TrimRight(prefix, "/")+"/")
 }

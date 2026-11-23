@@ -387,8 +387,10 @@ func TestStartRunWritesMetadata(t *testing.T) {
 	agents := func(_ context.Context, ref string) (AgentSettings, error) {
 		switch ref {
 		case "demo/coder@v1":
-			return AgentSettings{Model: "qwen3.5-9b-mlx", Effort: "low", Temperature: &temperature, Tools: []string{"factory/send_message"}, MaxRetries: 10,
-				Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}, nil
+			return AgentSettings{
+				Model: "qwen3.5-9b-mlx", Effort: "low", Temperature: &temperature, Tools: []string{"factory/send_message"}, MaxRetries: 10,
+				Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300,
+			}, nil
 		case "demo/triage@v1":
 			return AgentSettings{}, errors.New("the agent registry does not know this agent")
 		}

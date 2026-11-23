@@ -23,8 +23,10 @@ func TestProcessWorksWithAPassArtifact(t *testing.T) {
 	if string(data) != `{"artifact":"runs/t1/plan.pass-2"}` {
 		t.Fatalf("result = %s", data)
 	}
-	for _, id := range []string{"runs/t1/plan.pass-2", "runs/t1/plan.pass-2.run.json", "runs/t1/plan.pass-2.attempt-1.run.json",
-		"runs/t1/_evidence/plan.pass-2/attempt-1/systemprompt.effective.md"} {
+	for _, id := range []string{
+		"runs/t1/plan.pass-2", "runs/t1/plan.pass-2.run.json", "runs/t1/plan.pass-2.attempt-1.run.json",
+		"runs/t1/_evidence/plan.pass-2/attempt-1/systemprompt.effective.md",
+	} {
 		if _, ok := f.blobs[id]; !ok {
 			t.Errorf("object %q was not written", id)
 		}

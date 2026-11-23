@@ -64,6 +64,7 @@ func acquireWriterLock(path string) (*writerLock, error) {
 	}
 	return &writerLock{file: file}, nil
 }
+
 func (l *writerLock) Close() error {
 	if l == nil || l.file == nil {
 		return nil

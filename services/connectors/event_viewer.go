@@ -13,8 +13,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const maxViewerRows = 1000
-const maxViewerBytes = 4 << 20
+const (
+	maxViewerRows  = 1000
+	maxViewerBytes = 4 << 20
+)
 
 type viewerSession struct {
 	name, query string
@@ -56,8 +58,10 @@ func (s *service) createEventSession(w http.ResponseWriter, r *http.Request) {
 	}
 	start := viewerStartSequence(info.State.FirstSeq, info.State.LastSeq, info.State.Msgs)
 	name := "viewer-" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	cfg := jetstream.ConsumerConfig{Name: name, AckPolicy: jetstream.AckExplicitPolicy, InactiveThreshold: 10 * time.Minute,
-		FilterSubjects: []string{"factory.workflow.started", "factory.workflow.finished"}, DeliverPolicy: jetstream.DeliverByStartSequencePolicy, OptStartSeq: start}
+	cfg := jetstream.ConsumerConfig{
+		Name: name, AckPolicy: jetstream.AckExplicitPolicy, InactiveThreshold: 10 * time.Minute,
+		FilterSubjects: []string{"factory.workflow.started", "factory.workflow.finished"}, DeliverPolicy: jetstream.DeliverByStartSequencePolicy, OptStartSeq: start,
+	}
 	if req.StartSequence != nil {
 		cfg.OptStartSeq = *req.StartSequence
 	}
@@ -76,8 +80,10 @@ func (s *service) createEventSession(w http.ResponseWriter, r *http.Request) {
 	s.viewerMu.Lock()
 	s.viewers[name] = session
 	s.viewerMu.Unlock()
-	writeJSON(w, http.StatusCreated, viewerResponse{ID: name, SessionID: name, Events: []factoryEvent{}, NextSequence: cfg.OptStartSeq,
-		HasMore: info.State.Msgs > 0, StreamFirstSequence: info.State.FirstSeq, StreamLastSequence: info.State.LastSeq})
+	writeJSON(w, http.StatusCreated, viewerResponse{
+		ID: name, SessionID: name, Events: []factoryEvent{}, NextSequence: cfg.OptStartSeq,
+		HasMore: info.State.Msgs > 0, StreamFirstSequence: info.State.FirstSeq, StreamLastSequence: info.State.LastSeq,
+	})
 }
 
 func viewerStartSequence(first, last, count uint64) uint64 {

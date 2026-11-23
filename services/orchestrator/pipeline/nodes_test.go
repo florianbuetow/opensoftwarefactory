@@ -379,7 +379,8 @@ func TestTeamAndItsGateAfterANodeWorkWithinOnePass(t *testing.T) {
 	build := teamStep()
 	build.DependsOn = []string{"collect"}
 	def := Definition{Name: "passes", Steps: []Step{
-		{ID: "a", Service: "echo"}, {ID: "b", Service: "echo"},
+		{ID: "a", Service: "echo"},
+		{ID: "b", Service: "echo"},
 		{ID: "collect", Service: MergeService, DependsOn: []string{"a", "b"}},
 		build,
 		{ID: "review", Service: GateService, DependsOn: []string{"build"}, OnReject: "build"},

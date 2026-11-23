@@ -386,7 +386,7 @@ def apply_protection(root, folders, files, holders, chown=os.lchown):
 def protect(body):
     paths = body.get("paths")
     if not isinstance(paths, list) or not all(isinstance(item, str) and item.strip() for item in paths):
-        raise Refusal("The field paths must be a list of glob patterns, for example [\"tests/**\", \"verify.sh\"].")
+        raise Refusal('The field paths must be a list of glob patterns, for example ["tests/**", "verify.sh"].')
     need_clone()
     for pattern in paths:
         if normal_pattern(pattern).split("/")[0] == ".git" or ".." in pattern.split("/"):
@@ -408,7 +408,7 @@ def push(body):
     state = load_state()
     url = text_field(body, "url", required=False) or state.get("url", "")
     if not url:
-        raise Refusal("The git-helper does not know the repository URL of this pod. Send it as \"url\".")
+        raise Refusal('The git-helper does not know the repository URL of this pod. Send it as "url".')
     url = check_url(url)
     need_clone()
     if state.get("work_branch") and branch != state["work_branch"]:

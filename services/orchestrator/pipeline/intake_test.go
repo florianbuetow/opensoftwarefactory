@@ -23,6 +23,7 @@ func (c *conditionalMemory) Put(_ context.Context, id string, data []byte, _ Met
 	c.data[id] = append([]byte{}, data...)
 	return nil
 }
+
 func (c *conditionalMemory) Get(_ context.Context, id string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -32,6 +33,7 @@ func (c *conditionalMemory) Get(_ context.Context, id string) ([]byte, error) {
 	}
 	return append([]byte{}, data...), nil
 }
+
 func (c *conditionalMemory) PutIfAbsent(_ context.Context, id string, data []byte, _ Meta) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -41,10 +43,12 @@ func (c *conditionalMemory) PutIfAbsent(_ context.Context, id string, data []byt
 	c.data[id] = append([]byte{}, data...)
 	return "r1", nil
 }
+
 func (c *conditionalMemory) GetWithRevision(ctx context.Context, id string) ([]byte, string, error) {
 	data, err := c.Get(ctx, id)
 	return data, "r1", err
 }
+
 func (c *conditionalMemory) PutIfMatch(_ context.Context, id string, data []byte, _ Meta, _ string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

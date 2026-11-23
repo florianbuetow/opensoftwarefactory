@@ -23,8 +23,10 @@ func (e requiredPolicyError) Error() string { return e.text }
 
 type resolvedPolicy struct{ ID, Version, Content string }
 
-var policySegment = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$|^[a-z0-9]$`)
-var policyVersionSegment = regexp.MustCompile(`^v[1-9][0-9]*$`)
+var (
+	policySegment        = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$|^[a-z0-9]$`)
+	policyVersionSegment = regexp.MustCompile(`^v[1-9][0-9]*$`)
+)
 
 func parsePolicyTokens(text string) ([]policyToken, error) {
 	const open = "{{policy::"

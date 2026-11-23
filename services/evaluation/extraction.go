@@ -252,6 +252,7 @@ func parsePointer(pointer string) ([]string, error) {
 	}
 	return parts, nil
 }
+
 func pointerValue(document any, pointer string) (any, bool) {
 	parts, err := parsePointer(pointer)
 	if err != nil {

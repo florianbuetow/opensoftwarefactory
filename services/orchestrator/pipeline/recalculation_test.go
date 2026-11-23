@@ -2,12 +2,13 @@ package pipeline
 
 import (
 	"context"
-	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/testsuite"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/testsuite"
 )
 
 type recalcRoundTrip func(*http.Request) (*http.Response, error)

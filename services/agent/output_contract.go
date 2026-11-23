@@ -122,8 +122,10 @@ func makeExtractionIntent(req StepRequest, agentRef string, contract OutputContr
 	if producer == "" {
 		producer = req.TraceID
 	}
-	payload := extractionRequest{ProducerRunID: producer, TargetRunID: req.TargetRunID, TargetExecutionID: req.TargetExecutionID,
-		ArtifactID: req.OutputArtifact, AgentRef: agentRef, MappingVersion: agentRef, Mappings: contract.Mappings}
+	payload := extractionRequest{
+		ProducerRunID: producer, TargetRunID: req.TargetRunID, TargetExecutionID: req.TargetExecutionID,
+		ArtifactID: req.OutputArtifact, AgentRef: agentRef, MappingVersion: agentRef, Mappings: contract.Mappings,
+	}
 	payloadData, _ := json.Marshal(payload)
 	sum := sha256.Sum256(payloadData)
 	id := fmt.Sprintf("%x", sum[:])

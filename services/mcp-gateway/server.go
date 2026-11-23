@@ -29,6 +29,7 @@ type gateway struct {
 func newGateway(store blobStore, log *slog.Logger) *gateway {
 	return &gateway{store: store, log: log, entries: map[string]*entry{}, invalid: map[string]string{}}
 }
+
 func (g *gateway) load(ctx context.Context) error {
 	names, err := g.store.names(ctx)
 	if err != nil {
@@ -54,6 +55,7 @@ func (g *gateway) load(ctx context.Context) error {
 	}
 	return nil
 }
+
 func (g *gateway) close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -61,7 +63,9 @@ func (g *gateway) close() {
 		_ = e.upstream.Close()
 	}
 }
+
 func (g *gateway) get(name string) *entry { g.mu.RLock(); defer g.mu.RUnlock(); return g.entries[name] }
+
 func (g *gateway) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
@@ -75,14 +79,17 @@ func (g *gateway) routes() http.Handler {
 	mux.HandleFunc("GET /mcp/{name}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusMethodNotAllowed) })
 	return mux
 }
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
 func apiError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
+
 func (g *gateway) list(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		Name      string `json:"name"`
@@ -101,6 +108,7 @@ func (g *gateway) list(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
 	writeJSON(w, 200, map[string]any{"services": items})
 }
+
 func (g *gateway) read(w http.ResponseWriter, r *http.Request) {
 	if e := g.get(r.PathValue("name")); e != nil {
 		writeJSON(w, 200, e.config)
@@ -115,6 +123,7 @@ func (g *gateway) read(w http.ResponseWriter, r *http.Request) {
 	}
 	apiError(w, 404, errMissing)
 }
+
 func (g *gateway) save(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if err := validateName(name); err != nil {
@@ -157,6 +166,7 @@ func (g *gateway) save(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, c)
 }
+
 func (g *gateway) remove(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if err := validateName(name); err != nil {
@@ -179,6 +189,7 @@ func (g *gateway) remove(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
 func (g *gateway) testConnection(w http.ResponseWriter, r *http.Request) {
 	e := g.get(r.PathValue("name"))
 	if e == nil {

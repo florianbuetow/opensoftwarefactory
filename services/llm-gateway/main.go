@@ -22,6 +22,7 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func run() error {
 	configPath := flag.String("config", "/config/config.yaml", "configuration file")
 	logsPath := flag.String("logs", "/logs", "log directory")
@@ -47,10 +48,10 @@ func run() error {
 	if level != slog.LevelDebug && level != slog.LevelInfo && level != slog.LevelWarn && level != slog.LevelError {
 		return fmt.Errorf("unsupported log_level")
 	}
-	if err = os.MkdirAll(*logsPath, 0700); err != nil {
+	if err = os.MkdirAll(*logsPath, 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(*logsPath, "gateway.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(filepath.Join(*logsPath, "gateway.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

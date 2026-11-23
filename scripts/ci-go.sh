@@ -23,7 +23,15 @@ all_stages=(format vet staticcheck security deps audit lint architecture test co
 
 install_tool() {
     local binary=$1
-    local package=$2
+    local package
+    case "$binary" in
+        gofumpt) package=mvdan.cc/gofumpt@v0.12.0 ;;
+        staticcheck) package=honnef.co/go/tools/cmd/staticcheck@v0.8.2 ;;
+        gosec) package=github.com/securego/gosec/v2/cmd/gosec@v2.30.0 ;;
+        govulncheck) package=golang.org/x/vuln/cmd/govulncheck@v1.10.0 ;;
+        golangci-lint) package=github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 ;;
+        arch-go) package=github.com/arch-go/arch-go/v2@v2.1.2 ;;
+    esac
     local version=${package##*@}
     local marker="$tool_dir/$binary.version"
     if [[ ! -x "$tool_dir/$binary" || ! -f "$marker" || $(<"$marker") != "$version" ]]; then
@@ -43,8 +51,25 @@ for_modules() {
     done
 }
 
+download_module() {
+    go -C "$1" mod download
+}
+
+init_tools() {
+    for_modules module-download download_module
+    local tool
+    for tool in gofumpt gosec staticcheck golangci-lint govulncheck arch-go; do
+        install_tool "$tool"
+    done
+}
+
+fix_format() {
+    install_tool gofumpt
+    "$tool_dir/gofumpt" -w "${modules[@]/#/$repo_root/services/}"
+}
+
 check_format() {
-    install_tool gofumpt mvdan.cc/gofumpt@v0.12.0
+    install_tool gofumpt
     local output
     output=$(
         "$tool_dir/gofumpt" -l \
@@ -72,7 +97,7 @@ run_staticcheck() {
 }
 
 check_staticcheck() {
-    install_tool staticcheck honnef.co/go/tools/cmd/staticcheck@v0.8.2
+    install_tool staticcheck
     for_modules staticcheck run_staticcheck
 }
 
@@ -88,7 +113,7 @@ run_gosec() {
 }
 
 check_security() {
-    install_tool gosec github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+    install_tool gosec
     for_modules gosec run_gosec
 }
 
@@ -107,7 +132,7 @@ run_govulncheck() {
 }
 
 check_audit() {
-    install_tool govulncheck golang.org/x/vuln/cmd/govulncheck@v1.10.0
+    install_tool govulncheck
     for_modules vulnerability-audit run_govulncheck
 }
 
@@ -118,7 +143,7 @@ run_golangci() {
 }
 
 check_lint() {
-    install_tool golangci-lint github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+    install_tool golangci-lint
     for_modules golangci-lint run_golangci
 }
 
@@ -147,7 +172,7 @@ run_architecture() {
 }
 
 check_architecture() {
-    install_tool arch-go github.com/arch-go/arch-go/v2@v2.1.2
+    install_tool arch-go
     trap cleanup_arch_files EXIT
     for_modules architecture run_architecture
     trap - EXIT
@@ -190,6 +215,8 @@ check_coverage() {
 run_stage() {
     local stage=$1
     case "$stage" in
+        init) init_tools ;;
+        format-fix) fix_format ;;
         format) check_format ;;
         vet) check_vet ;;
         staticcheck) check_staticcheck ;;
@@ -201,7 +228,7 @@ run_stage() {
         test) check_test ;;
         coverage) check_coverage ;;
         *)
-            printf 'Unknown Go CI stage: %s\nValid stages: %s\n' "$stage" "${all_stages[*]}" >&2
+            printf 'Unknown Go CI stage: %s\nValid stages: init format-fix %s\n' "$stage" "${all_stages[*]}" >&2
             return 2
             ;;
     esac

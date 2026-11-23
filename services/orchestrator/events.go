@@ -401,8 +401,10 @@ func eventsForExecution(info *workflowpb.WorkflowExecutionInfo) []WorkflowEvent 
 	if p := info.GetParentExecution(); p != nil {
 		parent = p.GetRunId()
 	}
-	base := WorkflowEvent{SchemaVersion: 1, RunID: traceID, ExecutionID: exec.GetRunId(), ParentExecutionID: parent,
-		Workflow: workflowName, WorkflowVersion: version, TraceID: traceID}
+	base := WorkflowEvent{
+		SchemaVersion: 1, RunID: traceID, ExecutionID: exec.GetRunId(), ParentExecutionID: parent,
+		Workflow: workflowName, WorkflowVersion: version, TraceID: traceID,
+	}
 	started := base
 	started.Type = "workflow.started"
 	started.Status = "started"

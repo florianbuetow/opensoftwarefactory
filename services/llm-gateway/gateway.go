@@ -47,9 +47,11 @@ func newGateway(c Config, l *slog.Logger) (*Gateway, error) {
 	for i := range c.Providers {
 		providers[i] = &c.Providers[i]
 	}
-	return &Gateway{routes: routes, providers: providers, transport: t, log: l,
+	return &Gateway{
+		routes: routes, providers: providers, transport: t, log: l,
 		blobstoreURL: strings.TrimRight(c.BlobstoreURL, "/"), evaluationURL: strings.TrimRight(c.EvaluationURL, "/"),
-		evidenceClient: &http.Client{Timeout: 10 * time.Second}}, nil
+		evidenceClient: &http.Client{Timeout: 10 * time.Second},
+	}, nil
 }
 
 // resolveRoute keeps configured aliases authoritative, then allows explicitly enabled providers
@@ -73,11 +75,13 @@ func (g *Gateway) resolveRoute(ctx context.Context, model string) (route, bool) 
 	}
 	return found, matches == 1
 }
+
 func apiError(w http.ResponseWriter, status int, message, kind string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": nil}})
 }
+
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	status := http.StatusOK
@@ -569,6 +573,7 @@ func readCompletion(r io.Reader) (completion, error) {
 	}
 	return c, nil
 }
+
 func writeCompletionStream(w http.ResponseWriter, c completion, includeUsage bool) error {
 	chunk := map[string]any{"id": c.ID, "object": "chat.completion.chunk", "created": c.Created, "model": c.Model}
 	if c.SystemFingerprint != nil {

@@ -14,8 +14,10 @@ import (
 	"time"
 )
 
-const protocolVersion = "2025-11-25"
-const maxResponse = 16 << 20
+const (
+	protocolVersion = "2025-11-25"
+	maxResponse     = 16 << 20
+)
 
 type rpcRequest struct {
 	JSONRPC string                     `json:"jsonrpc"`
@@ -453,6 +455,7 @@ func validateInitialize(result map[string]json.RawMessage) error {
 }
 
 func sameID(a, b json.RawMessage) bool { return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b)) }
+
 func readBounded(r io.Reader) ([]byte, error) {
 	b, err := io.ReadAll(io.LimitReader(r, maxResponse+1))
 	if len(b) > maxResponse {

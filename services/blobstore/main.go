@@ -125,8 +125,10 @@ func run() error {
 }
 
 func newHandler(root string, logger *slog.Logger) (http.Handler, error) {
-	s := store{objects: filepath.Join(root, "objects"), meta: filepath.Join(root, "meta"), traces: filepath.Join(root, "traces"),
-		transactions: filepath.Join(root, "transactions"), logger: logger, mu: &sync.Mutex{}, tx: &transactionState{}, indexed: &atomic.Bool{}}
+	s := store{
+		objects: filepath.Join(root, "objects"), meta: filepath.Join(root, "meta"), traces: filepath.Join(root, "traces"),
+		transactions: filepath.Join(root, "transactions"), logger: logger, mu: &sync.Mutex{}, tx: &transactionState{}, indexed: &atomic.Bool{},
+	}
 	for _, dir := range []string{s.objects, s.meta, s.traces, s.transactions} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, err
@@ -239,8 +241,10 @@ func (s store) put(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid conditional header", http.StatusBadRequest)
 		return
 	}
-	m := Meta{ID: id, Created: time.Now().UTC(), Creator: creator, TraceID: trace,
-		EstimatedInputTokens: inputTokens, EstimatedOutputTokens: outputTokens, ProcessingTimeMS: processingTime, EstimationMethod: method}
+	m := Meta{
+		ID: id, Created: time.Now().UTC(), Creator: creator, TraceID: trace,
+		EstimatedInputTokens: inputTokens, EstimatedOutputTokens: outputTokens, ProcessingTimeMS: processingTime, EstimationMethod: method,
+	}
 	revision, status, err := s.commitPut(id, r.Body, m, condition)
 	if status != 0 {
 		http.Error(w, http.StatusText(status), status)

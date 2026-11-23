@@ -339,8 +339,10 @@ func (s *service) exportRun(ctx context.Context, trace string, manifest *exportM
 		if err := add(file, data, modified); err != nil {
 			return err
 		}
-		manifest.Files = append(manifest.Files, exportFile{Path: file, Role: role, Description: description, Step: step,
-			Object: o.ID, Creator: o.Creator, Created: o.Created, Size: len(data)})
+		manifest.Files = append(manifest.Files, exportFile{
+			Path: file, Role: role, Description: description, Step: step,
+			Object: o.ID, Creator: o.Creator, Created: o.Created, Size: len(data),
+		})
 		switch {
 		case role == "input":
 			manifest.Input = file

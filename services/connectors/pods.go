@@ -198,8 +198,10 @@ func (s *service) idle(p devPod) time.Duration {
 }
 
 func (s *service) view(p devPod, phase string) podView {
-	return podView{ID: p.ID, Repository: p.Repository, Name: p.Name, SourceBranch: p.SourceBranch, WorkBranch: p.WorkBranch,
-		Runs: s.heldBy(p), LastActivity: p.LastActivity, Expires: p.LastActivity.Add(s.idle(p)), Phase: phase}
+	return podView{
+		ID: p.ID, Repository: p.Repository, Name: p.Name, SourceBranch: p.SourceBranch, WorkBranch: p.WorkBranch,
+		Runs: s.heldBy(p), LastActivity: p.LastActivity, Expires: p.LastActivity.Add(s.idle(p)), Phase: phase,
+	}
 }
 
 func phaseOf(p devPod, info podInfo, found bool) string {
@@ -249,9 +251,11 @@ func (s *service) detail(ctx context.Context, p devPod) podDetail {
 	if err == nil || errors.Is(err, errNotFound) {
 		phase = phaseOf(p, info, err == nil)
 	}
-	return podDetail{podView: s.view(p, phase), StartCommit: p.StartCommit, State: p.State, Created: p.Created, Protected: orEmpty(p.Protected),
+	return podDetail{
+		podView: s.view(p, phase), StartCommit: p.StartCommit, State: p.State, Created: p.Created, Protected: orEmpty(p.Protected),
 		Rules: orEmpty(p.Rules), Users: orEmpty(p.Users), Pushed: p.Pushed, Blocked: orEmpty(p.Blocked),
-		PublishRequests: orEmpty(p.PublishRequests), PullRequest: p.PullRequest}
+		PublishRequests: orEmpty(p.PublishRequests), PullRequest: p.PullRequest,
+	}
 }
 
 func orEmpty[T any](v []T) []T {
@@ -391,10 +395,12 @@ func (s *service) create(ctx context.Context, repo repository, in createInput) (
 			}
 		}
 		now := s.now()
-		p := &devPod{ID: randomHex(5), Repository: repo.Name, Name: in.Name, SourceBranch: in.SourceBranch, WorkBranch: in.WorkBranch,
+		p := &devPod{
+			ID: randomHex(5), Repository: repo.Name, Name: in.Name, SourceBranch: in.SourceBranch, WorkBranch: in.WorkBranch,
 			State: stateNew, Created: now, Protected: orEmpty(in.Protected), Rules: orEmpty(in.Rules), Users: []string{in.Run},
 			Holds: map[string]time.Time{in.Run: now}, LastActivity: now, IdleSeconds: repo.IdleMinutes * 60,
-			Blocked: []blockedReport{}, PublishRequests: []publishRequest{}}
+			Blocked: []blockedReport{}, PublishRequests: []publishRequest{},
+		}
 		s.mu.Lock()
 		s.pods[p.ID] = p
 		s.mu.Unlock()
@@ -487,8 +493,10 @@ func (s *service) build(ctx context.Context, id string, repo repository) error {
 	if err := s.waitReady(ctx, id); err != nil {
 		return err
 	}
-	cloned, err := s.helper(ctx, id, "/clone", map[string]any{"url": repo.URL, "source_branch": p.SourceBranch, "work_branch": p.WorkBranch,
-		"author_name": "Factory agent", "author_email": authorEmail})
+	cloned, err := s.helper(ctx, id, "/clone", map[string]any{
+		"url": repo.URL, "source_branch": p.SourceBranch, "work_branch": p.WorkBranch,
+		"author_name": "Factory agent", "author_email": authorEmail,
+	})
 	if err != nil {
 		return fmt.Errorf("cloning %s: %w", repo.URL, err)
 	}

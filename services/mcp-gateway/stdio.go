@@ -480,7 +480,8 @@ func (p *stdioProcess) progress(line []byte, message struct {
 	ID     json.RawMessage            `json:"id"`
 	Method string                     `json:"method"`
 	Params map[string]json.RawMessage `json:"params"`
-}) {
+},
+) {
 	if message.Method != "notifications/progress" {
 		return
 	}

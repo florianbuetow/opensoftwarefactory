@@ -39,8 +39,8 @@ def link(base, **params):
 
 
 def page(title, body, home="../"):
-    return ("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    return ('<!doctype html><html lang="en"><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>{html.escape(title)}</title><style>"
             ":root{color-scheme:light dark;font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}"
             "*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#161b24}"
@@ -56,7 +56,7 @@ def page(title, body, home="../"):
             "aside .current{border-color:#2f6fde}"
             "@media(prefers-color-scheme:dark){body{background:#12161c;color:#e7ebf2}header{background:#151a21;border-color:#2a3140}"
             "table,pre,aside a{background:#1a1f27;border-color:#2a3140}th,td{border-color:#2a3140}th,.muted{color:#9aa5b5}a{color:#6b9cf5}}"
-            f"</style><header><a href=\"{home}\">Git host</a></header><main>"
+            f'</style><header><a href="{home}">Git host</a></header><main>'
             + body + "</main></html>")
 
 
@@ -85,7 +85,7 @@ def repository_page(repo, name, query):
             rows.append(f'<tr><td><a href="{link("", view="commit", ref=ref, commit=full)}">{html.escape(subject)}</a></td>'
                         f'<td class="mono" title="{html.escape(full)}">{html.escape(short)}</td>'
                         f'<td>{html.escape(author)}</td><td>{html.escape(date[:10])}</td></tr>')
-        body += '<table><thead><tr><th>Commit</th><th>Hash</th><th>Author</th><th>Date</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        body += "<table><thead><tr><th>Commit</th><th>Hash</th><th>Author</th><th>Date</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     elif view == "commit":
         selected = query.get("commit", [""])[0]
         visible = git(repo, "rev-list", "-n", "50", commit).decode().splitlines()
@@ -93,7 +93,7 @@ def repository_page(repo, name, query):
             raise ValueError("No such commit in recent history")
         patch = git(repo, "show", "--format=fuller", "--stat", "--patch", "--no-ext-diff", selected)
         body += f'<p><a href="{link("", view="commits", ref=ref)}">Recent commits</a></p>'
-        body += '<pre>' + html.escape(patch[:MAX_PREVIEW].decode("utf-8", "replace")) + '</pre>'
+        body += "<pre>" + html.escape(patch[:MAX_PREVIEW].decode("utf-8", "replace")) + "</pre>"
         if len(patch) > MAX_PREVIEW:
             body += '<p class="muted">Patch preview truncated.</p>'
     elif view == "file":
@@ -104,13 +104,13 @@ def repository_page(repo, name, query):
         if git(repo, "cat-file", "-t", oid).strip() != b"blob":
             raise ValueError("Not a file")
         size = int(git(repo, "cat-file", "-s", oid))
-        body += f'<h2>{html.escape(path)}</h2>'
+        body += f"<h2>{html.escape(path)}</h2>"
         if size > MAX_PREVIEW:
             body += '<p class="muted">File is too large to preview.</p>'
         else:
             data = git(repo, "cat-file", "blob", oid)
             body += ('<p class="muted">Binary file</p>' if b"\x00" in data else
-                     '<pre>' + html.escape(data.decode("utf-8", "replace")) + '</pre>')
+                     "<pre>" + html.escape(data.decode("utf-8", "replace")) + "</pre>")
     else:
         path = query.get("path", [""])[0]
         if path and not safe_path(path):
@@ -130,7 +130,7 @@ def repository_page(repo, name, query):
             target = link("", view="files" if kind == "tree" else "file", ref=ref, path=child)
             rows.append(f'<tr><td><a href="{target}">{html.escape(filename)}{"/" if kind == "tree" else ""}</a></td>'
                         f'<td class="muted">{"Folder" if kind == "tree" else "File"}</td></tr>')
-        body += '<table><thead><tr><th>Name</th><th>Type</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        body += "<table><thead><tr><th>Name</th><th>Type</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
     return page(name + " · Git host", body)
 
 
@@ -202,8 +202,8 @@ class Handler(BaseHTTPRequestHandler):
             names = sorted(name for name in os.listdir(DATA) if name.endswith(".git"))
             rows = "".join(f'<tr><td><a href="browse/{html.escape(name, quote=True)}">{html.escape(name)}</a></td></tr>'
                            for name in names)
-            self.html(200, page("Git host", '<h1>Repositories</h1><table><thead><tr><th>Name</th></tr></thead><tbody>'
-                                + rows + '</tbody></table>', home="./"))
+            self.html(200, page("Git host", "<h1>Repositories</h1><table><thead><tr><th>Name</th></tr></thead><tbody>"
+                                + rows + "</tbody></table>", home="./"))
             return
         match = BROWSE_PATH.fullmatch(path)
         if match and self.command == "GET":

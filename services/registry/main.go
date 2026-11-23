@@ -44,8 +44,10 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const maxBodyBytes = 16 << 20
-const retiredSkillVersionPrefix = ".retired-"
+const (
+	maxBodyBytes              = 16 << 20
+	retiredSkillVersionPrefix = ".retired-"
+)
 
 // segmentPattern matches one segment of a name; a name is up to maxDepth segments.
 var segmentPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -694,8 +696,10 @@ func (r *registry) encodeFiles(files map[string]json.RawMessage) (map[string][]b
 	return out, nil
 }
 
-var skillPathSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-var skillFrontMatterNamePattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+var (
+	skillPathSegmentPattern     = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	skillFrontMatterNamePattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+)
 
 func validateFilePath(path string) error {
 	if path == "" || strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {

@@ -96,6 +96,7 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	shutdown, err := initTelemetry(context.Background())
@@ -148,6 +149,7 @@ func run() error {
 	}
 	return nil
 }
+
 func env(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -319,6 +321,7 @@ func (s *service) listSets(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(out, func(i, j int) bool { return out[i].Updated.After(out[j].Updated) })
 	writeJSON(w, 200, map[string]any{"sets": out})
 }
+
 func (s *service) getSet(w http.ResponseWriter, r *http.Request) {
 	set, err := s.loadSet(r.Context(), r.PathValue("id"))
 	if errors.Is(err, errNotFound) {
@@ -335,6 +338,7 @@ func (s *service) getSet(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, set)
 }
+
 func (s *service) createSet(w http.ResponseWriter, r *http.Request) {
 	s.setMu.Lock()
 	defer s.setMu.Unlock()
@@ -364,6 +368,7 @@ func (s *service) createSet(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 201, set)
 }
+
 func (s *service) updateSet(w http.ResponseWriter, r *http.Request) {
 	s.setMu.Lock()
 	defer s.setMu.Unlock()
@@ -436,6 +441,7 @@ func decodeSetInput(w http.ResponseWriter, r *http.Request) (setInput, bool) {
 	}
 	return in, true
 }
+
 func duplicateName(sets []EvaluationSet, name, except string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	for _, set := range sets {
@@ -470,6 +476,7 @@ func (s *service) snapshots(ctx context.Context, ids []string, existing map[stri
 	}
 	return out, nil
 }
+
 func (s *service) refreshPresence(ctx context.Context, set *EvaluationSet) error {
 	ids, err := s.runIDs(ctx)
 	if err != nil {
@@ -516,6 +523,7 @@ func (s *service) catalog(ctx context.Context) ([]RunSnapshot, error) {
 	})
 	return runs, nil
 }
+
 func (s *service) readRun(ctx context.Context, id string) (RunSnapshot, error) {
 	var rec struct {
 		TraceID            string    `json:"trace_id"`
@@ -555,6 +563,7 @@ func (s *service) readRun(ctx context.Context, id string) (RunSnapshot, error) {
 	}
 	return run, nil
 }
+
 func (s *service) runAgents(ctx context.Context, id string) ([]string, bool, error) {
 	var listing struct {
 		Objects []struct {
@@ -586,6 +595,7 @@ func (s *service) runAgents(ctx context.Context, id string) ([]string, bool, err
 	sort.Strings(out)
 	return out, true, nil
 }
+
 func (s *service) runIDs(ctx context.Context) (map[string]bool, error) {
 	var list struct {
 		Directories []string `json:"directories"`
@@ -627,6 +637,7 @@ func (s *service) loadSets(ctx context.Context) ([]EvaluationSet, error) {
 	}
 	return sets, nil
 }
+
 func (s *service) loadSet(ctx context.Context, id string) (EvaluationSet, error) {
 	if uuid.Validate(id) != nil {
 		return EvaluationSet{}, errNotFound
@@ -638,6 +649,7 @@ func (s *service) loadSet(ctx context.Context, id string) (EvaluationSet, error)
 	}
 	return set, err
 }
+
 func (s *service) saveSet(ctx context.Context, set EvaluationSet) error {
 	data, err := json.MarshalIndent(set, "", "  ")
 	if err != nil {
@@ -678,15 +690,18 @@ func (s *service) getJSON(ctx context.Context, url string, out any) error {
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out)
 }
+
 func (s *service) fail(w http.ResponseWriter, status int, err error) {
 	s.log.Warn("evaluation request failed", "status", status, "error", err)
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
 func optionalTime(v string) (*time.Time, error) {
 	if v == "" {
 		return nil, nil
@@ -698,6 +713,7 @@ func optionalTime(v string) (*time.Time, error) {
 	t = t.UTC()
 	return &t, nil
 }
+
 func optionalInt(v string) (*int64, error) {
 	if v == "" {
 		return nil, nil
@@ -708,6 +724,7 @@ func optionalInt(v string) (*int64, error) {
 	}
 	return &n, nil
 }
+
 func matchesAgent(agents []string, want string) bool {
 	for _, a := range agents {
 		if a == want || !strings.Contains(want, "@") && strings.SplitN(a, "@", 2)[0] == want {
@@ -716,9 +733,11 @@ func matchesAgent(agents []string, want string) bool {
 	}
 	return false
 }
+
 func encodeCursor(t time.Time, id string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(t.Format(time.RFC3339Nano) + "\n" + id))
 }
+
 func decodeCursor(v string) (time.Time, string, error) {
 	data, err := base64.RawURLEncoding.DecodeString(v)
 	if err != nil {

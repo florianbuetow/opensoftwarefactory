@@ -12,7 +12,8 @@ import (
 func (s *service) podSpec(p devPod, repo repository) map[string]any {
 	token := func(key string) []map[string]any {
 		return []map[string]any{{"name": "POD_TOKEN", "valueFrom": map[string]any{
-			"secretKeyRef": map[string]any{"name": podName(p.ID), "key": key}}}}
+			"secretKeyRef": map[string]any{"name": podName(p.ID), "key": key},
+		}}}
 	}
 	workspace := map[string]any{"name": "workspace", "mountPath": "/workspace"}
 	work := map[string]any{
@@ -41,7 +42,8 @@ func (s *service) podSpec(p devPod, repo repository) map[string]any {
 		helperMounts = append(helperMounts, map[string]any{"name": "credential", "mountPath": "/credential", "readOnly": true})
 		volumes = append(volumes, map[string]any{"name": "credential", "secret": map[string]any{
 			"secretName": credentialSecret(repo.Name), "defaultMode": 0o400,
-			"items": []map[string]any{{"key": "token", "path": "token"}}}})
+			"items": []map[string]any{{"key": "token", "path": "token"}},
+		}})
 	}
 	helper := map[string]any{
 		"name":            "git-helper",
@@ -95,8 +97,10 @@ func (s *service) networkPolicy(id string, repo repository) map[string]any {
 	}
 	return map[string]any{
 		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-		"metadata": map[string]any{"name": podName(id), "namespace": s.cfg.podNamespace,
-			"labels": map[string]string{"app": "devpod", "devpod-id": id}},
+		"metadata": map[string]any{
+			"name": podName(id), "namespace": s.cfg.podNamespace,
+			"labels": map[string]string{"app": "devpod", "devpod-id": id},
+		},
 		"spec": map[string]any{
 			"podSelector": map[string]any{"matchLabels": map[string]string{"devpod-id": id}},
 			"policyTypes": []string{"Ingress", "Egress"},

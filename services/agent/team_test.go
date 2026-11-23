@@ -10,8 +10,10 @@ import (
 	"testing"
 )
 
-const teamPath = "teams/t1/build"
-const teamMemberID = teamPath + "/members/lead.json"
+const (
+	teamPath     = "teams/t1/build"
+	teamMemberID = teamPath + "/members/lead.json"
+)
 
 const teamJSON = `{"lead":"lead","members":[
 	{"name":"lead","kind":"agent","ref":"intake@v1","description":"Coordinates the team."},
@@ -276,8 +278,10 @@ func TestTeamTurnRefusesInvalidRequests(t *testing.T) {
 	}
 }
 
-const teamToolsJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message"],"max_retries":1}`
-const sendCallResponse = `{"choices":[{"message":{"role":"assistant","content":"I report now.","tool_calls":[{"id":"call_s","type":"function","function":{"name":"factory__send_message","arguments":"{\"team\":\"teams/t1/build\",\"member\":\"coder\",\"channel\":\"coder--lead\",\"text\":\"wrote parser.py\"}"}}]}}]}`
+const (
+	teamToolsJSON    = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message"],"max_retries":1}`
+	sendCallResponse = `{"choices":[{"message":{"role":"assistant","content":"I report now.","tool_calls":[{"id":"call_s","type":"function","function":{"name":"factory__send_message","arguments":"{\"team\":\"teams/t1/build\",\"member\":\"coder\",\"channel\":\"coder--lead\",\"text\":\"wrote parser.py\"}"}}]}}]}`
+)
 
 // factorySends records the arguments of the send_message calls that reached the gateway.
 type factorySends struct {

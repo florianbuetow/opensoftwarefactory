@@ -21,6 +21,7 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func run() error {
 	addr := flag.String("addr", ":8080", "listen address")
 	flag.Parse()

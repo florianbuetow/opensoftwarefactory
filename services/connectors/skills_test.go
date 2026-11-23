@@ -51,8 +51,10 @@ func TestReadSkillReturnsOnlyStoredFilesAndNeedsNoPod(t *testing.T) {
 	registry := skillRegistry(t)
 	defer registry.Close()
 	configureSkills(w, registry.URL)
-	base := map[string]any{"tool": "read_skill", "pod": "", "agent": builder, "run": "run-1",
-		"skill": "git", "version": "v3", "args": map[string]any{"file": "SKILL.md"}}
+	base := map[string]any{
+		"tool": "read_skill", "pod": "", "agent": builder, "run": "run-1",
+		"skill": "git", "version": "v3", "args": map[string]any{"file": "SKILL.md"},
+	}
 	ok, result, message := w.skill(base)
 	if !ok || !strings.Contains(result.(string), "Git procedures") || message != "" {
 		t.Fatalf("ok=%v result=%v message=%q", ok, result, message)
@@ -74,8 +76,10 @@ func TestRunSkillScriptChecksPodPassesFilesAndReturnsWarnings(t *testing.T) {
 	configureSkills(w, registry.URL)
 	w.repository("claims-build", nil)
 	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1"})
-	body := map[string]any{"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
-		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/cut.sh", "args": []string{"a b"}, "timeout_seconds": 4}}
+	body := map[string]any{
+		"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
+		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/cut.sh", "args": []string{"a b"}, "timeout_seconds": 4},
+	}
 	w.advance(2 * time.Minute)
 	ok, result, message := w.skill(body)
 	if !ok || message != "" {
@@ -108,8 +112,10 @@ func TestRunSkillScriptRefusalsDoNotReachThePod(t *testing.T) {
 	registry := skillRegistry(t)
 	defer registry.Close()
 	configureSkills(w, registry.URL)
-	base := map[string]any{"tool": "run_skill_script", "pod": "", "agent": builder, "run": "run-1",
-		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/check.sh"}}
+	base := map[string]any{
+		"tool": "run_skill_script", "pod": "", "agent": builder, "run": "run-1",
+		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/check.sh"},
+	}
 	if ok, _, message := w.skill(base); ok || !strings.Contains(message, "needs a devpod step") {
 		t.Fatalf("without pod: ok=%v message=%q", ok, message)
 	}
@@ -123,8 +129,10 @@ func TestRunSkillScriptValidatesCallBeforeReadingRegistry(t *testing.T) {
 	configureSkills(w, "http://127.0.0.1:1")
 	w.repository("claims-build", nil)
 	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1"})
-	body := map[string]any{"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
-		"skill": "git", "version": "v3", "args": map[string]any{"script": "../bad.sh"}}
+	body := map[string]any{
+		"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
+		"skill": "git", "version": "v3", "args": map[string]any{"script": "../bad.sh"},
+	}
 	if ok, _, message := w.skill(body); ok || !strings.Contains(message, "relative segments") {
 		t.Fatalf("path validation: ok=%v message=%q", ok, message)
 	}
@@ -142,8 +150,10 @@ func TestRunSkillScriptArgumentLimitBoundary(t *testing.T) {
 	w.s.cfg.skillArgsChars = 1000
 	w.repository("claims-build", nil)
 	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1"})
-	body := map[string]any{"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
-		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/check.sh", "args": []string{strings.Repeat("é", 1000)}}}
+	body := map[string]any{
+		"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
+		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/check.sh", "args": []string{strings.Repeat("é", 1000)}},
+	}
 	before := len(w.pod.called())
 	if ok, _, message := w.skill(body); !ok {
 		t.Fatalf("1000 characters refused: %s", message)
@@ -164,8 +174,10 @@ func TestRunSkillScriptRefusesTimeoutThatWouldOverflowDuration(t *testing.T) {
 	configureSkills(w, registry.URL)
 	w.repository("claims-build", nil)
 	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1"})
-	body := map[string]any{"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
-		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/check.sh", "timeout_seconds": int(^uint(0) >> 1)}}
+	body := map[string]any{
+		"tool": "run_skill_script", "pod": id, "agent": builder, "run": "run-1",
+		"skill": "git", "version": "v3", "args": map[string]any{"script": "scripts/check.sh", "timeout_seconds": int(^uint(0) >> 1)},
+	}
 	before := len(w.pod.called())
 	if ok, _, message := w.skill(body); ok || !strings.Contains(message, "timeout") || !strings.Contains(message, "too large") {
 		t.Fatalf("overflow timeout: ok=%v message=%q", ok, message)

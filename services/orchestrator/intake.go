@@ -83,9 +83,11 @@ func (s *server) startIntakeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traceID := deterministicIntakeID(req.BindingID, req.EventID)
-	in := pipeline.Input{TraceID: traceID, Definition: def, Prefix: pipeline.RunPrefix(traceID),
+	in := pipeline.Input{
+		TraceID: traceID, Definition: def, Prefix: pipeline.RunPrefix(traceID),
 		Inputs: []pipeline.Item{{Source: pipeline.InputSource, Artifact: pipeline.ArtifactID(pipeline.RunPrefix(traceID), pipeline.InputSource), Round: 1}},
-		Intake: &pipeline.IntakeInput{BindingID: req.BindingID, BindingRevision: req.BindingRevision, EventID: req.EventID, Event: req.Event, Binding: req.Binding, AcceptanceHash: hash}}
+		Intake: &pipeline.IntakeInput{BindingID: req.BindingID, BindingRevision: req.BindingRevision, EventID: req.EventID, Event: req.Event, Binding: req.Binding, AcceptanceHash: hash},
+	}
 	executionID, reused, err := starter.StartIntake(r.Context(), in, hash)
 	if err != nil {
 		if errors.Is(err, errIntakeConflict) {
@@ -107,11 +109,15 @@ func (s *server) startIntakeRun(w http.ResponseWriter, r *http.Request) {
 var errIntakeConflict = errors.New("deterministic intake identity already accepted a different payload")
 
 func (r temporalRunner) StartIntake(ctx context.Context, in pipeline.Input, hash string) (string, bool, error) {
-	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: in.TraceID, TaskQueue: pipeline.TaskQueue,
+	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID: in.TraceID, TaskQueue: pipeline.TaskQueue,
 		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
 		WorkflowExecutionErrorWhenAlreadyStarted: true,
-		Memo: map[string]any{"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(in.Definition), "trace_id": in.TraceID,
-			"artifact_prefix": in.Prefix, "intake_binding_id": in.Intake.BindingID, "intake_event_id": in.Intake.EventID, "intake_hash": hash}}, pipeline.WorkflowName, in)
+		Memo: map[string]any{
+			"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(in.Definition), "trace_id": in.TraceID,
+			"artifact_prefix": in.Prefix, "intake_binding_id": in.Intake.BindingID, "intake_event_id": in.Intake.EventID, "intake_hash": hash,
+		},
+	}, pipeline.WorkflowName, in)
 	if err == nil {
 		return run.GetRunID(), false, nil
 	}

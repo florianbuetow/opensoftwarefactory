@@ -9,7 +9,7 @@ import json
 import multiprocessing
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from factory import NotFoundError, blobstore, connectors, evidence, policies, valid_id
@@ -648,14 +648,14 @@ def run_skill_script(pod: str, agent: str, run: str, version: str, skill: str, s
 
 def _now() -> str:
     """Return the UTC time as RFC 3339 with microseconds, so messages of two queues order by it."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _sent(value: str) -> datetime:
     try:
         return datetime.fromisoformat(value)
     except ValueError:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
 
 
 def _is_team(path: str) -> bool:

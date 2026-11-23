@@ -23,6 +23,7 @@ const projectionStream = "factory_measurements"
 var projectionStreamNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,95}$`)
 
 func validProjectionStream(name string) bool { return projectionStreamNamePattern.MatchString(name) }
+
 func (s *service) projectionStreamName() string {
 	if s.projectionStream != "" {
 		return s.projectionStream
@@ -51,6 +52,7 @@ type projectionManifest struct {
 func projectionObject(hour time.Time) string {
 	return "measurement-projections/" + projectionStream + "/" + hour.UTC().Format("20060102T15") + ".json"
 }
+
 func (s *service) projectionObject(hour time.Time) string {
 	return "measurement-projections/" + s.projectionStreamName() + "/" + hour.UTC().Format("20060102T15") + ".json"
 }
@@ -409,6 +411,7 @@ func (s *service) projectionEmpty(ctx context.Context, hour time.Time) (bool, er
 	result, err := s.openObserveSearch(ctx, "SELECT projection_id FROM \""+stream+"\"", hour, hour.Add(time.Hour), 0, 1, "")
 	return err == nil && !result.Partial && result.Total == 0, err
 }
+
 func (s *service) projectionQuiescent(ctx context.Context, hour time.Time) (bool, bool, error) {
 	stream := s.projectionStreamName()
 	schemaStatus, _, schemaErr := s.openObserveRequest(ctx, http.MethodGet, "/api/default/streams/"+stream+"/schema?type=logs", nil)
@@ -456,6 +459,7 @@ func (s *service) projectionQuiescent(ctx context.Context, hour time.Time) (bool
 	}
 	return visible == *partition.Records, false, nil
 }
+
 func requiredInt64Value(v any) (int64, bool) {
 	switch x := v.(type) {
 	case float64:
@@ -473,6 +477,7 @@ func requiredInt64Value(v any) (int64, bool) {
 	}
 	return 0, false
 }
+
 func (s *service) ingestProjection(ctx context.Context, records []map[string]any) (bool, error) {
 	data, _ := json.Marshal(records)
 	status, response, err := s.openObserveRequest(ctx, http.MethodPost, "/api/default/"+s.projectionStreamName()+"/_json", data)
@@ -506,11 +511,13 @@ func (s *service) ingestProjection(ctx context.Context, records []map[string]any
 	return true, nil
 }
 
-type partialIngestError struct{ error }
-type projectedIdentity struct {
-	ID         string
-	Generation int64
-}
+type (
+	partialIngestError struct{ error }
+	projectedIdentity  struct {
+		ID         string
+		Generation int64
+	}
+)
 
 func (s *service) verifyProjectionBatch(ctx context.Context, hour time.Time, offset, limit int) ([]projectedIdentity, int, bool, error) {
 	result, err := s.openObserveSearch(ctx, "SELECT projection_id, generation FROM \""+s.projectionStreamName()+"\" ORDER BY projection_id", hour, hour.Add(time.Hour), offset, limit, "")
@@ -523,6 +530,7 @@ func (s *service) verifyProjectionBatch(ctx context.Context, hour time.Time, off
 	}
 	return out, result.Total, result.Partial, nil
 }
+
 func int64Value(v any) int64 {
 	switch x := v.(type) {
 	case float64:
@@ -553,6 +561,7 @@ type projectionSnapshotChunk struct {
 func projectionSnapshotObject(hour time.Time, snapshotID string, index int) string {
 	return fmt.Sprintf("measurement-projection-snapshots/%s/%s/%s/%06d.json", projectionStream, hour.UTC().Format("20060102T15"), snapshotID, index)
 }
+
 func (s *service) projectionSnapshotObject(hour time.Time, snapshotID string, index int) string {
 	return fmt.Sprintf("measurement-projection-snapshots/%s/%s/%s/%06d.json", s.projectionStreamName(), hour.UTC().Format("20060102T15"), snapshotID, index)
 }

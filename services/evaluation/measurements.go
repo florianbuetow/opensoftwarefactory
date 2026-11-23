@@ -447,6 +447,7 @@ func decimal(s string, positive bool) (*big.Rat, error) {
 	}
 	return r, nil
 }
+
 func decimalString(r *big.Rat) string {
 	if r.Sign() == 0 {
 		return "0"
@@ -514,6 +515,7 @@ func (s *service) calculateCost(ctx context.Context, m Measurement, display stri
 	}
 	return calculateCostWith(m, display, generation, prices, conversions)
 }
+
 func calculateCostWith(m Measurement, display string, generation int64, prices []Price, convs []Conversion) (CurrentCost, error) {
 	cost := CurrentCost{UsageID: m.ID, DisplayCurrency: display, Generation: generation, Status: "unavailable", CalculatedAt: time.Now().UTC()}
 	var matches []Price

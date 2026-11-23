@@ -89,6 +89,7 @@ func runBuild(t *testing.T, pkg, out string) {
 		t.Fatalf("build %s: %v\n%s", pkg, err, output)
 	}
 }
+
 func freeAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -99,6 +100,7 @@ func freeAddress(t *testing.T) string {
 	_ = listener.Close()
 	return address
 }
+
 func waitHTTP(t *testing.T, url string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -117,6 +119,7 @@ func waitHTTP(t *testing.T, url string) {
 	}
 	t.Fatalf("%s did not become ready", url)
 }
+
 func integrationRequest(t *testing.T, method, url, body string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
@@ -134,6 +137,7 @@ func integrationRequest(t *testing.T, method, url, body string) (int, string) {
 	_ = json.NewDecoder(resp.Body).Decode(&payload)
 	return resp.StatusCode, fmt.Sprint(payload)
 }
+
 func integrationGET(t *testing.T, url string, out any) {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -148,6 +152,7 @@ func integrationGET(t *testing.T, url string, out any) {
 		t.Fatal(err)
 	}
 }
+
 func waitJSON(t *testing.T, url string, out any) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -166,6 +171,7 @@ func waitJSON(t *testing.T, url string, out any) {
 	}
 	t.Fatalf("%s was not available", url)
 }
+
 func stopProcess(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return

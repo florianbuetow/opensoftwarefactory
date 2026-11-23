@@ -188,9 +188,11 @@ func (a *Activities) InitializeIntake(ctx context.Context, req InitializeIntakeR
 		return InitializeIntakeResult{}, temporal.NewNonRetryableApplicationError("intake acceptance hash does not match the pinned configuration", "IntakeAcceptanceHashMismatch", hashErr)
 	}
 	receiptID := "intake-receipts/" + req.TraceID + ".json"
-	receipt := IntakeReceipt{SchemaVersion: 1, BindingID: req.Intake.BindingID, BindingRevision: req.Intake.BindingRevision,
+	receipt := IntakeReceipt{
+		SchemaVersion: 1, BindingID: req.Intake.BindingID, BindingRevision: req.Intake.BindingRevision,
 		EventID: req.Intake.EventID, TraceID: req.TraceID, ExecutionID: req.ExecutionID,
-		Workflow: req.Definition.Name, WorkflowVersion: DefinitionVersion(req.Definition), CreatedAt: time.Now().UTC(), AcceptanceHash: req.Intake.AcceptanceHash, Phase: "claimed"}
+		Workflow: req.Definition.Name, WorkflowVersion: DefinitionVersion(req.Definition), CreatedAt: time.Now().UTC(), AcceptanceHash: req.Intake.AcceptanceHash, Phase: "claimed",
+	}
 	data, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		return InitializeIntakeResult{}, err

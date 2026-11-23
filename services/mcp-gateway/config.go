@@ -29,6 +29,7 @@ func validateName(name string) error {
 	}
 	return nil
 }
+
 func (c Config) validate() error {
 	switch c.MCPConfig.Transport {
 	case "streamable-http":
@@ -68,6 +69,7 @@ func (c Config) validate() error {
 	}
 	return nil
 }
+
 func (c Config) allowed(name string) bool {
 	for _, n := range c.Denylist {
 		if n == name {
@@ -81,6 +83,7 @@ func (c Config) allowed(name string) bool {
 	}
 	return false
 }
+
 func (c *Config) normalize() {
 	if c.Allowlist == nil {
 		c.Allowlist = []string{}
@@ -89,6 +92,7 @@ func (c *Config) normalize() {
 		c.Denylist = []string{}
 	}
 }
+
 func decodeConfig(data []byte) (Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {

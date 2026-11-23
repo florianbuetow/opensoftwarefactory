@@ -1,10 +1,9 @@
 import json
 from pathlib import Path
 
+import factory
 import httpx
 import pytest
-
-import factory
 from server import load_tools
 
 TOOLS_FILE = Path(__file__).parent.parent / "tools" / "tools.py"
@@ -502,7 +501,7 @@ def test_session_file_tools_accept_a_team_workspace(tools, monkeypatch):
 
 @pytest.mark.parametrize(
     "extension",
-    "md txt json py go js ts tsx jsx java kt rs c h cpp cs rb php sh sql html css yaml yml toml xml".split(),
+    ["md", "txt", "json", "py", "go", "js", "ts", "tsx", "jsx", "java", "kt", "rs", "c", "h", "cpp", "cs", "rb", "php", "sh", "sql", "html", "css", "yaml", "yml", "toml", "xml"],
 )
 def test_team_workspace_extensions(tools, monkeypatch, extension):
     store, blobs = fake_team_store({})

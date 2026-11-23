@@ -41,6 +41,7 @@ func TestPolicyAndConfig(t *testing.T) {
 		t.Fatal(c, err)
 	}
 }
+
 func TestConfigurationFailures(t *testing.T) {
 	var mu sync.Mutex
 	objects := map[string][]byte{}
@@ -96,6 +97,7 @@ func TestConfigurationFailures(t *testing.T) {
 		t.Fatal("incomplete config activated")
 	}
 }
+
 func requestJSON(t *testing.T, method, url string, value any, status int) []byte {
 	t.Helper()
 	data, _ := json.Marshal(value)
@@ -112,6 +114,7 @@ func requestJSON(t *testing.T, method, url string, value any, status int) []byte
 	}
 	return body
 }
+
 func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []byte {
 	t.Helper()
 	init := initializeRequest("test-init")
@@ -169,6 +172,7 @@ func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []by
 	}
 	return body
 }
+
 func buildFixture(t *testing.T, dir, target string) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "server")
@@ -179,6 +183,7 @@ func buildFixture(t *testing.T, dir, target string) string {
 	}
 	return out
 }
+
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -189,6 +194,7 @@ func freeAddr(t *testing.T) string {
 	l.Close()
 	return addr
 }
+
 func launch(t *testing.T, bin string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
@@ -199,6 +205,7 @@ func launch(t *testing.T, bin string, args ...string) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 }
+
 func waitHTTP(t *testing.T, url string) {
 	t.Helper()
 	for i := 0; i < 100; i++ {
@@ -211,6 +218,7 @@ func waitHTTP(t *testing.T, url string) {
 	}
 	t.Fatalf("server did not start: %s", url)
 }
+
 func TestGatewayRealBlobstoreAndExternalServers(t *testing.T) {
 	blobBin := buildFixture(t, "../blobstore", ".")
 	blobAddr := freeAddr(t)
@@ -289,6 +297,7 @@ func TestGatewayRealBlobstoreAndExternalServers(t *testing.T) {
 		mcpRequest(t, srv2.URL+"/mcp/"+name, "tools/list", "", "", 404)
 	}
 }
+
 func TestSSEFilteringAndIncrementalDelivery(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
@@ -330,6 +339,7 @@ func TestSSEFilteringAndIncrementalDelivery(t *testing.T) {
 		t.Fatal(string(result["tools"]))
 	}
 }
+
 func TestRequestValidation(t *testing.T) {
 	data := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
 	h := protocolHeaders(false)

@@ -382,6 +382,7 @@ func sameStrings(a, b []string) bool {
 	}
 	return true
 }
+
 func sameTime(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -416,6 +417,7 @@ func (s *service) selectedUsageIDs(ctx context.Context, job recalculationJob) ([
 	sort.Strings(out)
 	return out, nil
 }
+
 func (s *service) loadMeasurement(ctx context.Context, kind, id string) (Measurement, error) {
 	o, err := s.readObject(ctx, measurementObject(kind, id))
 	if err != nil {

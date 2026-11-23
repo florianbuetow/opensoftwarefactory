@@ -96,8 +96,10 @@ func TestFirstMessageListsReferencesWithoutUnpacking(t *testing.T) {
 	}
 }
 
-const noUnpackJSON = `{"schema_version":1,"name":"intake","models":["m1"],"tools":[]}`
-const noUnpackError = `agent intake@v1: agent.json has no "unpack_inputs"; it must be true or false`
+const (
+	noUnpackJSON  = `{"schema_version":1,"name":"intake","models":["m1"],"tools":[]}`
+	noUnpackError = `agent intake@v1: agent.json has no "unpack_inputs"; it must be true or false`
+)
 
 func assertMissingUnpack(t *testing.T, f *fakes, err error) {
 	t.Helper()

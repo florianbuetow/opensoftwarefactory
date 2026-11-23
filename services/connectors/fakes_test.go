@@ -170,8 +170,10 @@ type fakePod struct {
 }
 
 func newFakePod(t *testing.T, kube *fakeKube) *fakePod {
-	p := &fakePod{kube: kube, bodies: map[string]map[string]any{}, exitCodes: map[string]int{},
-		commits: []commit{{Hash: "c0ffee1", Subject: "Add payment date", Author: "course/builder@v1"}}}
+	p := &fakePod{
+		kube: kube, bodies: map[string]map[string]any{}, exitCodes: map[string]int{},
+		commits: []commit{{Hash: "c0ffee1", Subject: "Add payment date", Author: "course/builder@v1"}},
+	}
 	p.srv = httptest.NewServer(http.HandlerFunc(p.serve))
 	t.Cleanup(p.srv.Close)
 	return p
@@ -211,8 +213,10 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 			p.calls = append(p.calls, "run_skill_script:"+fmt.Sprint(args["script"]))
 			timedOut := args["script"] == "scripts/timeout.sh"
 			cut := args["script"] == "scripts/cut.sh"
-			answer(map[string]any{"ok": true, "result": map[string]any{"exit_code": 0, "stdout": "skill output",
-				"stderr": "skill error", "stdout_cut": cut, "stderr_cut": false, "timed_out": timedOut}})
+			answer(map[string]any{"ok": true, "result": map[string]any{
+				"exit_code": 0, "stdout": "skill output",
+				"stderr": "skill error", "stdout_cut": cut, "stderr_cut": false, "timed_out": timedOut,
+			}})
 		case "read_file":
 			p.calls = append(p.calls, "read_file:"+fmt.Sprint(args["path"]))
 			if args["path"] == "missing.txt" {
@@ -222,8 +226,10 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 			answer(map[string]any{"ok": true, "result": map[string]any{"path": args["path"], "content": "hello\n", "start_line": 1, "end_line": 1, "total_lines": 1}})
 		case "list_files":
 			p.calls = append(p.calls, "list_files:"+fmt.Sprint(args["path"]))
-			answer(map[string]any{"ok": true, "result": map[string]any{"path": args["path"], "truncated": false,
-				"entries": []map[string]any{{"name": "README.md", "type": "file", "size": 12}, {"name": "src", "type": "dir", "size": 0}}}})
+			answer(map[string]any{"ok": true, "result": map[string]any{
+				"path": args["path"], "truncated": false,
+				"entries": []map[string]any{{"name": "README.md", "type": "file", "size": 12}, {"name": "src", "type": "dir", "size": 0}},
+			}})
 		default:
 			p.calls = append(p.calls, name+":"+fmt.Sprint(args["path"]))
 			answer(map[string]any{"ok": true, "result": "done"})
@@ -387,8 +393,10 @@ func (w *world) start(registry string) *service {
 	if err := os.WriteFile(tokenFile, []byte("test-token\n"), 0o600); err != nil {
 		w.t.Fatal(err)
 	}
-	cfg := config{podNamespace: testNamespace, factoryNamespace: "opensoftwarefactory", image: "opensoftwarefactory-devpod:local", pullPolicy: "Never",
-		sweep: time.Hour, startTimeout: 2 * time.Second, poll: 5 * time.Millisecond, mcpURL: "http://tool-gateway:8080/mcp", registerRetry: 5 * time.Millisecond}
+	cfg := config{
+		podNamespace: testNamespace, factoryNamespace: "opensoftwarefactory", image: "opensoftwarefactory-devpod:local", pullPolicy: "Never",
+		sweep: time.Hour, startTimeout: 2 * time.Second, poll: 5 * time.Millisecond, mcpURL: "http://tool-gateway:8080/mcp", registerRetry: 5 * time.Millisecond,
+	}
 	kube := &kubeClient{base: w.kube.srv.URL, namespace: testNamespace, tokenFile: tokenFile, http: http.DefaultClient}
 	s := newService(cfg, slog.New(slog.DiscardHandler), http.DefaultClient, kube)
 	s.blobs = blobClient{base: w.blobs.srv.URL, http: http.DefaultClient}

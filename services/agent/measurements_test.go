@@ -130,8 +130,10 @@ func checkToolRoundEvents(t *testing.T, events []TurnEvent) {
 // checkEventFields fails when a stored event has a field outside the contract.
 func checkEventFields(t *testing.T, stored map[string]any) {
 	t.Helper()
-	allowed := map[string]bool{"kind": true, "name": true, "status": true, "started": true, "finished": true, "model": true, "turn": true,
-		"usage": true, "estimated_input_tokens": true, "estimated_output_tokens": true, "estimation_method": true, "error": true}
+	allowed := map[string]bool{
+		"kind": true, "name": true, "status": true, "started": true, "finished": true, "model": true, "turn": true,
+		"usage": true, "estimated_input_tokens": true, "estimated_output_tokens": true, "estimation_method": true, "error": true,
+	}
 	events, _ := stored["events"].([]any)
 	if len(events) == 0 {
 		t.Fatalf("no events stored: %v", stored)

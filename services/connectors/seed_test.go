@@ -27,8 +27,10 @@ func TestRepositorySeedsAreAddedOnceAndNeverOverwritten(t *testing.T) {
 	if len(repos) != 3 {
 		t.Fatalf("repositories = %v", repos)
 	}
-	want := map[string]any{"name": "alpha", "kind": "plain", "url": "http://git-host:8080/alpha.git", "default_branch": "main",
-		"setup_command": "", "idle_minutes": 30.0, "approve_publish": false, "credential": "none"}
+	want := map[string]any{
+		"name": "alpha", "kind": "plain", "url": "http://git-host:8080/alpha.git", "default_branch": "main",
+		"setup_command": "", "idle_minutes": 30.0, "approve_publish": false, "credential": "none",
+	}
 	if !reflect.DeepEqual(repos[0], want) {
 		t.Fatalf("alpha = %v", repos[0])
 	}

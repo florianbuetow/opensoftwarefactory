@@ -166,8 +166,10 @@ func (r agentRegistry) settings(ctx context.Context, ref string) (AgentSettings,
 	if err != nil {
 		return AgentSettings{}, err
 	}
-	out := AgentSettings{Effort: def.Effort, Temperature: def.Temperature, Tools: def.Tools, MaxRetries: def.MaxRetries,
-		SkillScriptTimeoutSeconds: def.SkillScriptTimeoutSeconds}
+	out := AgentSettings{
+		Effort: def.Effort, Temperature: def.Temperature, Tools: def.Tools, MaxRetries: def.MaxRetries,
+		SkillScriptTimeoutSeconds: def.SkillScriptTimeoutSeconds,
+	}
 	if len(def.Models) > 0 {
 		out.Model = def.Models[0]
 	}

@@ -2,12 +2,11 @@ import inspect
 import json
 from pathlib import Path
 
+import factory
 import httpx
 import pytest
-from starlette.testclient import TestClient
-
-import factory
 from server import build_app, load_tools, public_functions
+from starlette.testclient import TestClient
 
 TOOLS_FILE = Path(__file__).parent.parent / "tools" / "tools.py"
 DEVPOD_TOOLS = [

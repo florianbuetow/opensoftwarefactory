@@ -11,8 +11,10 @@ import (
 )
 
 // devpodTools are the tools of the MCP service devpod, in the order the plan names them.
-var devpodTools = []string{"list_files", "read_file", "write_file", "edit_file", "search", "run_command", "report_blocked",
-	"push_branch", "create_pull_request", "update_pull_request", "get_pull_request", "comment_on_pull_request"}
+var devpodTools = []string{
+	"list_files", "read_file", "write_file", "edit_file", "search", "run_command", "report_blocked",
+	"push_branch", "create_pull_request", "update_pull_request", "get_pull_request", "comment_on_pull_request",
+}
 
 // toolInput is one tool call of an agent, as the tool gateway forwards it.
 type toolInput struct {

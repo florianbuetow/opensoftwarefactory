@@ -399,6 +399,7 @@ func executionSubtree(rows []map[string]any, executionID string) ([]map[string]a
 	}
 	return out, true
 }
+
 func firstRowString(row map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := row[key].(string); ok {
@@ -407,6 +408,7 @@ func firstRowString(row map[string]any, keys ...string) string {
 	}
 	return ""
 }
+
 func spanExecutionID(row map[string]any) string {
 	for _, key := range []string{"factory.execution_id", "factory_execution_id"} {
 		if value := firstRowString(row, key); value != "" {
@@ -645,12 +647,14 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"series": out, "coverage": map[string]int{"known": known, "missing": missing}, "query_complete": !queryIncomplete && missingComplete && exactComplete, "projection": map[string]any{"status": status, "pending_hours": pending}})
 }
+
 func stringValue(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
 	return fmt.Sprint(v)
 }
+
 func timeValue(v any) (time.Time, bool) {
 	switch x := v.(type) {
 	case string:
@@ -667,6 +671,7 @@ func timeValue(v any) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
+
 func (s *service) pendingProjectionHours(ctx context.Context, from, to time.Time) ([]time.Time, error) {
 	ids, err := s.listObjects(ctx, operationPrefix)
 	if err != nil {

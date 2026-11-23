@@ -22,6 +22,11 @@ run_ci_tool() {
     uv run --project "$ci_project" --locked "$@"
 }
 
+fix_format() {
+    run_ci_tool ruff check --config "$ci_project/ruff.toml" --fix "${python_sources[@]}"
+    run_ci_tool ruff format --config "$ci_project/ruff.toml" "${python_sources[@]}"
+}
+
 check_format() {
     run_ci_tool ruff format --config "$ci_project/ruff.toml" --check "${python_sources[@]}"
 }
@@ -111,6 +116,7 @@ check_coverage() {
 
 stage=${1-}
 case "$stage" in
+    format-fix) fix_format ;;
     format) check_format ;;
     style) check_style ;;
     mypy) check_mypy ;;
@@ -122,7 +128,7 @@ case "$stage" in
     architecture) check_architecture ;;
     coverage) check_coverage ;;
     *)
-        printf 'usage: %s {format|style|mypy|pyright|security|deps|audit|test|architecture|coverage}\n' "$0" >&2
+        printf 'usage: %s {format-fix|format|style|mypy|pyright|security|deps|audit|test|architecture|coverage}\n' "$0" >&2
         exit 2
         ;;
 esac

@@ -40,8 +40,10 @@ func bindingMatches(binding IntakeBinding, event factoryEvent) bool {
 }
 
 func (s *service) submitBinding(ctx context.Context, binding IntakeBinding, event factoryEvent, raw []byte) error {
-	request := map[string]any{"binding_id": binding.ID, "event_id": event.ID, "workflow": binding.Workflow, "workflow_version": binding.WorkflowVersion,
-		"event": json.RawMessage(raw), "binding_revision": binding.Revision, "binding": binding}
+	request := map[string]any{
+		"binding_id": binding.ID, "event_id": event.ID, "workflow": binding.Workflow, "workflow_version": binding.WorkflowVersion,
+		"event": json.RawMessage(raw), "binding_revision": binding.Revision, "binding": binding,
+	}
 	body, _ := json.Marshal(request)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.orchestratorURL+"/api/intake/runs", bytes.NewReader(body))
 	if err != nil {

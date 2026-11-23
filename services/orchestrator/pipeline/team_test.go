@@ -117,8 +117,10 @@ func teamEnv(t *testing.T, definitions []Definition, turn func(ctx context.Conte
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
 	store := newSyncStore()
-	a := &Activities{Store: store, LoadDefinitions: func() ([]Definition, error) { return definitions, nil },
-		DescribeAgent: func(_ context.Context, ref string) string { return "about " + ref }}
+	a := &Activities{
+		Store: store, LoadDefinitions: func() ([]Definition, error) { return definitions, nil },
+		DescribeAgent: func(_ context.Context, ref string) string { return "about " + ref },
+	}
 	f := &fakeMembers{a: a, turns: map[string]int{}}
 	env.RegisterActivity(a)
 	env.RegisterWorkflowWithOptions(Pipeline, workflow.RegisterOptions{Name: WorkflowName})
@@ -443,8 +445,10 @@ func TestMemberNamesAndChannels(t *testing.T) {
 }
 
 func TestValidateTeamAndWorkflowSteps(t *testing.T) {
-	team := Step{ID: "team", Service: TeamService, Agent: "demo/lead@v1", Agents: []string{"demo/coder@v1"}, Workflows: []string{"docs"},
-		Channels: [][]string{{"lead", "coder"}, {"coder", "docs"}}}
+	team := Step{
+		ID: "team", Service: TeamService, Agent: "demo/lead@v1", Agents: []string{"demo/coder@v1"}, Workflows: []string{"docs"},
+		Channels: [][]string{{"lead", "coder"}, {"coder", "docs"}},
+	}
 	gate := Step{ID: "review", Service: GateService, DependsOn: []string{"team"}, OnReject: "team"}
 	node := Step{ID: "nested", Service: WorkflowService, Workflow: "inner", DependsOn: []string{"review"}}
 	if err := Validate(Definition{Name: "ok", Steps: []Step{team, gate, node}}); err != nil {
@@ -796,8 +800,10 @@ func TestPostTeamMessageWritesOnlyTheSendersOwnQueue(t *testing.T) {
 	ctx := context.Background()
 	team := "teams/t/build"
 	channel := TeamChannel{ID: "echo--lead", Members: []string{"echo", "lead"}}
-	_ = a.putJSON(ctx, team+"/team.json", TeamManifest{Lead: "lead", Channels: []TeamChannel{channel},
-		Members: []TeamMember{{Name: "lead", Kind: AgentMember}, {Name: "echo", Kind: WorkflowMember}}}, Meta{})
+	_ = a.putJSON(ctx, team+"/team.json", TeamManifest{
+		Lead: "lead", Channels: []TeamChannel{channel},
+		Members: []TeamMember{{Name: "lead", Kind: AgentMember}, {Name: "echo", Kind: WorkflowMember}},
+	}, Meta{})
 	_ = store.Put(ctx, "runs/t/out", []byte("same answer"), Meta{})
 	reply := func(read int) {
 		t.Helper()
@@ -835,8 +841,10 @@ func TestPostTeamMessageWritesOnlyTheSendersOwnQueue(t *testing.T) {
 }
 
 func TestOneWayChannel(t *testing.T) {
-	team := Step{ID: "team", Service: TeamService, Agent: "demo/lead@v1", Agents: []string{"demo/coder@v1"},
-		Channels: [][]string{{"lead", "coder", OneWay}}}
+	team := Step{
+		ID: "team", Service: TeamService, Agent: "demo/lead@v1", Agents: []string{"demo/coder@v1"},
+		Channels: [][]string{{"lead", "coder", OneWay}},
+	}
 	if err := Validate(Definition{Name: "ok", Steps: []Step{team}}); err != nil {
 		t.Fatal(err)
 	}

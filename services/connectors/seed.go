@@ -44,8 +44,10 @@ func readRepositorySeeds(path string) ([]repository, error) {
 		}
 		seen[source.Name] = true
 		idle, approve := source.IdleMinutes, source.ApprovePublish
-		input := repositoryInput{Kind: source.Kind, URL: source.URL, DefaultBranch: source.DefaultBranch,
-			SetupCommand: source.SetupCommand, IdleMinutes: &idle, ApprovePublish: &approve, Credential: source.Credential}
+		input := repositoryInput{
+			Kind: source.Kind, URL: source.URL, DefaultBranch: source.DefaultBranch,
+			SetupCommand: source.SetupCommand, IdleMinutes: &idle, ApprovePublish: &approve, Credential: source.Credential,
+		}
 		repo, validateErr := input.repository(source.Name, false)
 		if validateErr != nil {
 			return nil, fmt.Errorf("repository %q: %w", source.Name, validateErr)

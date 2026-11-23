@@ -224,6 +224,7 @@ func waitFixtureObject(t *testing.T, f *fixture, id string) {
 	}
 	t.Fatalf("fixture object %s was not written", id)
 }
+
 func modesPtr(values ...map[string]string) *map[string]string {
 	m := map[string]string{}
 	if len(values) > 0 {

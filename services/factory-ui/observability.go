@@ -15,10 +15,12 @@ import (
 	"time"
 )
 
-var runIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-var traceIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
-var spanIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
-var stepPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,255}$`)
+var (
+	runIDPattern   = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	traceIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+	spanIDPattern  = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
+	stepPattern    = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,255}$`)
+)
 
 type observabilityClient struct {
 	base, user, password                         string

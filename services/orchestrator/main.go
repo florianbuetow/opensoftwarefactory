@@ -105,8 +105,10 @@ func run() error {
 	}
 	defer w.Stop()
 
-	s := &server{workflows: workflows, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger,
-		agentURL: strings.TrimRight(envString("AGENT_URL", "http://agent:8080"), "/"), httpClient: blobs.Client}
+	s := &server{
+		workflows: workflows, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger,
+		agentURL: strings.TrimRight(envString("AGENT_URL", "http://agent:8080"), "/"), httpClient: blobs.Client,
+	}
 	httpServer := &http.Server{Addr: *addr, Handler: otelhttp.NewHandler(s.routes(), "orchestrator.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

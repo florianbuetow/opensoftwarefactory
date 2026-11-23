@@ -22,12 +22,15 @@ const (
 func TestRepositoriesAreStoredAndTheTokenIsNeverReturned(t *testing.T) {
 	w := newWorld(t)
 	status, out := w.call("PUT", "/api/git/repositories/claims", map[string]any{
-		"kind": "github", "url": "https://github.com/acme/claims.git", "credential": "read-write", "token": secret})
+		"kind": "github", "url": "https://github.com/acme/claims.git", "credential": "read-write", "token": secret,
+	})
 	if status != 200 {
 		t.Fatalf("status %d: %v", status, out)
 	}
-	want := map[string]any{"name": "claims", "kind": "github", "url": "https://github.com/acme/claims.git", "default_branch": "main",
-		"setup_command": "", "idle_minutes": 30.0, "approve_publish": true, "credential": "read-write"}
+	want := map[string]any{
+		"name": "claims", "kind": "github", "url": "https://github.com/acme/claims.git", "default_branch": "main",
+		"setup_command": "", "idle_minutes": 30.0, "approve_publish": true, "credential": "read-write",
+	}
 	if !reflect.DeepEqual(out, want) {
 		t.Fatalf("stored repository = %v, want %v", out, want)
 	}
@@ -80,8 +83,10 @@ func TestRepositoriesAreStoredAndTheTokenIsNeverReturned(t *testing.T) {
 func TestRepositoryDefaultsAndValidation(t *testing.T) {
 	w := newWorld(t)
 	status, out := w.call("PUT", "/api/git/repositories/claims-build", map[string]any{"url": "http://git-host:8080/claims-build.git"})
-	want := map[string]any{"name": "claims-build", "kind": "plain", "url": "http://git-host:8080/claims-build.git", "default_branch": "main",
-		"setup_command": "", "idle_minutes": 30.0, "approve_publish": false, "credential": "none"}
+	want := map[string]any{
+		"name": "claims-build", "kind": "plain", "url": "http://git-host:8080/claims-build.git", "default_branch": "main",
+		"setup_command": "", "idle_minutes": 30.0, "approve_publish": false, "credential": "none",
+	}
 	if status != 200 || !reflect.DeepEqual(out, want) {
 		t.Fatalf("status %d: %v", status, out)
 	}
@@ -235,8 +240,10 @@ func TestAWorkBranchThatIsTheSourceOrDefaultBranchIsRefused(t *testing.T) {
 	if status, _ := w.call("POST", "/api/devpods", map[string]any{"repository": "claims-build", "work_branch": "agent/x"}); status != 400 {
 		t.Fatalf("missing run: status %d", status)
 	}
-	if status, out := w.call("POST", "/api/devpods", map[string]any{"repository": "claims-build", "work_branch": "agent/x", "run": "r1",
-		"rules": []map[string]any{{"tool": "write_file", "matches": "(", "message": "m"}}}); status != 400 {
+	if status, out := w.call("POST", "/api/devpods", map[string]any{
+		"repository": "claims-build", "work_branch": "agent/x", "run": "r1",
+		"rules": []map[string]any{{"tool": "write_file", "matches": "(", "message": "m"}},
+	}); status != 400 {
 		t.Fatalf("broken rule: status %d: %v", status, out)
 	}
 	if len(w.kube.names(w.kube.pods)) != 0 || w.pod.count("") != 0 {
@@ -274,8 +281,10 @@ func TestANamedPodIsReusedAndAnUnnamedOneIsNot(t *testing.T) {
 	w.repository("claims-build", nil)
 	w.repository("claims-review", nil)
 	first := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1", "name": "shared", "protected": []string{"verify.sh"}})
-	status, out := w.call("POST", "/api/devpods", map[string]any{"repository": "claims-build", "work_branch": "agent/b", "run": "run-2", "name": "shared",
-		"protected": []string{"verify.sh", "tests/**"}, "rules": []map[string]any{{"tool": "run_command", "matches": "push", "message": "No pushing."}}})
+	status, out := w.call("POST", "/api/devpods", map[string]any{
+		"repository": "claims-build", "work_branch": "agent/b", "run": "run-2", "name": "shared",
+		"protected": []string{"verify.sh", "tests/**"}, "rules": []map[string]any{{"tool": "run_command", "matches": "push", "message": "No pushing."}},
+	})
 	if status != 200 || out["id"] != first || out["reused"] != true || out["work_branch"] != "agent/a" || out["start_commit"] != "5ta27c0" {
 		t.Fatalf("reuse: status %d: %v", status, out)
 	}
@@ -337,13 +346,15 @@ func TestTwoRequestsForTheSameNameBuildOnePod(t *testing.T) {
 func TestProtectedPathsAndRulesBlockWrites(t *testing.T) {
 	w := newWorld(t)
 	w.repository("claims-build", nil)
-	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1",
+	id := w.devpod(map[string]any{
+		"repository": "claims-build", "work_branch": "agent/a", "run": "run-1",
 		"protected": []string{"tests/**", "verify.sh"},
 		"rules": []map[string]any{
 			{"tool": "write_file", "path": "src/panel/**", "matches": "rejection ?reason", "message": "Blocked by CL-7: the panel must not show a rejection reason. Remove the text and write the file again."},
 			{"tool": "edit_file", "path": "src/panel/**", "matches": "rejection ?reason", "message": "Blocked by CL-7 (edit)."},
 			{"tool": "write_file", "path": "generated/**", "message": "Generated files are built, not written."},
-		}})
+		},
+	})
 	before := len(w.pod.called())
 	refused := []struct {
 		tool string
@@ -401,8 +412,10 @@ func TestProtectedPathsAndRulesBlockWrites(t *testing.T) {
 func TestOnlyAllowedCommandsRun(t *testing.T) {
 	w := newWorld(t)
 	w.repository("claims-build", nil)
-	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1",
-		"rules": []map[string]any{{"tool": "run_command", "matches": `git commit .*--no-verify`, "message": "Blocked by CL-9: commits must run the hooks. Commit without --no-verify."}}})
+	id := w.devpod(map[string]any{
+		"repository": "claims-build", "work_branch": "agent/a", "run": "run-1",
+		"rules": []map[string]any{{"tool": "run_command", "matches": `git commit .*--no-verify`, "message": "Blocked by CL-9: commits must run the hooks. Commit without --no-verify."}},
+	})
 	run := func(agent, command string) (bool, any, string) {
 		return w.tool(id, "run-1", agent, "run_command", map[string]any{"command": command})
 	}
@@ -710,8 +723,10 @@ func TestDestroyingAPod(t *testing.T) {
 func TestExecRunsACommandWithoutRulesOrActivity(t *testing.T) {
 	w := newWorld(t)
 	w.repository("claims-build", nil)
-	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1",
-		"rules": []map[string]any{{"tool": "run_command", "matches": "verify", "message": "blocked"}}})
+	id := w.devpod(map[string]any{
+		"repository": "claims-build", "work_branch": "agent/a", "run": "run-1",
+		"rules": []map[string]any{{"tool": "run_command", "matches": "verify", "message": "blocked"}},
+	})
 	w.pod.exitCodes["./verify.sh && echo done"] = 3
 	w.advance(10 * time.Minute)
 	status, out := w.call("POST", "/api/devpods/"+id+"/exec", map[string]any{"command": "./verify.sh && echo done", "timeout_seconds": 300})
@@ -788,8 +803,10 @@ func TestPlainRepositoryPushAndPullRequestRecord(t *testing.T) {
 	if err := json.Unmarshal([]byte(w.blobs.get("runs/run-1/pull-request.json")), &record); err != nil {
 		t.Fatal(err)
 	}
-	for key, want := range map[string]any{"repository": "claims-build", "source_branch": "main", "work_branch": "agent/payment-date", "title": "Payment date",
-		"body": "Shows the payment date.", "patch": "runs/run-1/pull-request.patch", "pushed": false, "created": "2026-11-17T09:00:00Z", "created_by_agent": builder} {
+	for key, want := range map[string]any{
+		"repository": "claims-build", "source_branch": "main", "work_branch": "agent/payment-date", "title": "Payment date",
+		"body": "Shows the payment date.", "patch": "runs/run-1/pull-request.patch", "pushed": false, "created": "2026-11-17T09:00:00Z", "created_by_agent": builder,
+	} {
 		if record[key] != want {
 			t.Fatalf("record %s = %v, want %v", key, record[key], want)
 		}
@@ -1097,8 +1114,10 @@ func TestTheMCPServiceIsRegisteredWhenMissing(t *testing.T) {
 	if err := json.Unmarshal(stored, &config); err != nil {
 		t.Fatalf("stored %q: %v", stored, err)
 	}
-	wantTools := []string{"list_files", "read_file", "write_file", "edit_file", "search", "run_command", "report_blocked",
-		"push_branch", "create_pull_request", "update_pull_request", "get_pull_request", "comment_on_pull_request"}
+	wantTools := []string{
+		"list_files", "read_file", "write_file", "edit_file", "search", "run_command", "report_blocked",
+		"push_branch", "create_pull_request", "update_pull_request", "get_pull_request", "comment_on_pull_request",
+	}
 	if config.MCPConfig.Transport != "streamable-http" || config.MCPConfig.URL != "http://tool-gateway:8080/mcp" || !reflect.DeepEqual(config.Allowlist, wantTools) || config.Denylist == nil || len(config.Denylist) != 0 {
 		t.Fatalf("config = %+v", config)
 	}
@@ -1115,8 +1134,10 @@ func TestTheMCPServiceIsRegisteredWhenMissing(t *testing.T) {
 func TestARestartLosesNothing(t *testing.T) {
 	w := newWorld(t)
 	w.repository("claims-build", map[string]any{"approve_publish": true})
-	id := w.devpod(map[string]any{"repository": "claims-build", "work_branch": "agent/a", "run": "run-1", "name": "shared",
-		"protected": []string{"verify.sh"}, "rules": []map[string]any{{"tool": "run_command", "matches": "push", "message": "No pushing."}}})
+	id := w.devpod(map[string]any{
+		"repository": "claims-build", "work_branch": "agent/a", "run": "run-1", "name": "shared",
+		"protected": []string{"verify.sh"}, "rules": []map[string]any{{"tool": "run_command", "matches": "push", "message": "No pushing."}},
+	})
 	w.tool(id, "run-1", builder, "push_branch", nil)
 	w.tool(id, "run-1", builder, "report_blocked", map[string]any{"reason": "Waiting."})
 	w.advance(7 * time.Minute)

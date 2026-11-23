@@ -15,8 +15,10 @@ import (
 	"unicode/utf8"
 )
 
-var skillPathSegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-var skillVersion = regexp.MustCompile(`^v[1-9][0-9]*$`)
+var (
+	skillPathSegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	skillVersion     = regexp.MustCompile(`^v[1-9][0-9]*$`)
+)
 
 type skillToolInput struct {
 	Tool    string                     `json:"tool"`

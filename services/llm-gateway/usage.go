@@ -111,10 +111,12 @@ func usageContextFromRequest(r *http.Request, span trace.Span, id string, at tim
 		modes[key] = value
 	}
 	sc := span.SpanContext()
-	c := usageContext{ID: id, RunID: r.Header.Get("X-Trace-Id"), ExecutionID: r.Header.Get("X-Execution-Id"), ParentExecutionID: r.Header.Get("X-Parent-Execution-Id"), Agent: agent, AgentRef: agentRef, AgentVersion: version,
+	c := usageContext{
+		ID: id, RunID: r.Header.Get("X-Trace-Id"), ExecutionID: r.Header.Get("X-Execution-Id"), ParentExecutionID: r.Header.Get("X-Parent-Execution-Id"), Agent: agent, AgentRef: agentRef, AgentVersion: version,
 		Vendor: selected.provider.Name, Model: selected.model,
 		RequestedModel: requestedModel, Effort: effort, OccurredAt: at, Modes: modes,
-		ActivityID: r.Header.Get("X-Activity-Id"), ActivityAttempt: r.Header.Get("X-Activity-Attempt"), Turn: r.Header.Get("X-Turn"), RequestSettings: requestSettings}
+		ActivityID: r.Header.Get("X-Activity-Id"), ActivityAttempt: r.Header.Get("X-Activity-Attempt"), Turn: r.Header.Get("X-Turn"), RequestSettings: requestSettings,
+	}
 	if sc.IsValid() {
 		c.TraceID = sc.TraceID().String()
 		c.SpanID = sc.SpanID().String()
@@ -217,10 +219,12 @@ func (o *usageObserver) Usage() json.RawMessage {
 }
 
 func normalizeUsage(c usageContext, raw json.RawMessage, complete bool) usageMeasurement {
-	m := usageMeasurement{SchemaVersion: 1, ID: c.ID, Kind: "usage", RunID: c.RunID, ExecutionID: c.ExecutionID, ParentExecutionID: c.ParentExecutionID,
+	m := usageMeasurement{
+		SchemaVersion: 1, ID: c.ID, Kind: "usage", RunID: c.RunID, ExecutionID: c.ExecutionID, ParentExecutionID: c.ParentExecutionID,
 		Agent: c.Agent, AgentVersion: c.AgentVersion, TraceID: c.TraceID, SpanID: c.SpanID, OccurredAt: c.OccurredAt,
 		Vendor: c.Vendor, Model: c.Model, RequestedModel: c.RequestedModel, Effort: c.Effort, Modes: c.Modes,
-		ArtifactID: usageOutboxPrefix + "/" + c.ID + ".json", Status: "reported", Missing: []string{}, RawUsage: raw}
+		ArtifactID: usageOutboxPrefix + "/" + c.ID + ".json", Status: "reported", Missing: []string{}, RawUsage: raw,
+	}
 	m.DurationMS = c.DurationMS
 	if c.RunID == "" {
 		m.Missing = append(m.Missing, "run_id/request attribution omitted")

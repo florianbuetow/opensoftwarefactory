@@ -259,8 +259,10 @@ func (s *service) gitTool(ctx context.Context, p devPod, in toolInput) (any, err
 			return nil, errors.New(noPullRequest)
 		}
 		pr := *p.PullRequest
-		answer := map[string]any{"pull_request": pr.Object, "title": pr.Title, "body": pr.Body, "source_branch": p.SourceBranch,
-			"work_branch": p.WorkBranch, "pushed": p.Pushed, "created": pr.Created, "comments": orEmpty(pr.Comments)}
+		answer := map[string]any{
+			"pull_request": pr.Object, "title": pr.Title, "body": pr.Body, "source_branch": p.SourceBranch,
+			"work_branch": p.WorkBranch, "pushed": p.Pushed, "created": pr.Created, "comments": orEmpty(pr.Comments),
+		}
 		remote, err := s.provider(repo).read(ctx, repo, pr)
 		if err != nil {
 			return nil, fmt.Errorf("get_pull_request failed: %v", err)
@@ -342,9 +344,11 @@ func (s *service) storePullRequest(ctx context.Context, p devPod, repo repositor
 		return nil, fmt.Errorf("the commits of the work branch could not be read: %v", err)
 	}
 	pr.Run, pr.Object = run, "runs/"+run+"/pull-request.json"
-	record := pullRequestRecord{Repository: p.Repository, SourceBranch: p.SourceBranch, WorkBranch: p.WorkBranch, Title: pr.Title, Body: pr.Body,
+	record := pullRequestRecord{
+		Repository: p.Repository, SourceBranch: p.SourceBranch, WorkBranch: p.WorkBranch, Title: pr.Title, Body: pr.Body,
 		Commits: orEmpty(changes.Commits), Pushed: p.Pushed, Created: pr.Created, CreatedByAgent: pr.CreatedByAgent, Kind: pr.Kind, DevPod: p.ID,
-		Number: pr.Number, URL: pr.URL, Updated: s.now(), Comments: pr.Comments}
+		Number: pr.Number, URL: pr.URL, Updated: s.now(), Comments: pr.Comments,
+	}
 	if repo.Kind == "plain" {
 		// The patch is the one piece of repository content that may be stored: it is how the
 		// work leaves a repository without pull requests.
@@ -379,8 +383,10 @@ func (s *service) requestPublish(ctx context.Context, p devPod, in toolInput, ki
 				return nil
 			}
 		}
-		p.PublishRequests = append(p.PublishRequests, publishRequest{N: len(p.PublishRequests) + 1, Kind: kind, Title: title, Body: body,
-			State: "pending", Run: in.Run, Agent: in.Agent, Created: s.now()})
+		p.PublishRequests = append(p.PublishRequests, publishRequest{
+			N: len(p.PublishRequests) + 1, Kind: kind, Title: title, Body: body,
+			State: "pending", Run: in.Run, Agent: in.Agent, Created: s.now(),
+		})
 		return nil
 	})
 	if err != nil {

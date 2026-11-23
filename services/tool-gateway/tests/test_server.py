@@ -1,9 +1,8 @@
 import json
 from pathlib import Path
 
-from starlette.testclient import TestClient
-
 from server import build_app, load_tools, public_functions
+from starlette.testclient import TestClient
 
 HEADERS = {
     "Content-Type": "application/json",

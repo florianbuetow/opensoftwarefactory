@@ -10,8 +10,10 @@ import (
 	"time"
 )
 
-const chatAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":[],"max_retries":0}`
-const chatLogID = "user-sessions/t1/talk/chats/main.json"
+const (
+	chatAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":[],"max_retries":0}`
+	chatLogID     = "user-sessions/t1/talk/chats/main.json"
+)
 
 func chatBody() map[string]string {
 	return map[string]string{

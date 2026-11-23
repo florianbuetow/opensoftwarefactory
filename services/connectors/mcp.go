@@ -11,10 +11,12 @@ import (
 	"time"
 )
 
-var factoryTools = []string{"read_trace", "read_trace_artifact"}
-var previousFactoryTools = []string{"read_trace", "get_artifact", "list_artifacts"}
-var factoryDeniedTools = []string{"write_file", "edit_file", "delete_file", "run_command", "push_branch", "create_pull_request"}
-var skillTools = []string{"read_skill", "run_skill_script"}
+var (
+	factoryTools         = []string{"read_trace", "read_trace_artifact"}
+	previousFactoryTools = []string{"read_trace", "get_artifact", "list_artifacts"}
+	factoryDeniedTools   = []string{"write_file", "edit_file", "delete_file", "run_command", "push_branch", "create_pull_request"}
+	skillTools           = []string{"read_skill", "run_skill_script"}
+)
 
 // registerUntilDone makes sure the MCP gateway knows the service devpod, and keeps trying
 // until the gateway answers.

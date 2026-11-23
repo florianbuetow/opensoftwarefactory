@@ -469,10 +469,12 @@ func TestOpenSessionNamesInputFilesByContent(t *testing.T) {
 	res, err := a.OpenSession(context.Background(), OpenSessionRequest{
 		TraceID: "t", Session: "user-sessions/t/chat",
 		Inputs: []Item{
-			{Source: "a", Artifact: "runs/t/a", Round: 1}, {Source: "route/b", Artifact: "runs/t/b", Round: 1},
+			{Source: "a", Artifact: "runs/t/a", Round: 1},
+			{Source: "route/b", Artifact: "runs/t/b", Round: 1},
 			{Source: InputSource, Artifact: "runs/t/input", Round: 1},
 			// A source that appears twice gets the round in its file names.
-			{Source: "c", Artifact: "runs/t/a", Round: 1}, {Source: "c", Artifact: "runs/t/b", Round: 2},
+			{Source: "c", Artifact: "runs/t/a", Round: 1},
+			{Source: "c", Artifact: "runs/t/b", Round: 2},
 		},
 	})
 	if err != nil {
@@ -595,8 +597,10 @@ func TestStepActivityLoadsInputsAndStoresOutput(t *testing.T) {
 	act := StepActivity(store, "joiner", func(_ context.Context, _ StepRequest, in [][]byte) ([]byte, error) {
 		return append(append([]byte{}, in[0]...), in[1]...), nil
 	})
-	res, err := act(context.Background(), StepRequest{TraceID: "t", StepID: "c", OutputArtifact: "runs/t/c",
-		Inputs: []Item{{Source: "a", Artifact: "runs/t/a", Round: 1}, {Source: "b", Artifact: "runs/t/b", Round: 1}}})
+	res, err := act(context.Background(), StepRequest{
+		TraceID: "t", StepID: "c", OutputArtifact: "runs/t/c",
+		Inputs: []Item{{Source: "a", Artifact: "runs/t/a", Round: 1}, {Source: "b", Artifact: "runs/t/b", Round: 1}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

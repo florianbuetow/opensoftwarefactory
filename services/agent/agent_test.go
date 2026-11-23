@@ -219,8 +219,10 @@ func respond(js string) func(http.ResponseWriter, map[string]any) {
 	}
 }
 
-const toolCallResponse = `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"docs__search","arguments":"{\"q\":\"auth\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
-const finalResponse = `{"choices":[{"message":{"role":"assistant","content":"the plan"}}],"usage":{"prompt_tokens":20,"completion_tokens":7,"total_tokens":27}}`
+const (
+	toolCallResponse = `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"docs__search","arguments":"{\"q\":\"auth\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
+	finalResponse    = `{"choices":[{"message":{"role":"assistant","content":"the plan"}}],"usage":{"prompt_tokens":20,"completion_tokens":7,"total_tokens":27}}`
+)
 
 func TestPromptEvidencePrefixPreservesNestedStepPath(t *testing.T) {
 	if got := promptEvidencePrefix("runs/run-1/route/research", 3); got != "runs/run-1/_evidence/route/research/attempt-3" {

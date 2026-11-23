@@ -43,6 +43,7 @@ func (s *service) backfillRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/backfills/{id}", s.getBackfill)
 	mux.HandleFunc("POST /api/backfills/{id}/batch", s.backfillBatch)
 }
+
 func (s *service) startBackfill(w http.ResponseWriter, r *http.Request) {
 	var in backfillStart
 	if err := decodeStrictJSON(w, r, &in); err != nil {
@@ -84,6 +85,7 @@ func (s *service) startBackfill(w http.ResponseWriter, r *http.Request) {
 	job.Revision = rev
 	writeJSON(w, 202, job)
 }
+
 func (s *service) getBackfill(w http.ResponseWriter, r *http.Request) {
 	object, err := s.readObject(r.Context(), backfillPrefix+"/"+r.PathValue("id")+".json")
 	if errors.Is(err, errNotFound) {
@@ -102,6 +104,7 @@ func (s *service) getBackfill(w http.ResponseWriter, r *http.Request) {
 	job.Revision = object.Revision
 	writeJSON(w, 200, job)
 }
+
 func (s *service) backfillBatch(w http.ResponseWriter, r *http.Request) {
 	var in backfillBatch
 	if err := decodeStrictJSON(w, r, &in); err != nil {
@@ -293,7 +296,8 @@ func legacyUsageMeasurement(run legacyRun, artifact, agent, effort string, event
 	TraceID string          `json:"trace_id"`
 	SpanID  string          `json:"span_id"`
 	Usage   json.RawMessage `json:"usage"`
-}, index int) Measurement {
+}, index int,
+) Measurement {
 	occurred := event.Started
 	if occurred.IsZero() {
 		occurred = run.Started
@@ -312,6 +316,7 @@ func legacyUsageMeasurement(run legacyRun, artifact, agent, effort string, event
 	applyLegacyUsage(&m, event.Usage, event.Kind == "legacy_aggregate")
 	return m
 }
+
 func applyLegacyUsage(m *Measurement, raw json.RawMessage, aggregate bool) {
 	if len(raw) == 0 {
 		m.Missing = append(m.Missing, "raw_usage/legacy evidence unavailable", "input_tokens/legacy evidence unavailable", "output_tokens/legacy evidence unavailable", "cached_input_tokens/legacy evidence unavailable")
@@ -353,6 +358,7 @@ func applyLegacyUsage(m *Measurement, raw json.RawMessage, aggregate bool) {
 		}
 	}
 }
+
 func (s *service) enqueueBackfillMeasurement(ctx context.Context, m Measurement, generation int64) (int, error) {
 	objectID := measurementObject(m.Kind, m.ID)
 	if existing, err := s.readObject(ctx, objectID); err == nil {
@@ -371,6 +377,7 @@ func (s *service) enqueueBackfillMeasurement(ctx context.Context, m Measurement,
 	}
 	return 1, nil
 }
+
 func (s *service) backfillGenerationComplete(ctx context.Context, generation int64) (bool, error) {
 	ids, err := s.listObjects(ctx, operationPrefix)
 	if err != nil {

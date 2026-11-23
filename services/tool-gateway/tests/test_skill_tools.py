@@ -2,10 +2,9 @@ import inspect
 import json
 from pathlib import Path
 
+import factory
 import httpx
 import pytest
-
-import factory
 from server import load_tools, public_functions, reporting_errors
 
 TOOLS_FILE = Path(__file__).parent.parent / "tools" / "tools.py"

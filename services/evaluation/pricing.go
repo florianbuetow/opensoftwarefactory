@@ -96,6 +96,7 @@ func (s *service) getPrice(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", quoteETag(object.Revision))
 	writeJSON(w, 200, p)
 }
+
 func (s *service) listPrices(w http.ResponseWriter, r *http.Request) {
 	p, err := s.loadPrices(r.Context())
 	if err != nil {
@@ -104,6 +105,7 @@ func (s *service) listPrices(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"prices": p})
 }
+
 func (s *service) loadPrices(ctx context.Context) ([]Price, error) {
 	ids, err := s.listObjects(ctx, pricePrefix)
 	if err != nil {
@@ -141,6 +143,7 @@ func validateConversion(c *Conversion, id string) error {
 	}
 	return nil
 }
+
 func (s *service) putConversion(w http.ResponseWriter, r *http.Request) {
 	var c Conversion
 	if err := decodeStrictJSON(w, r, &c); err != nil {
@@ -187,6 +190,7 @@ func (s *service) putConversion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", quoteETag(rev))
 	writeJSON(w, 200, c)
 }
+
 func (s *service) getConversion(w http.ResponseWriter, r *http.Request) {
 	o, err := s.readObject(r.Context(), conversionPrefix+"/"+r.PathValue("id")+".json")
 	if errors.Is(err, errNotFound) {
@@ -206,6 +210,7 @@ func (s *service) getConversion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", quoteETag(o.Revision))
 	writeJSON(w, 200, c)
 }
+
 func (s *service) listConversions(w http.ResponseWriter, r *http.Request) {
 	c, err := s.loadConversions(r.Context())
 	if err != nil {
@@ -214,6 +219,7 @@ func (s *service) listConversions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"conversions": c})
 }
+
 func (s *service) loadConversions(ctx context.Context) ([]Conversion, error) {
 	ids, err := s.listObjects(ctx, conversionPrefix)
 	if err != nil {
