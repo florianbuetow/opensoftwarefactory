@@ -83,6 +83,8 @@
   .eyebrow {
     display: inline-block;
     margin: 0 auto 18px;
+    max-width: calc(100% - 40px);
+    text-wrap: balance;
     padding: 6px 14px;
     border-radius: 999px;
     background: var(--pill);
@@ -204,9 +206,8 @@
   .start pre { display: inline-block; max-width: 100%; overflow-x: auto; margin-top: 28px; text-align: left; background: var(--pill); border: 1px solid var(--line); border-radius: 16px; padding: 20px 28px; font: 15px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
   .foot {
     max-width: 1200px;
-    margin: 72px auto 0;
-    padding: 36px 24px 64px;
-    border-top: 1px solid var(--line);
+    margin: 0 auto;
+    padding: 20px 24px 32px;
     color: var(--muted);
     font-size: 14px;
     line-height: 1.5;
@@ -279,7 +280,7 @@
 </header>
 
 <main>
-  <a class="eyebrow" href="#limitations">Educational tool · Local setup only — not for production</a>
+  <a class="eyebrow" href="#limitations">Learn to work with and use a software factory that runs on your local machine</a>
   <h1>An Open Software Factory</h1>
 
   <div class="stage">
@@ -400,7 +401,7 @@
   <section class="topic t4 light" id="sec-4">
     <div>
       <h2>Human in the Loop</h2>
-      <p>A person is a first-class step in any workflow—whether reviewing and gating work before it moves forward or refining artifacts interactively with agents.</p>
+      <p>A person is a first-class step in any workflow - whether reviewing and gating work before it moves forward or refining artifacts interactively with agents.</p>
     </div>
     <ul>
       <li><strong>Human review gates:</strong> Pause a workflow until someone approves or rejects on Decisions; rejections can stop the run or route back to an earlier step, and repository publishes can require approval first.</li>
@@ -464,22 +465,23 @@
     </div>
     <ul>
       <li>The trace ID is the Temporal workflow ID; every artifact carries its creator and trace ID, including nested workflows.</li>
-      <li>Judges write JSON artifacts mapped to named metrics—fix a mapping and re-extract without another model call.</li>
+      <li>Judges write JSON artifacts mapped to named metrics - fix a mapping and re-extract without another model call.</li>
       <li>Update a model price or EUR/USD rate to recalculate costs cleanly without altering usage records or double-charging.</li>
     </ul>
   </section>
 
   <section class="start" id="limitations">
     <h2>Limitations</h2>
-    <p>The factory is not meant to scale to production environments. It is an educational tool with no production hardening, built to run on a single-node KIND cluster on your workstation (defaulting to Colima's Docker socket).</p>
+    <p>The factory is not meant to scale to production environments. It is an educational tool with no production hardening, built to run on a single-node KIND cluster on your workstation.</p>
     <p>Carrying a skill also lets an agent run that skill's scripts inside its dev pod, where scripts can modify any file in <code>/workspace</code>.</p>
   </section>
 
   <section class="start" id="get-started">
     <h2>Run it on your machine</h2>
-    <p>Needs Colima, the Docker CLI, KIND, <code>kubectl</code>, <code>just</code>, Node.js 24+, Go 1.26+, <code>uv</code>, and LM Studio running locally with <code>qwen3.5-9b-mlx</code> loaded (or another OpenAI-compatible model provider configured in <code>services/llm-gateway/config/config.yaml</code>).</p>
+    <p>Needs Colima, the Docker CLI, KIND, <code>kubectl</code>, <code>just</code>, Node.js 24+, Go 1.26+, <code>uv</code>, and an OpenAI-compatible LLM API such as LM Studio or Ollama.</p>
     <pre>git clone https://github.com/florianbuetow/opensoftwarefactory.git
 cd opensoftwarefactory
+claude "Configure the LLM gateway to use my OpenAI-compatible LLM API"
 just start    # bring the factory up from any state
 just info     # show each service's address and status
 just status   # show pods and services
@@ -498,7 +500,7 @@ just help     # list every command</pre>
       <p>We don't accept code changes. We accept natural-language requests for changes that specify behaviors, functionality, and features.</p>
     </div>
     <ul>
-      <li>Describe the behavior, functionality, or feature you want—a request may include implementation suggestions.</li>
+      <li>Describe the behavior, functionality, or feature you want - a request may include implementation suggestions.</li>
       <li>The repository maintainers make all code changes after reviewing your request.</li>
     </ul>
   </section>
