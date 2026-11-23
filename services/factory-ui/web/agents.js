@@ -141,6 +141,8 @@ function agentFields(area, areas = {}) {
   const model = h("select", { className: "model-select" });
   const modelDot = h("span", { className: "model-dot unknown", "aria-hidden": "true" }, "●");
   const modelControl = h("div", { className: "model-select-control" }, modelDot, model);
+  // The dot in the select is small: the word beside it says whether the gateway serves the model.
+  const modelState = h("span", { className: "model-state", role: "status" });
   const refreshButton = iconButton("refresh", "Refresh models");
   const effort = h("select");
   const retries = h("input", { type: "number", min: 0, max: 100, placeholder: "0", autocomplete: "off" });
@@ -194,6 +196,8 @@ function agentFields(area, areas = {}) {
     const selected = known.find((m) => m.id === current);
     modelDot.className = `model-dot ${!Array.isArray(models) ? "unknown" : selected?.available ? "available" : "unavailable"}`;
     modelDot.hidden = !current;
+    const word = !Array.isArray(models) ? ["idle", "Unknown"] : !selected ? ["failed", "Not configured"] : selected.available ? ["done", "Available"] : ["failed", "Unavailable"];
+    modelState.replaceChildren(...(current ? [statusChip(word[0], word[1])] : []));
   };
   const renderEffort = (current) => {
     const values = ["", "none", "low", "medium", "high"]; // none: the model answers without thinking first
@@ -383,7 +387,7 @@ function agentFields(area, areas = {}) {
   model.id = "agent-model";
   const modelField = h("div", { className: "field model-field" },
     h("label", { htmlFor: model.id, title: "The model the agent calls, by its name in the LLM gateway" }, "Model"),
-    h("div", { className: "row" }, modelControl, refreshButton));
+    h("div", { className: "row" }, modelControl, refreshButton, modelState));
   const toolsField = field("Tools", tools, "Choose the tools this agent can call", "tools");
   toolsField.classList.add("agent-tools");
   const policiesField = field("Policies", policies, "Choose policies to inject into the system prompt", "policies");
@@ -395,18 +399,24 @@ function agentFields(area, areas = {}) {
       unpack, "Unpack inputs into the first message"));
   const commandsField = field("Commands", commands, "The commands this agent may run in a dev pod, one pattern per line; * stands for any text, and a command must match one pattern completely. Nothing listed means no command", "commands");
   commandsField.classList.add("agent-commands");
+  // The settings come in groups of at most four, each under its name, instead of one long row.
+  const group = (name, ...fields) => h("div", { className: "settings-group", role: "group", "aria-label": name },
+    h("div", { className: "settings-group-title" }, name), h("div", { className: "settings-group-fields" }, ...fields));
   box.append(
-    modelField,
-    field("Effort", effort, "How much the model thinks before it answers. None skips the thinking; the others are sent to the model as reasoning_effort", "effort"),
-    field("Temperature", temperature, "Sent to the model as temperature, from 0 to 2; the model's default when empty", "temperature"),
-    field("Max retries", retries, "How many more model calls a run may make after the first, such as after a tool call", "retries"),
-    toolsField,
-    policiesField,
-    field("Skills", skills, "Choose skills and their pinned versions", "skills"),
-    field("Script timeout", scriptTimeout, "Time limit for each skill script, in seconds", "skill-script-timeout", h("span", { "aria-hidden": "true" }, "s")),
-    field("Description", description, "What the agent is for, in a few words", "description"),
-    unpackField,
-    commandsField,
+    group("Model",
+      modelField,
+      field("Effort", effort, "How much the model thinks before it answers. None skips the thinking; the others are sent to the model as reasoning_effort", "effort"),
+      field("Temperature", temperature, "Sent to the model as temperature, from 0 to 2; the model's default when empty", "temperature"),
+      field("Max retries", retries, "How many more model calls a run may make after the first, such as after a tool call", "retries")),
+    group("Tools and context",
+      toolsField,
+      policiesField,
+      field("Skills", skills, "Choose skills and their pinned versions", "skills"),
+      field("Script timeout", scriptTimeout, "Time limit for each skill script, in seconds", "skill-script-timeout", h("span", { "aria-hidden": "true" }, "s"))),
+    group("Purpose and input",
+      field("Description", description, "What the agent is for, in a few words", "description"),
+      unpackField),
+    group("Dev pod", commandsField),
   );
   refresh();
   fetchModels();

@@ -28,6 +28,10 @@ init:
     echo ""
     trap 'printf "\033[0;31m✗ init failed\033[0m\n" >&2' ERR
     printf "\033[0;34m=== Initializing local configuration ===\033[0m\n"
+    if ! command -v rg >/dev/null 2>&1; then
+        printf 'Required tool is missing: rg (ripgrep)\n' >&2
+        exit 1
+    fi
     node scripts/init-llm-gateway.js
     node scripts/init-openobserve.js
     node scripts/init-orchestrator.js
@@ -213,7 +217,7 @@ help:
     @printf "  %-38s %s\n" "just code-audit" "Audit Go and Python dependencies"
     @printf "  %-38s %s\n" "just code-architecture" "Run arch-go and pytestarch"
     @printf "  %-38s %s\n" "just code-stats" "Write a source statistics report with pygount"
-    @printf "  %-38s %s\n" "just lint" "Run golangci-lint"
+    @printf "  %-38s %s\n" "just code-lint" "Run golangci-lint"
     @echo ""
     @printf "\033[0;33mCI & Testing:\033[0m\n"
     @printf "  %-38s %s\n" "just check" "Check scripts, manifests, Go race tests, and Python tests"
@@ -640,7 +644,7 @@ check:
     node --check scripts/migrate-unpack-inputs.js
     node --check scripts/migrate-unpack-inputs.test.js
     for script in services/factory-ui/web/*.js; do node --check "$script"; done
-    node --test scripts/auxiliary-targets.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
+    node --test scripts/auxiliary-targets.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
     kubectl kustomize infra/kubernetes/overlays/local >/dev/null
     for module in llm-gateway blobstore mcp-gateway connectors orchestrator registry evaluation agent factory-ui; do
         test -z "$(gofmt -l "services/$module")"
@@ -721,7 +725,7 @@ code-audit:
     @bash scripts/ci-python.sh audit
 
 # Run the template's Go meta-linter.
-lint:
+code-lint:
     @bash scripts/ci-go.sh lint
 
 # Run Go and Python architecture checks.
@@ -746,7 +750,7 @@ test-coverage:
     @bash scripts/ci-go.sh coverage
     @bash scripts/ci-python.sh coverage
 
-ci-checks := "ci-check ci-init code-format code-style code-typecheck code-security code-deptry code-spell code-semgrep code-audit test code-architecture lint code-lspchecks test-coverage"
+ci-checks := "ci-check ci-init code-format code-style code-typecheck code-security code-deptry code-spell code-semgrep code-audit test code-architecture code-lint code-lspchecks test-coverage"
 
 alias ci-quiet := ci
 

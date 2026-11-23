@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+os.environ["DEVPOD_WORKSPACE"] = "/workspace"
 import podhttp  # noqa: E402
 import toolserver  # noqa: E402
 from podhttp import JsonObject, RefusalError  # noqa: E402
@@ -137,7 +138,6 @@ class FileTest(WorkspaceCase):
         self.assertEqual(self.get("docs/new/a.md"), "changed")
         self.refused(toolserver.write_file, {"path": "x.txt"}, "content")
 
-    @unittest.skipIf(os.geteuid() == 0, "root can write everywhere")
     def test_write_to_a_read_only_file_names_protection(self):
         self.put("verify.sh", "#!/bin/sh\n")
         os.chmod(os.path.join(self.root, "verify.sh"), 0o444)
@@ -161,7 +161,6 @@ class FileTest(WorkspaceCase):
         self.assertEqual(self.get("a.txt"), "alpha beta\ngamma beta\n")
 
 
-@unittest.skipUnless(shutil.which("rg"), "ripgrep is not installed")
 class SearchTest(WorkspaceCase):
     def test_search_finds_lines_and_skips_git(self):
         self.put(".git/notes", "status_panel\n")
@@ -266,7 +265,7 @@ class SkillScriptTest(WorkspaceCase):
 
     def test_runs_directly_with_arguments_in_workspace_and_cleans_up(self):
         def scratch():
-            return {name for name in os.listdir("/tmp") if name.startswith("factory-skill-")}
+            return {name for name in os.listdir(tempfile.gettempdir()) if name.startswith("factory-skill-")}
 
         before = scratch()
         arguments = ["a b; c", '"quotes"', "$(echo not-expanded)", "line\nbreak"]
@@ -312,7 +311,7 @@ class SkillScriptTest(WorkspaceCase):
             paths = [result["stdout"].strip() for result in executor.map(self.run_script, (script, script))]
         self.assertNotEqual(paths[0], paths[1])
         for path in paths:
-            self.assertTrue(path.startswith("/tmp/factory-skill-"))
+            self.assertTrue(path.startswith(os.path.join(tempfile.gettempdir(), "factory-skill-")))
             self.assertFalse(os.path.exists(os.path.dirname(os.path.dirname(path))))
 
     def test_finishing_the_script_kills_background_children(self):

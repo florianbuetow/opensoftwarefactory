@@ -168,7 +168,7 @@ function page() {
   const connectors = read("connectors.js"), app = read("app.js");
   const shared = [app.slice(app.indexOf("const titleCase"), app.indexOf("// midTruncate")), app.slice(app.indexOf("// createTree renders"), app.indexOf("// openDialog shows"))].join("\n");
   const markdown = app.slice(app.indexOf("function markdownInline("), app.indexOf("function renderMarkdown("));
-  vm.runInNewContext(`${shared}\n${read("workflowref.js")}\n${markdown}\n${connectors.slice(0, connectors.indexOf("// ---- Connectors page ----"))}\n${read("workflows.js")}`, context);
+  vm.runInNewContext(`${shared}\n${read("workflowref.js")}\n${markdown}\n${connectors.slice(0, connectors.indexOf("// ---- Connectors page ----"))}\n${read("graph.js")}\n${read("workflows.js")}`, context);
   const head = selectors.get("#tab-workflows .canvas-head");
   const ui = {
     context, server, notices, questions, inputs, answers, byId, dialogs,
@@ -194,7 +194,9 @@ function page() {
     async menu(label, node = byId("canvas")) {
       menus.length = 0;
       await fire(node, "contextmenu");
-      const item = menus.at(-1).find((entry) => Array.isArray(entry) && entry[0] === label);
+      // An item may sit in a submenu ([label, null, …, children]), such as the Add items under Add step.
+      const flat = (list) => list.flatMap((entry) => (Array.isArray(entry) && Array.isArray(entry[5]) ? [entry, ...flat(entry[5])] : [entry]));
+      const item = flat(menus.at(-1)).find((entry) => Array.isArray(entry) && entry[0] === label);
       assert.ok(item, `menu item ${label}`);
       return item;
     },
@@ -412,7 +414,7 @@ test("the page opens the newest version, lists the versions, and saves nothing b
   assert.deepEqual(ui.posts(), [], "loading writes nothing");
   // A workflow tile names the workflow and the version it is pinned to.
   const build = find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "build");
-  assert.equal(build.attrs["aria-label"], "Step build: Inner v1");
+  assert.equal(build.attrs["aria-label"], "Step Build: Inner v1");
 });
 
 test("an edit stays unsaved until Save, which stores the next version and shows it", async () => {
@@ -646,17 +648,17 @@ test("rename, duplicate and delete go to the orchestrator", async () => {
   assert.equal(rename.path, "/api/orchestrator/workflows/inner/rename");
   assert.deepEqual(rename.body, { name: "ecc/core" });
   assert.equal(ui.dialog(), undefined);
-  assert.deepEqual(ui.names(), ["Ecc", "Core", "Demo", "Demo Copy"]);
+  assert.deepEqual(ui.names(), ["ECC", "Core", "Demo", "Demo Copy"]);
   assert.equal(ui.selectedRow(), "Core");
   assert.equal(ui.notices.at(-1).text, "Renamed");
   // A name taken already is refused under the field, names that differ only in case included.
   await ui.run("Rename workflow…", ui.row("Demo Copy"));
   await ui.submit({ "wf-name-group": "ECC", "wf-name-name": "core" });
-  assert.equal(find(ui.dialog().body, (n) => n.className === "error-text" && n.textContent).textContent, "There is already a workflow named Ecc / Core.");
+  assert.equal(find(ui.dialog().body, (n) => n.className === "error-text" && n.textContent).textContent, "There is already a workflow named ECC / Core.");
   ui.dialog().close();
   await fire(ui.row("Demo"), "click");
   const build = find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "build");
-  assert.equal(build.attrs["aria-label"], "Step build: Ecc / Core v1", "the node follows the new name and keeps its version");
+  assert.equal(build.attrs["aria-label"], "Step Build: ECC / Core v1", "the node follows the new name and keeps its version");
   assert.equal(ui.save().disabled, true, "following a rename is no unsaved edit");
   // Delete asks first, then removes every version; the next workflow in its group takes its place.
   ui.answers.confirm = false;
@@ -667,18 +669,18 @@ test("rename, duplicate and delete go to the orchestrator", async () => {
   await ui.run("Delete workflow");
   assert.equal(ui.posts().at(-1).method, "DELETE");
   assert.equal(ui.posts().at(-1).path, "/api/orchestrator/workflows/demo");
-  assert.deepEqual(ui.names(), ["Ecc", "Core", "Demo Copy"]);
+  assert.deepEqual(ui.names(), ["ECC", "Core", "Demo Copy"]);
   assert.equal(ui.selectedRow(), "Demo Copy");
   assert.equal(ui.notices.at(-1).text, "Deleted");
   // A duplicate stays in the group of its original.
   await ui.run("Duplicate workflow", ui.row("Core"));
   assert.equal(ui.posts().at(-1).path, "/api/orchestrator/workflows/ecc%2Fcore-copy/versions");
   assert.equal(ui.posts().at(-1).body.name, "ecc/core-copy");
-  assert.deepEqual(ui.names(), ["Ecc", "Core", "Core Copy", "Demo Copy"]);
+  assert.deepEqual(ui.names(), ["ECC", "Core", "Core Copy", "Demo Copy"]);
   assert.equal(ui.selectedRow(), "Core Copy");
   // Delete group asks first and deletes every workflow in it; the workflow after the group takes its place.
-  await ui.run("Delete group", ui.row("Ecc"));
-  assert.equal(ui.questions.at(-1), "Delete Ecc with its 2 workflows and all their versions? [Delete]");
+  await ui.run("Delete group", ui.row("ECC"));
+  assert.equal(ui.questions.at(-1), "Delete ECC with its 2 workflows and all their versions? [Delete]");
   assert.deepEqual(ui.posts().filter((c) => c.method === "DELETE").slice(-2).map((c) => c.path).sort(), ["/api/orchestrator/workflows/ecc%2Fcore", "/api/orchestrator/workflows/ecc%2Fcore-copy"]);
   assert.deepEqual(ui.names(), ["Demo Copy"]);
   assert.equal(ui.selectedRow(), "Demo Copy");
@@ -692,13 +694,13 @@ test("the sidebar is a tree of groups whose folders start closed, but the group 
   for (const name of ["ecc/ECC-plan", "ecc/review/code-review", "ops/deploy"]) ui.server.store[name] = flow(name);
   await ui.open("/ecc%2Freview%2Fcode-review/plan");
   // In every group its subgroups first, then its workflows; a row shows the last part in title case.
-  assert.deepEqual(ui.names(), ["Ecc", "Review", "Code Review", "ECC Plan", "Ops", "Demo", "Inner"]);
+  assert.deepEqual(ui.names(), ["ECC", "Review", "Code Review", "ECC Plan", "Ops", "Demo", "Inner"]);
   assert.equal(ui.selectedRow(), "Code Review");
   assert.equal(ui.context.location.hash, "#workflows/ecc%2Freview%2Fcode-review/plan");
-  assert.deepEqual(ui.rows().filter((r) => ["true", "false"].includes(r.attrs["aria-expanded"])).map((r) => [r.textContent, r.attrs["aria-expanded"]]), [["Ecc", "true"], ["Review", "true"], ["Ops", "false"]], "every group has a triangle");
+  assert.deepEqual(ui.rows().filter((r) => ["true", "false"].includes(r.attrs["aria-expanded"])).map((r) => [r.textContent, r.attrs["aria-expanded"]]), [["ECC", "true"], ["Review", "true"], ["Ops", "false"]], "every group has a triangle");
   // A click on a group opens it and keeps the workflow on the canvas.
   await fire(ui.row("Ops"), "click");
-  assert.deepEqual(ui.names(), ["Ecc", "Review", "Code Review", "ECC Plan", "Ops", "Deploy", "Demo", "Inner"]);
+  assert.deepEqual(ui.names(), ["ECC", "Review", "Code Review", "ECC Plan", "Ops", "Deploy", "Demo", "Inner"]);
   assert.equal(ui.selectedRow(), "Ops");
   await ui.run("Add agent");
   assert.equal(ui.selectedRow(), "Ops", "an edit leaves the group picked");
@@ -714,23 +716,23 @@ test("the sidebar is a tree of groups whose folders start closed, but the group 
   assert.equal(ui.selectedRow(), "ECC Plan");
   assert.equal(ui.context.location.hash, "#workflows/ecc%2FECC-plan/plan");
   // New group… adds an empty group in this visit; it is stored once it holds a workflow.
-  await ui.run("New group…", ui.row("Ecc"));
+  await ui.run("New group…", ui.row("ECC"));
   assert.equal(ui.dialog().title, "New group");
   ui.field("wf-group-name").value = "Plans";
   await fire(ui.dialog().footer.find((b) => b.className === "primary"), "click");
   assert.equal(ui.selectedRow(), "Plans");
-  assert.deepEqual(ui.names().slice(0, 4), ["Ecc", "Plans", "Review", "Code Review"]);
+  assert.deepEqual(ui.names().slice(0, 4), ["ECC", "Plans", "Review", "Code Review"]);
   await ui.run("New workflow", ui.row("Plans"));
-  assert.equal(ui.field("wf-name-group").value, "Ecc / Plans");
+  assert.equal(ui.field("wf-name-group").value, "ECC / Plans");
   await ui.submit({ "wf-name-name": "Q3 Plan" });
   assert.equal(ui.selectedRow(), "Q3 Plan");
   assert.equal(ui.context.location.hash, "#workflows/ecc%2Fplans%2Fq3-plan");
   // The flat pickers name a grouped workflow with its groups.
-  assert.equal(vm.runInContext("titleCase", ui.context)("ecc/review/code-review"), "Ecc / Review / Code Review");
+  assert.equal(vm.runInContext("titleCase", ui.context)("ecc/review/code-review"), "ECC / Review / Code Review");
   await fire(ui.row("Demo"), "click");
   await ui.open("/demo/build");
   const nested = find(ui.byId("inspector"), (n) => n.dataset.field === "workflow");
-  assert.deepEqual(nested.children.map((o) => o.textContent).sort(), ["Ecc / ECC Plan", "Ecc / Review / Code Review", "Inner", "Ops / Deploy"]);
+  assert.deepEqual(nested.children.map((o) => o.textContent).sort(), ["ECC / ECC Plan", "ECC / Review / Code Review", "Inner", "Ops / Deploy"]);
 });
 
 test("the node panel of a workflow step has a Workflow and a Version select", async () => {
@@ -790,7 +792,7 @@ test("a team's workflow member is pinned, named by its workflow, and can move to
   assert.equal(find(ui.byId("inspector"), (n) => n.tag === "button" && ["Make lead", "Remove"].includes(n.textContent)), undefined, "member actions stay in the context menu only");
   const member = () => find(ui.byId("inspector"), (n) => n.dataset.member === "inner");
   assert.equal(member().textContent, "innerWorkflow v1", "the name without the version, then the pinned version");
-  assert.equal(find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "team").attrs["aria-label"], "Step team: demo/coder@v1 · 2 members");
+  assert.equal(find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "team").attrs["aria-label"], "Step Team: demo/coder@v1 · 2 members");
   // "+" offers the workflows that are not members yet, pinned to their newest version.
   const menus = [];
   ui.context.openMenu = (_ev, items) => menus.push(items);
@@ -1171,4 +1173,51 @@ test("a back edge the orchestrator would refuse stays and shows as a problem, an
   await ui.run("Delete step", find(ui.byId("canvas"), (n) => n.attrs["data-step"] === "make"));
   await ui.open("/ship/review");
   assert.deepEqual(panelField(ui, "on_reject").children.map((o) => [o.textContent, !!o.selected]), [["Nobody: a rejection ends the run", false]], "nothing is chosen, so the first option shows");
+});
+
+test("Connect to… draws and removes a step's arrows from the keyboard, with the drop's rules", async () => {
+  const ui = page();
+  await ui.open();
+  await ui.run("Add agent");
+  const tile = (id) => find(ui.byId("canvas"), (n) => n.attrs["data-step"] === id);
+  await ui.run("Connect to…", tile("plan"));
+  const dialog = ui.dialog();
+  assert.equal(dialog.title, "Connect Plan to");
+  const options = all(dialog.body).filter((n) => n.type === "checkbox");
+  assert.deepEqual(options.map((b) => [b.dataset.step, b.checked, !!b.disabled]), [["build", true, false], ["step-1", false, false]]);
+  // Build stops receiving Plan's output; Step 1 starts.
+  options[0].checked = false;
+  options[1].checked = true;
+  await fire(dialog.footer.find((b) => b.className === "primary"), "click");
+  assert.equal(dialog.open, false);
+  assert.equal(ui.save().disabled, false, "an edit like any other, kept until Save");
+  await ui.save().onclick();
+  await settle();
+  const stored = ui.posts().at(-1).body.steps;
+  assert.deepEqual(stored.find((s) => s.id === "build").depends_on || [], []);
+  assert.deepEqual(stored.find((s) => s.id === "step-1").depends_on, ["plan"]);
+  // A step that would close a cycle is offered disabled, with the reason beside it.
+  await ui.run("Connect to…", tile("step-1"));
+  const back = all(ui.dialog().body).filter((n) => n.type === "checkbox").find((b) => b.dataset.step === "plan");
+  assert.equal(back.disabled, true);
+  assert.ok(all(ui.dialog().body).some((n) => n.textContent === "That dependency would create a cycle"));
+});
+
+test("the canvas menu keeps its twelve kinds of step in one Add step submenu", async () => {
+  const ui = page();
+  await ui.open();
+  ui.menus.length = 0;
+  await fire(ui.byId("canvas"), "contextmenu");
+  const top = ui.menus.at(-1).filter(Array.isArray);
+  const labels = top.map((entry) => entry[0]);
+  assert.ok(labels.includes("Add step"));
+  assert.ok(!labels.some((label) => label.startsWith("Add ") && label !== "Add step"), "no kind of step at the top level");
+  const kinds = top.find((entry) => entry[0] === "Add step")[5].map((entry) => entry[0]);
+  assert.deepEqual([...kinds], ["Add agent", "Add human gate", "Add interactive session", "Add workflow", "Add team", "Add router", "Add service", "Add merge", "Add batch", "Add dev pod", "Add command", "Add stop dev pod"]);
+  assert.ok(top.length <= 9, `a short menu: ${top.length} items`);
+  // The menu opens a submenu in its place, its label first to go back, by click and by the arrow keys.
+  const app = fs.readFileSync(new URL("web/app.js", import.meta.url), "utf8");
+  assert.match(app, /if \(sub\) \{ showMenuItems\(item\[5\], items, item\[0\]\); return; \}/);
+  assert.match(app, /if \(ev\.key === "ArrowRight" && document\.activeElement\?\.dataset\?\.submenu\)/);
+  assert.match(app, /if \(ev\.key === "ArrowLeft"\) \{ const back = menu\.querySelector\("\[data-back\]"\);/);
 });

@@ -23,7 +23,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
 	configPath := flag.String("config", "/config/config.yaml", "configuration file")
 	logsPath := flag.String("logs", "/logs", "log directory")
 	flag.Parse()
@@ -55,7 +55,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { err = closeAfter(err, f) }()
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stdout, f), &slog.HandlerOptions{Level: level}))
 	shutdown, err := initTelemetry(context.Background(), c.Telemetry)
 	if err != nil {
@@ -64,7 +64,7 @@ func run() error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := shutdown(ctx); err != nil {
+		if shutdownErr := shutdown(ctx); shutdownErr != nil {
 			logger.Warn("telemetry shutdown failed")
 		}
 	}()
@@ -73,8 +73,8 @@ func run() error {
 		return err
 	}
 	replayCtx, replayCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := gateway.replayUsageOutbox(replayCtx); err != nil {
-		logger.Warn("usage outbox replay incomplete", "error", err)
+	if replayErr := gateway.replayUsageOutbox(replayCtx); replayErr != nil {
+		logger.Warn("usage outbox replay incomplete", "error", replayErr)
 	}
 	replayCancel()
 	defer gateway.transport.CloseIdleConnections()
@@ -94,8 +94,7 @@ func run() error {
 		drain, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err = server.Shutdown(drain); err != nil {
-			_ = server.Close()
-			return err
+			return errors.Join(err, server.Close())
 		}
 	}
 	return nil

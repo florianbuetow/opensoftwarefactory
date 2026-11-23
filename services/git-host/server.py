@@ -17,8 +17,20 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlencode
 
-DATA = os.environ.get("GIT_HOST_DATA", "/data")
-SEED_SCRIPT = os.environ.get("GIT_HOST_SEED_SCRIPT", os.path.join(os.environ.get("SEED_DIR", "/seed"), "seed.sh"))
+
+def required_env(name: str) -> str:
+    """Return the value of an environment variable; report it and exit with code 1 when it is missing or empty."""
+    value = os.environ.get(name)
+    if not value:
+        sys.stderr.write(f"The environment variable {name} is missing or empty.\n")
+        sys.exit(1)
+    return value
+
+
+DATA = required_env("GIT_HOST_DATA")
+SEED_SCRIPT = os.path.join(required_env("SEED_DIR"), "seed.sh")
+PATH = required_env("PATH")
+HOME = required_env("HOME")
 MAX_BODY = 256 * 1024 * 1024
 REPOSITORY_PATH = re.compile(r"/[A-Za-z0-9][A-Za-z0-9._-]*\.git/[A-Za-z0-9._/-]+")
 BROWSE_PATH = re.compile(r"/browse/([A-Za-z0-9][A-Za-z0-9._-]*)\.git")
@@ -294,8 +306,8 @@ class Handler(BaseHTTPRequestHandler):
     def backend_env(self, path: str, query: str, body: bytes) -> dict[str, str]:
         """Build the CGI environment for git http-backend."""
         env = {
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", "/tmp"),
+            "PATH": PATH,
+            "HOME": HOME,
             "GIT_PROJECT_ROOT": DATA,
             "GIT_HTTP_EXPORT_ALL": "1",
             "GATEWAY_INTERFACE": "CGI/1.1",
@@ -340,11 +352,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-def run_seed(script: str = SEED_SCRIPT) -> bool:
+def run_seed(script: str) -> bool:
     """Run an optional externally mounted seed script. Return whether one existed."""
     if os.path.isfile(script):
         seed_env = os.environ.copy()
-        seed_env.setdefault("GIT_HOST_SEED", os.path.dirname(script) + "/assets")
+        seed_env["GIT_HOST_SEED"] = os.path.dirname(script) + "/assets"
         subprocess.run(["bash", script], check=True, env=seed_env)
         return True
     return False
@@ -352,9 +364,10 @@ def run_seed(script: str = SEED_SCRIPT) -> bool:
 
 def main() -> None:
     """Seed the repositories and serve them until stopped."""
-    if not run_seed():
+    if not run_seed(SEED_SCRIPT):
         sys.stderr.write(f"git-host starts without seed data; {SEED_SCRIPT} is not mounted\n")
-    server = ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler)
+    # The server runs in a pod and must be reachable from other pods, so it listens on all interfaces.
+    server = ThreadingHTTPServer(("0.0.0.0", int(required_env("PORT"))), Handler)  # nosec B104
     server.daemon_threads = True
     sys.stderr.write(f"git-host serves {DATA} on port {server.server_address[1]}\n")
     server.serve_forever()

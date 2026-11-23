@@ -132,9 +132,10 @@ test("factory metrics and evaluations have separate navigation", () => {
   const app = fs.readFileSync(new URL("web/app.js", import.meta.url), "utf8");
   const c = vm.createContext({});
   vm.runInContext(app.slice(app.indexOf("const PAGES ="), app.indexOf("// Icons:")) + ";globalThis.pages=PAGES;globalThis.subpages=SUBPAGES;globalThis.groups=NAV_GROUPS;", c);
-  assert.equal(c.pages.find(p => p.name === "metrics").title, "Overview");
+  assert.equal(c.pages.find(p => p.name === "overview").title, "Overview", "home is the live factory");
+  assert.equal(c.pages.find(p => p.name === "metrics").title, "Metrics", "the explorer with its periods is a page of its own");
   assert.equal(c.pages.find(p => p.name === "evaluations").title, "Evals");
-  assert.deepEqual(Array.from(c.groups.find(g => g.name === "Main").pages), ["metrics", "cluster", "system-diagram"]);
+  assert.deepEqual(Array.from(c.groups.find(g => g.name === "Main").pages), ["overview", "metrics", "cluster", "system-diagram"]);
   assert.equal(c.subpages.metrics, undefined);
   assert.equal(c.subpages.pricing.menu, "metrics");
   assert.equal(c.subpages.judges.menu, "evaluations");

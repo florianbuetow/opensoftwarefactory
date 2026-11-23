@@ -23,7 +23,8 @@ const PAGES = [
   { name: "skills", title: "Skills", icon: "skill", tip: "Versioned skills" },
   { name: "mcp-gateway", title: "MCP Gateway", icon: "gateway", tip: "MCP passthrough services" },
   { name: "artifacts", title: "Blobstore", icon: "memory", tip: "Runs, tasks, templates, and artifacts" },
-  { name: "metrics", title: "Overview", icon: "metrics", tip: "Factory costs, tokens, runtime, and quality metrics" },
+  { name: "overview", title: "Overview", icon: "metrics", tip: "The factory now: what waits for you, what runs, and the last 24 hours" },
+  { name: "metrics", title: "Metrics", icon: "metrics", tip: "Factory costs, tokens, runtime, and quality metrics over a period" },
   { name: "evaluations", title: "Evals", icon: "evaluation", tip: "Evaluation sets and judges" },
   { name: "connectors", title: "Connectors", icon: "connector", tip: "Git repositories and dev pods" },
   { name: "cluster", title: "Cluster", icon: "cluster", tip: "Pods, logs, and services" },
@@ -35,7 +36,7 @@ Object.assign(SUBPAGES, { judges: { name: "judges", title: "Judges", menu: "eval
 
 // Top-level navigation groups and their destination pages.
 const NAV_GROUPS = [
-  { name: "Main", icon: "metrics", pages: ["metrics", "cluster", "system-diagram"] },
+  { name: "Main", icon: "metrics", pages: ["overview", "metrics", "cluster", "system-diagram"] },
   { name: "Factory", icon: "workflow", pages: ["intake", "workflows", "agents", "runs", "evaluations", "events"] },
   { name: "Tasks", icon: "gate", pages: ["decisions", "sessions"] },
   { name: "Connectors", icon: "connector", pages: ["connectors", "mcp-gateway"] },
@@ -466,8 +467,9 @@ setInterval(() => {
 }, 30000);
 
 // titleCase shows an identifier such as "small-fix" or "step_1" as "Small Fix" / "Step 1"; a
-// grouped name shows its groups before it ("ecc/ECC-plan" as "Ecc / ECC Plan").
-const titleCase = (id) => String(id || "").split("/").map((part) => part.split(/[-_\s]+/).filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" ")).filter(Boolean).join(" / ");
+// grouped name shows its groups before it ("ecc/ECC-plan" as "ECC / ECC Plan").
+// The factory's acronyms stay in capitals ("ECC Plan", "LLM Gateway"), however the ID was typed.
+const titleCase = (id) => String(id || "").split("/").map((part) => part.split(/[-_\s]+/).filter(Boolean).map((p) => (/^(ai|api|ci|cli|css|ecc|html|http|id|json|llm|mcp|pr|qa|sql|ui|url|uuid|yaml)$/i.test(p) ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1))).join(" ")).filter(Boolean).join(" / ");
 
 // midTruncate shortens a long id in the middle, keeping its start and end readable.
 function midTruncate(text, max = 40) {
@@ -532,6 +534,37 @@ document.addEventListener("mouseover", (ev) => {
   if (el) { if (el.scrollWidth > el.clientWidth + 1) el.title = el.dataset.full; else el.removeAttribute("title"); }
 });
 
+// The keyboard cannot hover: a row (or any control) that gets keyboard focus while text in it is
+// cut off shows that text in full in a tooltip under it, which it is described by, until focus leaves.
+const focusTip = h("div", { id: "focus-tip", className: "focus-tip", role: "tooltip", hidden: true });
+// cutOffTexts lists the full texts of the cut-off [data-full] elements in el, el itself included.
+function cutOffTexts(el) {
+  const all = [...(el.matches?.("[data-full]") ? [el] : []), ...(el.querySelectorAll?.("[data-full]") || [])];
+  return all.filter((e) => e.dataset.full && e.scrollWidth > e.clientWidth + 1).map((e) => e.dataset.full);
+}
+function hideFocusTip() {
+  if (focusTip.hidden) return;
+  focusTip.hidden = true;
+  document.querySelector("[aria-describedby='focus-tip']")?.removeAttribute("aria-describedby");
+}
+document.addEventListener("focusin", (ev) => {
+  hideFocusTip();
+  const el = ev.target;
+  if (!(el instanceof Element) || !el.matches(":focus-visible")) return;
+  const texts = cutOffTexts(el);
+  if (!texts.length) return;
+  if (!focusTip.isConnected) document.body.append(focusTip);
+  focusTip.replaceChildren(...texts.map((t) => h("div", {}, t)));
+  focusTip.hidden = false;
+  if (!el.hasAttribute("aria-describedby")) el.setAttribute("aria-describedby", "focus-tip");
+  const r = el.getBoundingClientRect(), tip = focusTip.getBoundingClientRect();
+  focusTip.style.left = `${Math.max(8, Math.min(r.left + 8, window.innerWidth - tip.width - 8))}px`;
+  focusTip.style.top = `${r.bottom + tip.height + 12 > window.innerHeight ? r.top - tip.height - 4 : r.bottom + 4}px`;
+});
+document.addEventListener("focusout", hideFocusTip);
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") hideFocusTip(); });
+document.addEventListener("scroll", hideFocusTip, true);
+
 // dataTable builds a table; numeric columns align right, optional columns (cells marked "opt"
 // too) give way when the middle column is narrow, and the name column (cells marked
 // "name-cell") takes the rest of the width and truncates, its header included.
@@ -549,6 +582,49 @@ function clickableRow(tr, onActivate) {
   tr.addEventListener("contextmenu", (ev) => ev.preventDefault()); // no browser menu on rows
   tr.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onActivate(ev); }
+  });
+  return tr;
+}
+
+// marks is the multi-selection of a table, beside its one selected row: Cmd/Ctrl+click or X on a
+// focused row marks it (or unmarks it), Shift+click marks the rows from the last one marked, and
+// Escape or a plain click clears them. The row menu then acts on every marked row at once.
+function marks() {
+  const set = new Set();
+  let anchor = "";
+  return {
+    set,
+    has: (id) => set.has(id),
+    get size() { return set.size; },
+    toggle(id) { if (set.has(id)) set.delete(id); else set.add(id); anchor = id; },
+    // range marks the ids between the last one marked and id, in the order the table lists them.
+    range(ids, id) {
+      const from = ids.indexOf(anchor), to = ids.indexOf(id);
+      if (from < 0 || to < 0) { this.toggle(id); return; }
+      for (const x of ids.slice(Math.min(from, to), Math.max(from, to) + 1)) set.add(x);
+      anchor = id;
+    },
+    clear() { const had = set.size > 0; set.clear(); anchor = ""; return had; },
+    // keep drops the marks of rows no longer listed.
+    keep(ids) { const listed = new Set(ids); for (const id of [...set]) if (!listed.has(id)) set.delete(id); },
+  };
+}
+
+// markableRow is clickableRow for a table with marks: a modified click marks instead of opening,
+// X marks the focused row, and Escape clears the marks. onMarks redraws the table.
+function markableRow(tr, id, ids, rowMarks, onActivate, onMarks) {
+  tr.classList.toggle("marked", rowMarks.has(id));
+  if (rowMarks.has(id)) tr.firstChild?.append(h("span", { className: "sr-only" }, ", marked")); // read with the row
+  clickableRow(tr, (ev) => {
+    if (ev?.metaKey || ev?.ctrlKey) { rowMarks.toggle(id); onMarks(); return; }
+    if (ev?.shiftKey && ev.type === "click") { rowMarks.range(ids(), id); onMarks(); return; }
+    if (rowMarks.clear()) onMarks();
+    onActivate(ev);
+  });
+  tr.addEventListener("keydown", (ev) => {
+    if (ev.target !== tr || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (ev.key === "x" || ev.key === "X") { ev.preventDefault(); rowMarks.toggle(id); onMarks(); }
+    else if (ev.key === "Escape" && rowMarks.clear()) { ev.preventDefault(); onMarks(); }
   });
   return tr;
 }
@@ -1163,6 +1239,101 @@ function showSessionsBadge() {
   document.dispatchEvent(new Event("sessionschange"));
 }
 
+// The factory's services (the cluster's deployments), polled every 10 s with the gates: Overview
+// shows them, and the top bar marks a service that is not ready.
+const clusterHealth = { services: [], loaded: false, error: "" };
+
+// serviceStates names each deployment with its ready and desired replicas, by name: ready when
+// every desired replica is ready, starting while some are, not ready when none is.
+function serviceStates(deployments) {
+  return (deployments || []).map((x) => {
+    const desired = x.spec?.replicas ?? 0, ready = x.status?.readyReplicas || 0;
+    const state = ready >= desired ? "ready" : ready > 0 ? "starting" : "down";
+    return { name: x.metadata?.name || "", ready, desired, state };
+  }).filter((s) => s.name).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+
+// serviceMarker names the services that are not ready, for the top bar: "" when all are.
+function serviceMarker(services) {
+  const down = (services || []).filter((s) => s.state !== "ready");
+  if (!down.length) return { text: "", title: "" };
+  return {
+    text: down.length === 1 ? `${down[0].name} not ready` : `${down.length} services not ready`,
+    title: `Not ready: ${down.map((s) => `${s.name} (${s.ready}/${s.desired})`).join(", ")}. Opens Cluster`,
+  };
+}
+
+// runWorkflow loads the workflow version a run used, for its graph, once per version; null when
+// it cannot. A run from before its workflow moved into a group names it without the group
+// ("ECC-review" for ecc/ECC-review): the stored workflow of that name in a group stands in.
+const runWorkflowCache = new Map();
+function runWorkflow(name, version) {
+  const key = `${name}@${version || 0}`;
+  if (!runWorkflowCache.has(key)) runWorkflowCache.set(key, (async () => {
+    const load = (n) => (version ? api("GET", `/api/orchestrator/workflows/${encodeURIComponent(n)}/versions/${version}`) : null);
+    try { const def = await load(name); if (def?.steps) return def; } catch { /* moved or gone */ }
+    try {
+      const all = (await api("GET", "/api/orchestrator/workflows")).workflows || [];
+      const moved = all.some((w) => w.name === name) ? name : groupedName(all.map((w) => w.name), name);
+      if (!moved) return null;
+      return version ? await load(moved) : all.find((w) => w.name === moved) || null;
+    } catch { return null; }
+  })());
+  return runWorkflowCache.get(key);
+}
+
+// groupedName finds the one stored workflow in a group whose own name is name, or "".
+function groupedName(names, name) {
+  const found = names.filter((n) => n.includes("/") && n.split("/").pop().toLowerCase() === String(name).toLowerCase());
+  return found.length === 1 ? found[0] : "";
+}
+
+// traceMatch finds the run a typed trace ID names: the one known run whose ID starts with it
+// (case and dashes ignored, at least 4 characters), or a full UUID even before the run list knows
+// it. count says how many known runs start with it, for "3 runs match".
+function traceMatch(ids, text) {
+  const want = String(text || "").trim().toLowerCase();
+  const plain = (s) => s.toLowerCase().replace(/-/g, "");
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(want)) return { trace: want, count: 1 };
+  if (plain(want).length < 4) return { trace: "", count: 0 };
+  const found = ids.filter((id) => plain(id).startsWith(plain(want)));
+  return { trace: found.length === 1 ? found[0] : "", count: found.length };
+}
+
+// The top bar's trace ID jump opens the run the typed ID names, from any page.
+function wireTraceJump() {
+  const input = $("trace-jump");
+  $("trace-jump-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (!runIndex.records.size) { try { await runIndex.refresh(); } catch { /* the full ID still opens */ } }
+    const { trace, count } = traceMatch([...runIndex.records.keys()], input.value);
+    if (trace) { input.value = ""; input.blur(); location.hash = `#runs/${trace}`; return; }
+    notify(count > 1 ? `${count} runs match: type more of the ID` : input.value.trim().length < 4 ? "Type at least 4 characters of the trace ID" : "No run has that trace ID", "error");
+  });
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { input.value = ""; input.blur(); } });
+}
+
+// showServiceMarker shows the marker in the top bar while a service is not ready.
+function showServiceMarker() {
+  const marker = $("service-marker");
+  const { text, title } = serviceMarker(clusterHealth.services);
+  marker.hidden = !text;
+  marker.title = title;
+  marker.replaceChildren(...(text ? [statusChip("failed", text)] : []));
+  fitMenu();
+}
+
+async function refreshClusterHealth() {
+  try {
+    clusterHealth.services = serviceStates((await api("GET", "/api/cluster/deployments")).items);
+    clusterHealth.loaded = true;
+    clusterHealth.error = "";
+  } catch (e) { clusterHealth.error = e.message; /* Cluster shows the error; the marker keeps its last value */ }
+  showServiceMarker();
+  document.dispatchEvent(new Event("clusterchange"));
+}
+
 // A run waits while a gate or an interactive session of it waits for a person.
 const isWaiting = (trace) => decisionsState.pending.some((d) => d.trace_id === trace) || sessionsState.pending.some((s) => s.trace_id === trace);
 
@@ -1353,9 +1524,11 @@ function creatorHeaders() {
 const menu = h("div", { className: "ctx-menu", role: "menu", hidden: true });
 document.body.append(menu);
 
-// openMenu shows items [label, action, className, tooltip, disabled] at the pointer.
 let menuReturn = null; // the element that had the focus before the menu opened
 
+// openMenu shows a right-click menu of items: [label, run, class, tooltip, disabled, children],
+// "-" for a separator. An item with children is a submenu: it opens in the menu's place (click,
+// Enter or ArrowRight), with its own label first to go back (click or ArrowLeft).
 function openMenu(ev, items) {
   ev.preventDefault();
   ev.stopPropagation();
@@ -1363,17 +1536,33 @@ function openMenu(ev, items) {
   for (const e of document.querySelectorAll(".menu-target")) e.classList.remove("menu-target");
   if (ev.currentTarget instanceof Element && ev.currentTarget.matches(".tree-row, tr, .rows li")) ev.currentTarget.classList.add("menu-target");
   menuReturn = document.activeElement;
-  menu.replaceChildren(...items.map((item) => item === "-" ? h("hr", { role: "separator" }) : h("button", {
-    type: "button", role: "menuitem", className: (item[2] || "") + (item[4] ? " disabled" : ""),
-    title: item[3] || undefined, "aria-disabled": item[4] ? "true" : undefined,
-    // Focus goes back to what the menu acted on first, so a dialog the item opens returns it there.
-    onclick: () => { if (item[4]) return; closeMenu(); if (menuReturn?.isConnected) menuReturn.focus(); item[1](); },
-  }, item[0])));
+  showMenuItems(items);
   menu.hidden = false;
   const r = menu.getBoundingClientRect();
   menu.style.left = `${Math.min(ev.clientX, window.innerWidth - r.width - 8)}px`;
   menu.style.top = `${Math.min(ev.clientY, window.innerHeight - r.height - 8)}px`;
   menu.querySelector("button:not(.disabled)")?.focus();
+}
+
+// showMenuItems fills the open menu with items; back is the item list a submenu returns to.
+function showMenuItems(items, back = null, label = "") {
+  const button = (item) => {
+    const sub = Array.isArray(item[5]);
+    return h("button", {
+      type: "button", role: "menuitem", className: [item[2] || "", item[4] ? "disabled" : "", sub ? "has-submenu" : ""].filter(Boolean).join(" "),
+      title: item[3] || undefined, "aria-disabled": item[4] ? "true" : undefined, "aria-haspopup": sub ? "menu" : undefined,
+      dataset: sub ? { submenu: "1" } : undefined,
+      // Focus goes back to what the menu acted on first, so a dialog the item opens returns it there.
+      onclick: () => {
+        if (item[4]) return;
+        if (sub) { showMenuItems(item[5], items, item[0]); return; }
+        closeMenu(); if (menuReturn?.isConnected) menuReturn.focus(); item[1]();
+      },
+    }, item[0]);
+  };
+  const head = back ? [h("button", { type: "button", role: "menuitem", className: "menu-back", dataset: { back: "1" }, title: "Shows the menu again", onclick: () => showMenuItems(back) }, label), h("hr", { role: "separator" })] : [];
+  menu.replaceChildren(...head, ...items.map((item) => (item === "-" ? h("hr", { role: "separator" }) : button(item))));
+  menu.querySelector(back ? "button:not(.disabled):not(.menu-back)" : "button:not(.disabled)")?.focus();
 }
 
 function closeMenu() {
@@ -1420,9 +1609,21 @@ menu.addEventListener("keydown", (ev) => {
   const i = items.indexOf(document.activeElement);
   if (ev.key === "ArrowDown") { ev.preventDefault(); items[(i + 1) % items.length].focus(); }
   if (ev.key === "ArrowUp") { ev.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+  if (ev.key === "ArrowRight" && document.activeElement?.dataset?.submenu) { ev.preventDefault(); document.activeElement.click(); }
+  if (ev.key === "ArrowLeft") { const back = menu.querySelector("[data-back]"); if (back) { ev.preventDefault(); back.click(); } }
   if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); closeMenu(); if (menuReturn?.isConnected) menuReturn.focus(); }
 });
 
+// The keyboard opens the right-click menu of what has focus (a row, a tree row, a tile) with
+// Shift+F10 or the ContextMenu key, anchored under its left edge, as a right-click would.
+document.addEventListener("keydown", (ev) => {
+  if (!(ev.key === "ContextMenu" || (ev.shiftKey && ev.key === "F10"))) return;
+  const target = document.activeElement;
+  if (!target || target === document.body || !menu.hidden) return;
+  ev.preventDefault();
+  const r = target.getBoundingClientRect();
+  target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: Math.round(r.left + 8), clientY: Math.round(r.bottom) }));
+});
 
 // setPageActions fills the toggles row at the right end of the panel-header row.
 function setPageActions(...nodes) {
@@ -1471,7 +1672,7 @@ function route() {
   try { hash = decodeURI(hash); } catch { /* keep it encoded */ }
   const name = hash.split(/[/?]/)[0];
   if (!tabs[name]) {
-    location.replace("#metrics");
+    location.replace("#overview");
     return;
   }
   if (activeTab !== name) {
@@ -1581,7 +1782,9 @@ function startApp() {
   route();
   refreshDecisions();
   refreshSessions();
-  setInterval(() => { if (!document.hidden) { refreshDecisions(); refreshSessions(); } }, 10000);
+  refreshClusterHealth();
+  wireTraceJump();
+  setInterval(() => { if (!document.hidden) { refreshDecisions(); refreshSessions(); refreshClusterHealth(); } }, 10000);
 }
 
 window.addEventListener("DOMContentLoaded", startApp);

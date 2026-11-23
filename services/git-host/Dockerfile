@@ -7,7 +7,7 @@ RUN apk add --no-cache bash git git-daemon python3 \
 
 COPY server.py /opt/git-host/
 
-ENV HOME=/tmp PYTHONUNBUFFERED=1 PORT=8080 GIT_HOST_DATA=/data
+ENV HOME=/tmp PYTHONUNBUFFERED=1 PORT=8080 GIT_HOST_DATA=/data SEED_DIR=/seed
 USER 1000:1000
 EXPOSE 8080
 ENTRYPOINT ["python3", "/opt/git-host/server.py"]

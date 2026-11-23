@@ -33,7 +33,10 @@ func TestNormalizeUsagePreservesZeroCacheAndMissing(t *testing.T) {
 func TestNormalizeUsageKeepsUnknownEffortAbsent(t *testing.T) {
 	c := usageContext{ID: "id", Vendor: "v", Model: "m", RequestedModel: "asked", OccurredAt: time.Now(), Modes: map[string]string{}}
 	m := normalizeUsage(c, json.RawMessage(`{"prompt_tokens":1,"completion_tokens":1}`), true)
-	data, _ := json.Marshal(m)
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(string(data), `"effort"`) || !strings.Contains(strings.Join(m.Missing, ","), "effort/request omitted") {
 		t.Fatalf("measurement %s missing=%v", data, m.Missing)
 	}
@@ -66,7 +69,9 @@ func TestGatewayPersistsOutboxBeforeEvaluation(t *testing.T) {
 		if !durableBeforeProvider {
 			t.Error("provider called before durable attempt intent")
 		}
-		io.WriteString(w, `{"id":"c","object":"chat.completion","model":"resolved","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}`)
+		if _, err := io.WriteString(w, `{"id":"c","object":"chat.completion","model":"resolved","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +79,10 @@ func TestGatewayPersistsOutboxBeforeEvaluation(t *testing.T) {
 		defer mu.Unlock()
 		id := strings.TrimPrefix(r.URL.Path, "/blobs/")
 		if r.Method == http.MethodPut {
-			data, _ := io.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+			}
 			blobs[id] = data
 			order = append(order, "blob")
 			w.WriteHeader(http.StatusNoContent)
@@ -100,7 +108,9 @@ func TestGatewayPersistsOutboxBeforeEvaluation(t *testing.T) {
 		if r.Header.Get("If-None-Match") != "*" {
 			t.Errorf("condition %q", r.Header.Get("If-None-Match"))
 		}
-		json.NewDecoder(r.Body).Decode(&measured)
+		if err := json.NewDecoder(r.Body).Decode(&measured); err != nil {
+			t.Error(err)
+		}
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer eval.Close()
@@ -131,7 +141,9 @@ func TestGatewayPersistsOutboxBeforeEvaluation(t *testing.T) {
 	var evidence usageOutbox
 	for id, data := range blobs {
 		if strings.HasPrefix(id, usageOutboxPrefix+"/") {
-			json.Unmarshal(data, &evidence)
+			if err := json.Unmarshal(data, &evidence); err != nil {
+				t.Error(err)
+			}
 		}
 	}
 	if len(measured.Modes) != 0 || evidence.Attribution.RequestSettings["stream"] != "none" || evidence.Attribution.AgentRef != "judge@v2" {
@@ -189,13 +201,18 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 					objects = append(objects, map[string]string{"id": id})
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]any{"objects": objects})
+			if err := json.NewEncoder(w).Encode(map[string]any{"objects": objects}); err != nil {
+				t.Error(err)
+			}
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/blobs/")
 		switch r.Method {
 		case http.MethodPut:
-			data, _ := io.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+			}
 			blobs[id] = data
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodGet:
@@ -204,7 +221,9 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 				http.NotFound(w, r)
 				return
 			}
-			w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				t.Error(err)
+			}
 		case http.MethodDelete:
 			delete(blobs, id)
 			w.WriteHeader(http.StatusNoContent)
@@ -216,7 +235,9 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
 		<-release
-		io.WriteString(w, `{"id":"c","object":"chat.completion","model":"m","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		if _, err := io.WriteString(w, `{"id":"c","object":"chat.completion","model":"m","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 	var evalCalls atomic.Int32
@@ -243,7 +264,9 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 	for id, data := range blobs {
 		if strings.HasPrefix(id, usageOutboxPrefix+"/") {
 			var out usageOutbox
-			json.Unmarshal(data, &out)
+			if err := json.Unmarshal(data, &out); err != nil {
+				t.Error(err)
+			}
 			if out.Phase != "active" || out.Measurement.DurationMS != nil {
 				t.Fatalf("active outbox %+v", out)
 			}
@@ -259,16 +282,25 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 
 func TestReplayOutboxTreatsMatchingConflictAsDelivered(t *testing.T) {
 	measurement := usageMeasurement{SchemaVersion: 1, ID: "attempt", Kind: "usage", RunID: "run", ExecutionID: "exec", OccurredAt: time.Now().UTC(), Vendor: "v", Model: "m", RequestedModel: "asked", Effort: "none", Modes: map[string]string{}, ArtifactID: "gateway-measurements/attempt.json", Status: "missing", Missing: []string{"input_tokens: provider usage omitted"}}
-	outbox, _ := json.Marshal(usageOutbox{Measurement: measurement})
+	outbox, err := json.Marshal(usageOutbox{Measurement: measurement})
+	if err != nil {
+		t.Fatal(err)
+	}
 	deleted := false
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/list/gateway-measurements-pending":
-			json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/attempt.json"}}})
+			if handlerErr := json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/attempt.json"}}}); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "pending"):
-			json.NewEncoder(w).Encode(usagePending{ArtifactID: "gateway-measurements/attempt.json"})
+			if handlerErr := json.NewEncoder(w).Encode(usagePending{ArtifactID: "gateway-measurements/attempt.json"}); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case r.Method == http.MethodGet:
-			w.Write(outbox)
+			if _, handlerErr := w.Write(outbox); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case r.Method == http.MethodDelete:
 			deleted = true
 			w.WriteHeader(http.StatusNoContent)
@@ -282,11 +314,18 @@ func TestReplayOutboxTreatsMatchingConflictAsDelivered(t *testing.T) {
 			w.WriteHeader(http.StatusPreconditionFailed)
 			return
 		}
-		stored, _ := json.Marshal(measurement)
+		stored, handlerErr := json.Marshal(measurement)
+		if handlerErr != nil {
+			t.Error(handlerErr)
+		}
 		var object map[string]any
-		json.Unmarshal(stored, &object)
+		if handlerErr = json.Unmarshal(stored, &object); handlerErr != nil {
+			t.Error(handlerErr)
+		}
 		object["revision"] = "r1"
-		json.NewEncoder(w).Encode(object)
+		if handlerErr = json.NewEncoder(w).Encode(object); handlerErr != nil {
+			t.Error(handlerErr)
+		}
 	}))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: "http://provider.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
@@ -304,7 +343,10 @@ func TestReplayOutboxTreatsMatchingConflictAsDelivered(t *testing.T) {
 
 func TestReplayContinuesAfterBadPendingItem(t *testing.T) {
 	m := usageMeasurement{SchemaVersion: 1, ID: "good", Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: "gateway-measurements/good.json", Status: "missing", Missing: []string{"raw_usage: omitted"}}
-	outbox, _ := json.Marshal(usageOutbox{Measurement: m})
+	outbox, err := json.Marshal(usageOutbox{Measurement: m})
+	if err != nil {
+		t.Fatal(err)
+	}
 	delivered := false
 	deleted := false
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -315,13 +357,21 @@ func TestReplayContinuesAfterBadPendingItem(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/list/gateway-measurements-pending":
-			json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/bad.json"}, {"id": "gateway-measurements-pending/good.json"}}})
+			if handlerErr := json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/bad.json"}, {"id": "gateway-measurements-pending/good.json"}}}); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case "/blobs/gateway-measurements-pending/bad.json":
-			w.Write([]byte(`{"artifact_id":"wrong/item"}`))
+			if _, handlerErr := w.Write([]byte(`{"artifact_id":"wrong/item"}`)); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case "/blobs/gateway-measurements-pending/good.json":
-			json.NewEncoder(w).Encode(usagePending{ArtifactID: "gateway-measurements/good.json"})
+			if handlerErr := json.NewEncoder(w).Encode(usagePending{ArtifactID: "gateway-measurements/good.json"}); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case "/blobs/gateway-measurements/good.json":
-			w.Write(outbox)
+			if _, handlerErr := w.Write(outbox); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -349,13 +399,20 @@ func TestConflictUpgradesSameMissingAttemptWithCAS(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			var existing map[string]any
-			data, _ := json.Marshal(reported)
-			json.Unmarshal(data, &existing)
+			data, err := json.Marshal(reported)
+			if err != nil {
+				t.Error(err)
+			}
+			if err := json.Unmarshal(data, &existing); err != nil {
+				t.Error(err)
+			}
 			existing["status"] = "missing"
 			delete(existing, "raw_usage")
 			existing["missing"] = []string{"raw_usage/provider omitted usage"}
 			existing["revision"] = "rev1"
-			json.NewEncoder(w).Encode(existing)
+			if err := json.NewEncoder(w).Encode(existing); err != nil {
+				t.Error(err)
+			}
 		case http.MethodPut:
 			if r.Header.Get("If-Match") == `"rev1"` {
 				cas = true
@@ -381,21 +438,35 @@ func TestConflictUpgradesSameMissingAttemptWithCAS(t *testing.T) {
 
 func TestStartupFinalizesAbandonedActiveAttempt(t *testing.T) {
 	m := usageMeasurement{SchemaVersion: 1, ID: "abandoned", Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: "gateway-measurements/abandoned.json", Status: "missing", Missing: []string{"raw_usage/provider omitted usage"}}
-	outbox, _ := json.Marshal(usageOutbox{Phase: "active", Measurement: m})
-	marker, _ := json.Marshal(usagePending{ArtifactID: m.ArtifactID})
+	outbox, err := json.Marshal(usageOutbox{Phase: "active", Measurement: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := json.Marshal(usagePending{ArtifactID: m.ArtifactID})
+	if err != nil {
+		t.Fatal(err)
+	}
 	blobs := map[string][]byte{m.ArtifactID: outbox, "gateway-measurements-pending/abandoned.json": marker}
 	var delivered usageMeasurement
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/list/gateway-measurements-pending" {
-			json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/abandoned.json"}}})
+			if handlerErr := json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/abandoned.json"}}}); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/blobs/")
 		switch r.Method {
 		case http.MethodGet:
-			w.Write(blobs[id])
+			if _, handlerErr := w.Write(blobs[id]); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		case http.MethodPut:
-			blobs[id], _ = io.ReadAll(r.Body)
+			stored, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				t.Error(readErr)
+			}
+			blobs[id] = stored
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
 			delete(blobs, id)
@@ -404,7 +475,9 @@ func TestStartupFinalizesAbandonedActiveAttempt(t *testing.T) {
 	}))
 	defer blob.Close()
 	eval := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&delivered)
+		if handlerErr := json.NewDecoder(r.Body).Decode(&delivered); handlerErr != nil {
+			t.Error(handlerErr)
+		}
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer eval.Close()
@@ -420,7 +493,9 @@ func TestStartupFinalizesAbandonedActiveAttempt(t *testing.T) {
 		t.Fatalf("delivered %+v", delivered)
 	}
 	var stored usageOutbox
-	json.Unmarshal(blobs[m.ArtifactID], &stored)
+	if err := json.Unmarshal(blobs[m.ArtifactID], &stored); err != nil {
+		t.Fatal(err)
+	}
 	if stored.Phase != "final" {
 		t.Fatalf("stored phase %q", stored.Phase)
 	}
@@ -432,8 +507,14 @@ func TestStartupRecoversMoreThanOnePendingBatch(t *testing.T) {
 	for i := 0; i < total; i++ {
 		id := fmt.Sprintf("attempt-%03d", i)
 		artifact := usageOutboxPrefix + "/" + id + ".json"
-		out, _ := json.Marshal(usageOutbox{Phase: "active", Measurement: usageMeasurement{SchemaVersion: 1, ID: id, Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: artifact, Status: "missing", Missing: []string{"raw_usage/provider omitted usage"}}})
-		marker, _ := json.Marshal(usagePending{ArtifactID: artifact})
+		out, err := json.Marshal(usageOutbox{Phase: "active", Measurement: usageMeasurement{SchemaVersion: 1, ID: id, Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: artifact, Status: "missing", Missing: []string{"raw_usage/provider omitted usage"}}})
+		if err != nil {
+			t.Error(err)
+		}
+		marker, err := json.Marshal(usagePending{ArtifactID: artifact})
+		if err != nil {
+			t.Error(err)
+		}
 		blobs[artifact] = out
 		blobs[usagePendingPrefix+"/"+id+".json"] = marker
 	}
@@ -445,15 +526,23 @@ func TestStartupRecoversMoreThanOnePendingBatch(t *testing.T) {
 					objects = append(objects, map[string]string{"id": id})
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]any{"objects": objects})
+			if err := json.NewEncoder(w).Encode(map[string]any{"objects": objects}); err != nil {
+				t.Error(err)
+			}
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/blobs/")
 		switch r.Method {
 		case http.MethodGet:
-			w.Write(blobs[id])
+			if _, err := w.Write(blobs[id]); err != nil {
+				t.Error(err)
+			}
 		case http.MethodPut:
-			blobs[id], _ = io.ReadAll(r.Body)
+			stored, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				t.Error(readErr)
+			}
+			blobs[id] = stored
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
 			delete(blobs, id)

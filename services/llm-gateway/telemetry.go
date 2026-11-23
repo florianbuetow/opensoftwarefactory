@@ -54,8 +54,7 @@ func initTelemetry(ctx context.Context, config TelemetryConfig) (func(context.Co
 		resource.WithAttributes(attribute.String("service.name", "llm-gateway")),
 	)
 	if err != nil {
-		_ = exporter.Shutdown(ctx)
-		return nil, err
+		return nil, errors.Join(err, exporter.Shutdown(ctx))
 	}
 
 	provider := sdktrace.NewTracerProvider(

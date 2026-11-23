@@ -17,9 +17,9 @@ from collections.abc import Callable
 from typing import IO, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from podhttp import JsonObject, RefusalError, serve, take_token, text_list  # noqa: E402
+from podhttp import JsonObject, RefusalError, required_env, serve, take_token, text_list  # noqa: E402
 
-WORKSPACE = os.path.realpath(os.environ.get("DEVPOD_WORKSPACE", "/workspace"))
+WORKSPACE = os.path.realpath(required_env("DEVPOD_WORKSPACE"))
 OUTPUT_LIMIT = 20000
 DEFAULT_TIMEOUT = 120
 MAX_TIMEOUT = 600
@@ -295,7 +295,6 @@ def command_environment() -> dict[str, str]:
     env = dict(os.environ)
     env.pop("POD_TOKEN", None)
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "PAGER": "cat", "TERM": "dumb"})
-    env.setdefault("HOME", "/home/dev")
     return env
 
 
@@ -460,7 +459,7 @@ def run_skill_script(args: JsonObject) -> JsonObject:
     if arguments is None:
         raise RefusalError("args must be a list of text arguments.")
 
-    with tempfile.TemporaryDirectory(prefix="factory-skill-", dir="/tmp") as root:
+    with tempfile.TemporaryDirectory(prefix="factory-skill-") as root:
         process = _start_skill_script(root, _skill_files(args, root), arguments)
         stdout = OutputWindow(max_bytes)
         stderr = OutputWindow(max_bytes)
@@ -528,10 +527,9 @@ def handle_skill_script(body: JsonObject) -> JsonObject:
 def main() -> None:
     """Serve the tool server until the container stops."""
     token = take_token()
-    if not token:
-        sys.stderr.write("POD_TOKEN is not set; every call will be refused.\n")
+    required_env("HOME")
     server = serve(
-        int(os.environ.get("PORT", "8080")),
+        int(required_env("PORT")),
         token,
         {"/op": handle_op, "/skill-script": handle_skill_script},
         unbounded_paths=("/skill-script",),

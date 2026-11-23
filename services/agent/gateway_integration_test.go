@@ -104,9 +104,6 @@ func integrationToolCall(name, arguments string) toolCall {
 }
 
 func TestAgentUsesRealGatewayForHTTPAndStdioTools(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds and launches integration fixtures")
-	}
 	blobBinary := integrationBuild(t, "../blobstore", ".")
 	gatewayBinary := integrationBuild(t, "../mcp-gateway", ".")
 	mockBinary := integrationBuild(t, "../mcp-gateway", "./testdata/mock")

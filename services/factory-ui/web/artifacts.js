@@ -112,14 +112,21 @@
     const res = await fetch(`/api/blobs/blobs/${id}`, { method: "DELETE" });
     if (!res.ok && res.status !== 404) throw new Error(errorMessage(await res.text(), res));
   }
-  // Run folders are named "Workflow · time", newest first; the trace ID is the tooltip.
-  const folderNode = (prefix, label) => ({
-    id: prefix,
-    // A run folder shows its trace ID as stored; the tooltip names its workflow and start time.
-    label, mono: !!traceOf(prefix), full: traceOf(prefix) ? label : undefined,
-    title: traceOf(prefix) ? runIndex.label(traceOf(prefix)) : "",
-    load: async () => childNodes(prefix, await list(prefix)),
-  });
+  // Run folders are named by their run, "Workflow · time", newest first, the trace ID shortened in
+  // the middle after it (muted, mono) and in full as the tooltip; a folder without a run record
+  // shows its shortened ID alone.
+  const folderNode = (prefix, label) => {
+    const trace = traceOf(prefix), known = trace && runIndex.records.has(trace);
+    return {
+      id: prefix,
+      label: known ? runIndex.label(trace) : trace ? midTruncate(trace, 13) : label,
+      mono: !!trace && !known,
+      sub: known ? midTruncate(trace, 9) : "", // "a8a7…099d": the run's name keeps the room
+      full: trace ? (known ? runIndex.label(trace) : trace) : undefined,
+      title: trace || "",
+      load: async () => childNodes(prefix, await list(prefix)),
+    };
+  };
   const childNodes = (prefix, l) => {
     const dirs = [...l.directories];
     if (prefix === RUNS) {

@@ -355,6 +355,8 @@ const RunsLogic = (() => {
     filtersBox.replaceChildren(seg, select);
   }
 
+  const runMarks = marks(); // the runs marked for Re-run or Remove at once
+
   function visibleRuns() {
     return runIndex.list(state.workflow)
       .filter((r) => !state.status || stateOf(r.trace_id) === state.status)
@@ -372,6 +374,7 @@ const RunsLogic = (() => {
       tableBox.replaceChildren(emptyPanel("No matching runs", { label: "Clear filters", run: () => { state.workflow = state.status = ""; location.hash = hashFor(); } }));
       return;
     }
+    runMarks.keep(runs.map((r) => r.trace_id)); // a run that left the list is no longer marked
     // The workflow column is left out while the sidebar already names the workflow.
     const showWorkflow = !state.workflow;
     tableBox.replaceChildren(dataTable(["Status", ...(showWorkflow ? ["Workflow"] : []), "Started", "Failure"], runs.map((r) => {
@@ -405,7 +408,15 @@ const RunsLogic = (() => {
           const which = [all.length > 1 ? id : "", pass ? `pass ${pass}` : ""].filter(Boolean).join(" · ");
           return [which ? `View messages: ${which}` : "View messages", () => { location.hash = TeamsLogic.teamHash(team); }, "", "Opens the messages between the team's agents and the files they wrote"];
         }));
-      tr.addEventListener("contextmenu", (ev) => openMenu(ev, [
+      // On a marked row the menu acts on every marked run.
+      const marked = () => runs.filter((x) => runMarks.has(x.trace_id));
+      tr.addEventListener("contextmenu", (ev) => openMenu(ev, runMarks.has(r.trace_id) && runMarks.size > 1 ? [
+        [`Re-run ${runMarks.size} runs`, () => rerunMany(marked()), "", "Starts each marked run again, with the version it used and its original input"],
+        "-",
+        [`Remove ${runMarks.size} runs`, () => clearRuns(marked()), "danger", "Removes the marked runs with their artifacts"],
+        "-",
+        ["Unmark all", () => { runMarks.clear(); renderTable(); }, "", "Clears the marks; Escape does too"],
+      ] : [
         ["Re-run", () => rerun(r), "", runVersion(r) ? `Starts v${runVersion(r)} of the workflow, the version this run used, with its original input` : "Starts the newest version of the workflow with this run’s original input"],
         ...teamItems(),
         ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(r.trace_id)}`; }, "", "Opens the run's objects in Blobstore"],
@@ -414,7 +425,7 @@ const RunsLogic = (() => {
         "-",
         ["Clear runs", () => clearRuns(visibleRuns()), "danger", "Removes every run in this list with its artifacts"],
       ]));
-      return clickableRow(tr, () => { location.hash = hashFor(r.trace_id); });
+      return markableRow(tr, r.trace_id, () => runs.map((x) => x.trace_id), runMarks, () => { location.hash = hashFor(r.trace_id); }, renderTable);
     }), { name: showWorkflow ? 1 : -1, optional: [showWorkflow ? 3 : 2] })); // Failure gives way as a column, header included
   }
 
@@ -442,6 +453,25 @@ const RunsLogic = (() => {
       location.hash = `#runs/${encodeURIComponent(next.trace_id)}`;
     } catch (error) { setStatus(`Not started: ${error.message}`, "error"); }
     finally { rerunning.delete(run.trace_id); }
+  }
+
+  // rerunMany starts each run again, like Re-run, and stays on the list: "Started 3 runs".
+  async function rerunMany(list) {
+    let started = 0;
+    for (const run of list) {
+      if (!run.workflow || rerunning.has(run.trace_id)) continue;
+      rerunning.add(run.trace_id);
+      try {
+        const input = run.input_artifact || `runs/${run.trace_id}/input`;
+        const version = runVersion(run) ? `&version=${runVersion(run)}` : "";
+        await api("POST", `/api/orchestrator/workflows/${encodeURIComponent(run.workflow)}/runs?input=${encodeURIComponent(input)}${version}`, undefined, creatorHeaders());
+        started++;
+      } catch (error) { setStatus(`Not started: ${titleCase(run.workflow)}: ${error.message}`, "error"); }
+      finally { rerunning.delete(run.trace_id); }
+    }
+    runMarks.clear();
+    if (started) setSaveState(started === 1 ? "Started" : `Started ${started} runs`);
+    runIndex.refresh().then(renderTable).catch(() => {});
   }
 
   // clearRuns removes runs with their history and artifacts, after one confirmation.
@@ -557,7 +587,36 @@ const RunsLogic = (() => {
     // A merge or batch names itself and the sources that did not deliver: 'merge "collect" timed out: no result from "long-b"'.
     if (/^(merge|batch) "/.test(msg)) msg = msg.replace(/^(?:merge|batch) "([^"]+)"/, (_, id) => titleCase(id)).replace(/"([^"]+)"/g, (_, id) => titleCase(id));
     const text = msg || String(error);
-    return text.charAt(0).toUpperCase() + text.slice(1); // a sentence, like every other line
+    return text.replace(/^[A-Za-z]+/, (word) => titleCase(word)); // a sentence, like every other line ("LLM gateway: 404", never "Llm")
+  }
+
+  let focusedStep = { trace: "", id: "" }; // the step picked out by a click on its tile
+
+  // runGraph draws a run's workflow version read-only (see WorkflowGraph.drawGraph), each tile
+  // in the state stateOf gives its step, fitted to the detail's width and at most 360 px high.
+  // onTile(id) answers a click or Enter on a tile. null for a definition without steps.
+  function runGraph(def, stateOf, onTile, selected = null) {
+    if (!def?.steps?.length) return null;
+    const w = { ...def, steps: def.steps.map((s) => ({ ...s, position: s.position ? { ...s.position } : undefined })) };
+    WorkflowGraph.autoLayout(w);
+    const width = Math.max(320, (detail.clientWidth || 640) - 50);
+    let view = WorkflowGraph.fitView(w, width, { input: false, minScale: 0.35, maxScale: 0.8, margin: 16 });
+    if (view.height > 360) view = WorkflowGraph.fitView(w, width, { input: false, minScale: 0.35, maxScale: 0.8, margin: 16, height: 360 });
+    const svg = document.createElementNS(WorkflowGraph.SVG_NS, "svg");
+    svg.setAttribute("class", "run-graph");
+    svg.setAttribute("role", "group");
+    svg.setAttribute("aria-label", "Workflow graph of this run");
+    svg.setAttribute("width", Math.max(width, Math.ceil(view.width)));
+    svg.setAttribute("height", Math.min(360, Math.ceil(view.height)));
+    const wrap = h("div", { className: "run-graph-wrap" }, svg);
+    WorkflowGraph.drawGraph(svg, w, {
+      view, stateOf, selected, idPrefix: "run-",
+      onTile: (s, { g }) => {
+        g.addEventListener("click", () => onTile(s.id));
+        g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onTile(s.id); } });
+      },
+    });
+    return h("div", { className: "section" }, wrap);
   }
 
   // existingAgents lists the agent references the registry still has, refreshed every 30 s.
@@ -821,9 +880,18 @@ const RunsLogic = (() => {
       const first = visibleRuns()[0];
       if (first) { state.selected = first.trace_id; history.replaceState(null, "", hashFor(first.trace_id)); renderTable(); return renderDetail(); }
       detail.replaceChildren();
+      detail.dataset.trace = "";
       return;
     }
     const r = runIndex.records.get(trace);
+    // Another run is loading: the detail says so at once, instead of going blank or keeping the
+    // last run's steps. A redraw of the run on show keeps what it shows until the new one is ready.
+    if (detail.dataset.trace !== trace) {
+      detail.dataset.trace = trace;
+      detail.setAttribute("aria-busy", "true");
+      detail.replaceChildren(h("div", { className: "panel-head" }), h("div", { className: "panel-body" },
+        h("div", { className: "section" }, h("p", { className: "muted loading-line", role: "status" }, `Loading ${titleCase(r?.workflow || "the run")}…`))));
+    }
     const st = await runIndex.status(trace);
     if (state.selected !== trace) return;
     // A removed run (no record, history, or artifacts left) hands the selection to the newest one.
@@ -938,9 +1006,25 @@ const RunsLogic = (() => {
     // last row of its own, so the error never stands above nothing but completed steps.
     const failedRun = st.status && !["Running", "Completed", "Blocked"].includes(st.status) && !st.gone;
     const lastDone = rows.filter(({ id, depth }) => !depth && stepState(id) === "done").at(-1);
+    // The run's own workflow version, drawn as in the editor, each tile in its step's state. A
+    // click on a tile picks out its row in Steps; a gate that waits opens its decision.
+    // A run of a workflow that has since moved into a group finds its graph under the new name.
+    const graphDef = def?.steps?.length ? def : await runWorkflow(r?.workflow || st.workflow || "", version);
+    if (state.selected !== trace) return;
+    const graph = runGraph(graphDef, stepState, (id) => {
+      const gate = waitingGateOf(id);
+      if (gate) { location.hash = `#decisions/${encodeURIComponent(`p:${gate.workflow_id}|${gate.step}`)}`; return; }
+      focusedStep = { trace, id }; // kept across the redraws of the 3 s poll
+      const row = [...detail.querySelectorAll(".step-list li")].find((li) => li.dataset.step === id);
+      for (const li of detail.querySelectorAll(".step-list li.step-focus")) li.classList.remove("step-focus");
+      row?.classList.add("step-focus");
+      row?.scrollIntoView({ block: "nearest" });
+      for (const t of detail.querySelectorAll(".run-graph .tile")) t.classList.toggle("selected", t.dataset.step === id);
+    }, focusedStep.trace === trace ? focusedStep.id : null);
     const runEnd = failedRun && !rows.some(({ id }) => stepState(id) === "failed")
       ? h("li", { className: "no-agent no-link step-end" }, statusChip("failed"), h("span", { className: "step-name" }, RunsLogic.runEndLine(st.status, lastDone ? titleCase(lastDone.id) : "")))
       : null;
+    detail.setAttribute("aria-busy", "false");
     detail.replaceChildren(
       h("div", { className: "panel-head" }),
       h("div", { className: "panel-body" },
@@ -954,6 +1038,7 @@ const RunsLogic = (() => {
         st.status === "Blocked" ? (st.blocked ? h("div", { className: "section" }, h("p", { className: "blocked-line" }, st.blocked)) : null)
           : st.error && st.status !== "Running" && !st.gone ? h("div", { className: "section" },
             h("p", { className: "error-line", title: st.error }, rootError(st.error, trace))) : null,
+        graph,
         podSection(st.devPod, live),
         runSkillVersions(metadata),
         pullRequestSection(pullText ? RunsLogic.pullRequest(pullText) : null, st.pullRequest),
@@ -1001,7 +1086,8 @@ const RunsLogic = (() => {
             const link = rounds.length ? null : ownLink;
             // A step without an agent or a link gives its name those columns (see .step-list).
             // A nested step is indented under its workflow node and named by its own ID.
-            const row = h("li", { className: [ref ? "" : "no-agent", link ? "" : "no-link", depth ? "step-child" : ""].join(" ").trim(), style: depth ? `--step-depth:${depth}` : undefined }, statusChip(stepState(id)),
+            const focused = focusedStep.trace === trace && focusedStep.id === id ? "step-focus" : "";
+            const row = h("li", { className: [ref ? "" : "no-agent", link ? "" : "no-link", depth ? "step-child" : "", focused].join(" ").trim(), style: depth ? `--step-depth:${depth}` : undefined, dataset: { step: id } }, statusChip(stepState(id)),
               h("span", { className: "step-name", dataset: { full: id.split("/").map(titleCase).join(" / ") } }, titleCase(id.split("/").pop())), // a cut-off name shows in full on hover
               // An agent moved or deleted since the run shows as text, not as a link to another agent.
               !ref ? null : known.has(ref) ? h("a", { className: "step-agent", href: `#agents/${name}/${version}`, title: "Opens the agent in Agents" }, ref) : h("span", { className: "step-agent" }, ref),
@@ -1021,7 +1107,7 @@ const RunsLogic = (() => {
               return h("li", { className: `no-agent step-child step-pass step-round${link ? "" : " no-link"}`, style: `--step-depth:${depth + 1}` }, statusChip(r.current ? stepState(id) : "done"),
                 h("span", { className: "step-name" }, `Round ${r.round}`), link);
             })];
-          }), runEnd)))));
+          }), runEnd))));
   }
 
   // refresh loads new runs and the statuses of the visible ones; running runs are

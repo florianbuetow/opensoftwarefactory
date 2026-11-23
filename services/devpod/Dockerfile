@@ -21,7 +21,9 @@ RUN groupadd --gid 1000 dev && useradd --uid 1000 --gid 1000 --create-home --she
 
 COPY podhttp.py toolserver.py githelper.py /opt/devpod/
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/home/dev
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/home/dev \
+    DEVPOD_WORKSPACE=/workspace DEVPOD_CREDENTIAL_FILE=/credential/token \
+    GITHELPER_STATE_DIR=/var/lib/githelper GITHELPER_HOME=/tmp/githelper-home
 WORKDIR /workspace
 USER 1000:1000
 EXPOSE 8080 8081

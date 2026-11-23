@@ -258,3 +258,7 @@ On startup the registry copies a seed version into the blobstore only when that 
 
 - `services/registry/main.go` stores a seed version only when that version is missing. Agent seeds are read from `scratch/seeds/registry/agents/`, mounted at `/seed-root/current/registry/agents`.
 - `services/connectors/seed.go` does the same for repositories under `scratch/seeds/connectors/`.
+
+## An error or issue is never suppressed
+
+Suppressing an error or an issue means ignoring it. No error, warning, lint finding, or failing CI check is suppressed without written permission. The underlying cause is fixed instead.

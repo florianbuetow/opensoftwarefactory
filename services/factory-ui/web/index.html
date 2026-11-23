@@ -9,7 +9,7 @@
 </head>
 <body>
 <header class="topbar">
-  <a class="product" href="#metrics" aria-label="Open Software Factory: home">
+  <a class="product" href="#overview" aria-label="Open Software Factory: home">
     <svg class="logo" width="31" height="31" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M3 25V12l5.5-4V12l5.5-4V12l5.5-4V25"/>
       <path d="M19 8V4h3.5v5.5"/>
@@ -20,10 +20,16 @@
     <span>Open Software Factory</span>
   </a>
   <nav id="rail" class="menu" aria-label="Pages"></nav>
-  <label id="acting-as" class="acting-as" title="Recorded as creator of runs, versions, decisions, and files">
-    <span class="sr-only">Acting as</span>
-    <input id="creator" autocomplete="name" placeholder="Acting as…" aria-label="Acting as">
-  </label>
+  <div class="topbar-end">
+    <a id="service-marker" class="service-marker" href="#cluster" hidden></a>
+    <form id="trace-jump-form" class="trace-jump" role="search">
+      <input id="trace-jump" autocomplete="off" spellcheck="false" placeholder="Trace ID…" aria-label="Jump to a run by its trace ID" title="Opens the run whose trace ID starts with what you type (/)">
+    </form>
+    <label id="acting-as" class="acting-as" title="Recorded as creator of runs, versions, decisions, and files">
+      <span class="sr-only">Acting as</span>
+      <input id="creator" autocomplete="name" placeholder="Acting as…" aria-label="Acting as">
+    </label>
+  </div>
 </header>
 
 <main class="content">
@@ -42,6 +48,7 @@
       <div class="panel-body" id="intake-main"></div>
     </div>
   </section>
+  <section class="page page-overview" id="tab-overview" hidden></section>
   <section class="page page-measurements" id="tab-metrics" hidden></section>
   <section class="page page-measurements" id="tab-judges" hidden></section>
   <section class="page page-measurements" id="tab-pricing" hidden></section>
@@ -55,7 +62,7 @@
     <div class="canvas-area">
       <div class="panel-head canvas-head"></div>
       <div class="canvas-scroll" id="canvas-scroll">
-        <svg id="canvas" aria-label="Workflow graph"></svg>
+        <svg id="canvas" aria-label="Workflow graph" tabindex="0"></svg>
         <div id="canvas-message" class="canvas-message" hidden></div>
       </div>
       <div class="recent-strip" id="recent-strip" hidden></div>
@@ -226,6 +233,7 @@
 <script src="teams.js"></script>
 <script src="inputs.js"></script>
 <script src="connectors.js"></script>
+<script src="graph.js"></script>
 <script src="workflows.js"></script>
 <script src="runs.js"></script>
 <script src="evaluations.js"></script>
@@ -234,6 +242,7 @@
 <script src="intake.js"></script>
 <script src="pricing.js"></script>
 <script src="metrics.js"></script>
+<script src="overview.js"></script>
 <script src="judges.js"></script>
 <script src="registry.js"></script>
 <script src="agents.js"></script>
@@ -245,5 +254,6 @@
 <script src="sessions.js"></script>
 <script src="cluster.js"></script>
 <script src="system-diagram.js"></script>
+<script src="shortcuts.js"></script>
 </body>
 </html>

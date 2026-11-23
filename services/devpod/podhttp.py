@@ -25,6 +25,15 @@ class RefusalError(Exception):
     """A request that is refused with a sentence the caller can act on."""
 
 
+def required_env(name: str) -> str:
+    """Return the value of an environment variable; report it and exit with code 1 when it is missing or empty."""
+    value = os.environ.get(name)
+    if not value:
+        sys.stderr.write(f"The environment variable {name} is missing or empty.\n")
+        sys.exit(1)
+    return value
+
+
 def text_list(value: object) -> list[str] | None:
     """The value as a list of texts, or None when it is not one."""
     if not isinstance(value, list):
@@ -40,7 +49,8 @@ def take_token() -> str:
     On Linux the process is also made non-dumpable, so that a command of the
     same user cannot read the token from /proc/<pid>/environ.
     """
-    token = os.environ.pop("POD_TOKEN", "")
+    token = required_env("POD_TOKEN")
+    del os.environ["POD_TOKEN"]
     if sys.platform.startswith("linux"):
         with contextlib.suppress(OSError, AttributeError):
             ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE = 0
@@ -135,8 +145,13 @@ def make_handler(token: str, routes: Mapping[str, Route], unbounded_paths: Colle
     return Handler
 
 
+# The server runs in a pod and must be reachable from other pods, so it listens on all interfaces.
 def serve(
-    port: int, token: str, routes: Mapping[str, Route], host: str = "0.0.0.0", unbounded_paths: Collection[str] = ()
+    port: int,
+    token: str,
+    routes: Mapping[str, Route],
+    host: str = "0.0.0.0",  # nosec B104
+    unbounded_paths: Collection[str] = (),
 ) -> ThreadingHTTPServer:
     """Create the server (not yet serving). Port 0 picks a free port."""
     server = ThreadingHTTPServer((host, port), make_handler(token, routes, unbounded_paths))

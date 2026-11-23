@@ -28,12 +28,13 @@ from collections.abc import Callable, Sequence
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from podhttp import JsonObject, RefusalError, serve, take_token, text_list  # noqa: E402
+from podhttp import JsonObject, RefusalError, required_env, serve, take_token, text_list  # noqa: E402
 
-WORKSPACE = os.path.realpath(os.environ.get("DEVPOD_WORKSPACE", "/workspace"))
-CREDENTIAL_FILE = os.environ.get("DEVPOD_CREDENTIAL_FILE", "/credential/token")
-STATE_DIR = os.environ.get("GITHELPER_STATE_DIR", "/var/lib/githelper")
-HELPER_HOME = os.environ.get("GITHELPER_HOME", "/tmp/githelper-home")
+WORKSPACE = os.path.realpath(required_env("DEVPOD_WORKSPACE"))
+CREDENTIAL_FILE = required_env("DEVPOD_CREDENTIAL_FILE")
+STATE_DIR = required_env("GITHELPER_STATE_DIR")
+HELPER_HOME = required_env("GITHELPER_HOME")
+PATH = required_env("PATH")
 WORK_UID = 1000
 GUARD_UID = 2000
 GIT_TIMEOUT = 300
@@ -76,7 +77,7 @@ def git_bytes(
     """Run git. Returns (exit code, stdout as bytes, stderr). `config` is a list of (key, value)."""
     pairs = [("safe.directory", "*")] + list(config)
     env = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PATH": PATH,
         "HOME": HELPER_HOME,
         "LANG": "C.UTF-8",
         "GIT_TERMINAL_PROMPT": "0",
@@ -594,10 +595,8 @@ ROUTES = {"/clone": clone, "/protect": protect, "/push": push, "/patch": patch, 
 def main() -> None:
     """Serve the git-helper until the container stops."""
     token = take_token()
-    if not token:
-        sys.stderr.write("POD_TOKEN is not set; every call will be refused.\n")
     os.makedirs(HELPER_HOME, exist_ok=True)
-    server = serve(int(os.environ.get("PORT", "8081")), token, ROUTES)
+    server = serve(int(required_env("PORT")), token, ROUTES)
     server.serve_forever()
 
 

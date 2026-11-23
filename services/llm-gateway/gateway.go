@@ -76,10 +76,10 @@ func (g *Gateway) resolveRoute(ctx context.Context, model string) (route, bool) 
 	return found, matches == 1
 }
 
-func apiError(w http.ResponseWriter, status int, message, kind string) {
+func apiError(w http.ResponseWriter, status int, message, kind string) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": nil}})
+	return json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": nil}})
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +112,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		requestLog.Log(ctx, level, "request completed", attrs...)
 	}()
-	fail := func(s int, msg, kind string) { status = s; apiError(w, s, msg, kind) }
+	fail := func(s int, msg, kind string) {
+		status = s
+		if writeErr := apiError(w, s, msg, kind); writeErr != nil {
+			requestLog.ErrorContext(ctx, "error response write failed", "error", writeErr)
+		}
+	}
 	var path string
 	var body io.Reader
 	var selected route
@@ -212,7 +217,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			request["stream"] = json.RawMessage("false")
 			delete(request, "stream_options")
 		}
-		request["model"], _ = json.Marshal(selected.model)
+		encodedModel, err := json.Marshal(selected.model)
+		if err != nil {
+			fail(500, "Unable to encode upstream model", "api_error")
+			return
+		}
+		request["model"] = encodedModel
 		encoded, err := json.Marshal(request)
 		if err != nil {
 			fail(400, "Invalid JSON request", "invalid_request_error")
@@ -234,7 +244,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": g.listModels(ctx)})
+		if writeErr := json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": g.listModels(ctx)}); writeErr != nil {
+			requestLog.ErrorContext(ctx, "model list write failed", "error", writeErr)
+		}
 		return
 	case strings.HasPrefix(r.URL.Path, "/v1/models/"):
 		operation = "models.retrieve"
@@ -286,7 +298,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var usageCtx usageContext
 	if attemptID != "" {
 		usageCtx = usageContextFromRequest(r, span, attemptID, requestedAt, selected, requestedModel, effort, modes, requestSettings)
-		if err := g.beginUsageAttempt(ctx, usageCtx); err != nil {
+		if beginErr := g.beginUsageAttempt(ctx, usageCtx); beginErr != nil {
 			fail(503, "Usage evidence unavailable", "api_error")
 			return
 		}
@@ -299,14 +311,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(502, "Upstream connection failed", "api_error")
 		return
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			requestLog.ErrorContext(ctx, "upstream response close failed", "provider", provider, "error", closeErr)
+		}
+	}()
 	if attemptID != "" {
 		w.Header().Set("X-Usage-Measurement-Id", attemptID)
 	}
 	status = response.StatusCode
 	if synthetic && status >= 200 && status < 300 {
-		completion, err := readCompletion(response.Body)
-		if err != nil {
+		completion, readErr := readCompletion(response.Body)
+		if readErr != nil {
 			g.completeUsage(ctx, usageCtx, nil, false)
 			fail(502, "Invalid upstream completion", "api_error")
 			return
@@ -333,7 +349,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var dst io.Writer = w
 	if streaming && status >= 200 && status < 300 {
 		dst = flushWriter{w}
-		_ = http.NewResponseController(w).Flush()
+		if flushErr := http.NewResponseController(w).Flush(); flushErr != nil {
+			requestLog.ErrorContext(ctx, "response flush failed", "provider", provider, "error", flushErr)
+		}
 	}
 	observer := newUsageObserver(streaming)
 	if _, err = io.Copy(dst, io.TeeReader(response.Body, observer)); err != nil {
@@ -437,7 +455,7 @@ func (g *Gateway) providerModels(ctx context.Context, p *Provider) providerCatal
 		u.Path, u.RawPath = "/api/v1/models", ""
 		endpoint = u.String()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return providerCatalog{}
 	}
@@ -448,7 +466,11 @@ func (g *Gateway) providerModels(ctx context.Context, p *Provider) providerCatal
 		g.log.WarnContext(ctx, "model list unavailable", "provider", p.Name)
 		return providerCatalog{}
 	}
-	defer res.Body.Close()
+	defer func() {
+		if closeErr := res.Body.Close(); closeErr != nil {
+			g.log.ErrorContext(ctx, "model list close failed", "provider", p.Name, "error", closeErr)
+		}
+	}()
 	if res.StatusCode != http.StatusOK {
 		g.log.WarnContext(ctx, "model list unavailable", "provider", p.Name, "status", res.StatusCode)
 		return providerCatalog{}
@@ -566,9 +588,17 @@ func readCompletion(r io.Reader) (completion, error) {
 				if calls[j] == nil {
 					return c, fmt.Errorf("invalid tool call")
 				}
-				calls[j]["index"], _ = json.Marshal(j)
+				index, err := json.Marshal(j)
+				if err != nil {
+					return c, err
+				}
+				calls[j]["index"] = index
 			}
-			choice.Message["tool_calls"], _ = json.Marshal(calls)
+			encodedCalls, err := json.Marshal(calls)
+			if err != nil {
+				return c, err
+			}
+			choice.Message["tool_calls"] = encodedCalls
 		}
 	}
 	return c, nil

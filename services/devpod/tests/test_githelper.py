@@ -17,6 +17,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+os.environ["DEVPOD_WORKSPACE"] = "/workspace"
+os.environ["DEVPOD_CREDENTIAL_FILE"] = "/credential/token"
+os.environ["GITHELPER_STATE_DIR"] = "/var/lib/githelper"
+os.environ["GITHELPER_HOME"] = "/var/lib/githelper/home"
 import githelper  # noqa: E402
 import podhttp  # noqa: E402
 from podhttp import JsonObject, RefusalError  # noqa: E402

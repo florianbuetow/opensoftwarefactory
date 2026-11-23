@@ -136,7 +136,7 @@ type usageObserver struct {
 
 func newUsageObserver(streaming bool) *usageObserver { return &usageObserver{streaming: streaming} }
 
-func nextSSEFrame(data []byte) (int, int) {
+func nextSSEFrame(data []byte) (end, separator int) {
 	lf := bytes.Index(data, []byte("\n\n"))
 	crlf := bytes.Index(data, []byte("\r\n\r\n"))
 	if crlf >= 0 && (lf < 0 || crlf < lf) {
@@ -358,7 +358,7 @@ func (g *Gateway) completeUsage(ctx context.Context, c usageContext, raw json.Ra
 	}
 }
 
-func (g *Gateway) storeOutbox(ctx context.Context, outbox usageOutbox, createOnly bool) error {
+func (g *Gateway) storeOutbox(ctx context.Context, outbox usageOutbox, createOnly bool) (err error) {
 	data, err := json.Marshal(outbox)
 	if err != nil {
 		return err
@@ -376,15 +376,17 @@ func (g *Gateway) storeOutbox(ctx context.Context, outbox usageOutbox, createOnl
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	defer func() { err = closeAfter(err, resp.Body) }()
+	if _, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); drainErr != nil {
+		return drainErr
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("outbox PUT: %s", resp.Status)
 	}
 	return nil
 }
 
-func (g *Gateway) storePending(ctx context.Context, pending usagePending, createOnly bool) error {
+func (g *Gateway) storePending(ctx context.Context, pending usagePending, createOnly bool) (err error) {
 	data, err := json.Marshal(pending)
 	if err != nil {
 		return err
@@ -403,17 +405,19 @@ func (g *Gateway) storePending(ctx context.Context, pending usagePending, create
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	defer func() { err = closeAfter(err, resp.Body) }()
+	if _, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); drainErr != nil {
+		return drainErr
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("pending PUT: %s", resp.Status)
 	}
 	return nil
 }
 
-func (g *Gateway) deletePending(ctx context.Context, id string) error {
+func (g *Gateway) deletePending(ctx context.Context, id string) (err error) {
 	endpoint := g.blobstoreURL + "/blobs/" + usagePendingPrefix + "/" + id + ".json"
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -421,8 +425,10 @@ func (g *Gateway) deletePending(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	defer func() { err = closeAfter(err, resp.Body) }()
+	if _, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); drainErr != nil {
+		return drainErr
+	}
 	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("pending DELETE: %s", resp.Status)
 	}
@@ -448,9 +454,13 @@ func (g *Gateway) deliverOutbox(ctx context.Context, outbox *usageOutbox) error 
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		_ = resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
-			err = readErr
+			err = errors.Join(readErr, closeErr)
+			continue
+		}
+		if closeErr != nil {
+			err = closeErr
 			continue
 		}
 		switch {
@@ -471,8 +481,8 @@ func (g *Gateway) deliverOutbox(ctx context.Context, outbox *usageOutbox) error 
 	return nil
 }
 
-func (g *Gateway) compareExistingMeasurement(ctx context.Context, endpoint string, expected []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func (g *Gateway) compareExistingMeasurement(ctx context.Context, endpoint string, expected []byte) (err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -480,7 +490,7 @@ func (g *Gateway) compareExistingMeasurement(ctx context.Context, endpoint strin
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
 		return err
@@ -494,22 +504,30 @@ func (g *Gateway) compareExistingMeasurement(ctx context.Context, endpoint strin
 	}
 	revision, _ := got["revision"].(string)
 	delete(got, "revision")
-	wantJSON, _ := json.Marshal(want)
-	gotJSON, _ := json.Marshal(got)
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		return err
+	}
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		return err
+	}
 	if !bytes.Equal(wantJSON, gotJSON) {
 		if got["status"] == "missing" && want["status"] == "reported" && sameAttemptIdentity(got, want) && revision != "" {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(expected))
-			if err != nil {
-				return err
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(expected))
+			if reqErr != nil {
+				return reqErr
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("If-Match", `"`+revision+`"`)
-			resp, err := g.evidenceClient.Do(req)
-			if err != nil {
-				return err
+			resp, doErr := g.evidenceClient.Do(req)
+			if doErr != nil {
+				return doErr
 			}
-			defer resp.Body.Close()
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+			defer func() { err = closeAfter(err, resp.Body) }()
+			if _, drainErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); drainErr != nil {
+				return drainErr
+			}
 			if resp.StatusCode/100 == 2 {
 				return nil
 			}
@@ -546,8 +564,8 @@ func (g *Gateway) replayUsageOutbox(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (g *Gateway) pendingUsageCount(ctx context.Context) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.blobstoreURL+"/list/"+usagePendingPrefix, nil)
+func (g *Gateway) pendingUsageCount(ctx context.Context) (_ int, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.blobstoreURL+"/list/"+usagePendingPrefix, http.NoBody)
 	if err != nil {
 		return 0, err
 	}
@@ -555,7 +573,7 @@ func (g *Gateway) pendingUsageCount(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return 0, nil
 	}
@@ -571,11 +589,11 @@ func (g *Gateway) pendingUsageCount(ctx context.Context) (int, error) {
 	return len(listing.Objects), nil
 }
 
-func (g *Gateway) replayPendingUsage(ctx context.Context, recoverActive bool) error {
+func (g *Gateway) replayPendingUsage(ctx context.Context, recoverActive bool) (err error) {
 	if g.blobstoreURL == "" || g.evaluationURL == "" {
 		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.blobstoreURL+"/list/"+usagePendingPrefix, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.blobstoreURL+"/list/"+usagePendingPrefix, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -583,7 +601,7 @@ func (g *Gateway) replayPendingUsage(ctx context.Context, recoverActive bool) er
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil
 	}
@@ -651,8 +669,8 @@ func (g *Gateway) replayPendingUsage(ctx context.Context, recoverActive bool) er
 	return errors.Join(replayErrors...)
 }
 
-func (g *Gateway) getBlobJSON(ctx context.Context, id string, target any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.blobstoreURL+"/blobs/"+id, nil)
+func (g *Gateway) getBlobJSON(ctx context.Context, id string, target any) (err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.blobstoreURL+"/blobs/"+id, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -660,7 +678,7 @@ func (g *Gateway) getBlobJSON(ctx context.Context, id string, target any) error 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: %s", id, resp.Status)
 	}
@@ -682,4 +700,12 @@ func (g *Gateway) replayUsageOutboxLoop(ctx context.Context) {
 			cancel()
 		}
 	}
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }

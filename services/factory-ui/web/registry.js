@@ -109,11 +109,14 @@ function registryTab({ tab, base, noun, files, fileTree }) {
   const page = $(`tab-${tab}`);
   const treeBox = h("ul");
   const detail = h("div", { className: "panel-body registry-detail" });
+  // The content header names what is open: "Review Elephant · v3", "New agent", or nothing.
+  const contentHead = h("div", { className: "panel-head" });
+  const setHead = (title, note = "") => contentHead.replaceChildren(...(title ? [h("h2", { dataset: { full: title } }, title)] : []), ...(note ? [h("span", { className: "muted registry-head-note" }, note)] : []));
   page.append(
     h("aside", { className: "panel list-panel" },
       h("div", { className: "panel-head" }, h("h2", {}, plural), iconButton("plus", `New ${noun}`, () => showNewForm())),
       h("div", { className: "panel-body", oncontextmenu: (ev) => { if (!ev.target.closest(".tree-row")) openMenu(ev, createItems("")); } }, treeBox)),
-    h("div", { className: "panel content-panel" }, h("div", { className: "panel-head" }), detail),
+    h("div", { className: "panel content-panel" }, contentHead, detail),
   );
 
   const remember = (name) => { try { localStorage.setItem(LAST_KEY, name); } catch { /* storage unavailable */ } };
@@ -143,9 +146,10 @@ function registryTab({ tab, base, noun, files, fileTree }) {
 
   function renderTree() {
     tree.setRoots(groupNodes(folderPaths(), state.entries, (e) => e.name,
-      (f, children) => ({ id: `f:${f}`, label: leafOf(f), children }),
+      // Groups and names read in title case, as workflows do; the stored ID is the tooltip.
+      (f, children) => ({ id: `f:${f}`, label: titleCase(leafOf(f)), title: f, children }),
       (e) => ({
-        id: `n:${e.name}`, label: leafOf(e.name),
+        id: `n:${e.name}`, label: titleCase(leafOf(e.name)), title: e.name,
         children: [
           ...(state.draft?.name === e.name ? [{ id: `d:${e.name}`, label: state.draft.version, title: "Not stored until saved", className: "draft" }] : []),
           ...(state.versions.get(e.name) || []).map((v) => ({ id: `v:${e.name}@${v.version}`, label: v.version, title: fullTime(v.created) })),
@@ -455,6 +459,7 @@ function registryTab({ tab, base, noun, files, fileTree }) {
   // renderContent shows a version's files. The Save row appears with the first edit, or at
   // once for a draft version, which Cancel discards.
   function renderContent(c, draft = false) {
+    setHead(`${titleCase(c.name)} · ${c.version}`, draft ? "Not saved yet" : "");
     let areas;
     const problem = h("p", { className: "error-text", role: "alert" });
     const actions = h("div", { className: "section actions", hidden: true });
@@ -516,6 +521,7 @@ function registryTab({ tab, base, noun, files, fileTree }) {
   }
 
   async function showNewForm(prefill = null) {
+    setHead(`New ${noun}`);
     if (!(await confirmLeave())) return;
     state.unsaved = false;
     state.name = state.version = "";
@@ -647,6 +653,7 @@ function registryTab({ tab, base, noun, files, fileTree }) {
         state.name = state.version = "";
         if (pick) { location.replace(`#${tab}/${pick.name}`); return; }
         // Nothing stored yet: the empty state, like Workflows without a workflow.
+        setHead("");
         detail.replaceChildren(emptyPanel(`No ${plural.toLowerCase()} yet`, { label: `New ${noun}`, primary: true, run: () => showNewForm(null) }));
         return;
       }
@@ -668,6 +675,7 @@ function registryTab({ tab, base, noun, files, fileTree }) {
       state.unsaved = false;
       renderContent(c);
     } catch (e) {
+      if (seq === state.seq) setHead("");
       if (seq === state.seq) detail.replaceChildren(errorPanel(`Cannot load ${name || plural.toLowerCase()}: ${e.message}`, () => show(rest)));
     }
   }

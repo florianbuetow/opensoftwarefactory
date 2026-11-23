@@ -88,14 +88,16 @@
       const pods = podsOf(x.spec?.selector?.matchLabels);
       pods.forEach((p) => owned.add(p.metadata.name));
       const desired = x.spec?.replicas ?? 0, ready = x.status?.readyReplicas || 0;
-      return { id: `deployment:${x.metadata.name}`, kind: "deployment", label: x.metadata.name, sub: ready < desired ? `${ready}/${desired}` : "", className: ready < desired ? "warn" : "", children: pods.map(podNode) };
+      // A deployment short of replicas says so in a word, the counts in its tooltip: never a bare "0/1".
+      const short = ready < desired;
+      return { id: `deployment:${x.metadata.name}`, kind: "deployment", label: x.metadata.name, title: short ? `${x.metadata.name}: ${ready} of ${desired} replicas ready` : x.metadata.name, sub: short ? (ready ? "Starting" : "Not ready") : "", className: short ? "warn" : "", children: pods.map(podNode) };
     });
     const others = sortByName(d.pods).filter((p) => !owned.has(p.metadata.name)).map(podNode);
     const roots = [{ id: "deployments", label: "Deployments", children: deployments }];
     if (others.length) roots.push({ id: "pods", label: "Other pods", children: others });
     roots.push(
       { id: "services", label: "Services", children: sortByName(d.services).map((x) => ({ id: `service:${x.metadata.name}`, kind: "service", label: x.metadata.name })) },
-      { id: "nodes", label: d.nodes.length === 1 ? "Node" : "Nodes", children: d.nodes.map((n) => ({ id: `node:${n.metadata.name}`, kind: "node", label: n.metadata.name, full: n.metadata.name, sub: nodeReady(n) ? "" : "NotReady", className: nodeReady(n) ? "" : "warn" })) },
+      { id: "nodes", label: d.nodes.length === 1 ? "Node" : "Nodes", children: d.nodes.map((n) => ({ id: `node:${n.metadata.name}`, kind: "node", label: n.metadata.name, full: n.metadata.name, sub: nodeReady(n) ? "" : "Not ready", className: nodeReady(n) ? "" : "warn" })) },
     );
     tree.setRoots(roots);
     if (!state.opened) { state.opened = true; tree.reveal(["deployments"]); }

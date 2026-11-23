@@ -37,13 +37,13 @@ type route struct {
 	model    string
 }
 
-func loadConfig(path string) (Config, error) {
+func loadConfig(path string) (_ Config, err error) {
 	c := Config{LogLevel: "DEBUG"}
 	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return c, err
 	}
-	defer f.Close()
+	defer func() { err = closeAfter(err, f) }()
 	d := yaml.NewDecoder(f)
 	d.KnownFields(true)
 	if err = d.Decode(&c); err != nil {

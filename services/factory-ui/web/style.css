@@ -53,7 +53,17 @@ time { white-space: nowrap; }
 .product { display: inline-flex; align-items: center; gap: 10px; flex: none; color: var(--text); font-size: 1rem; font-weight: 600; white-space: nowrap; text-decoration: none; }
 .product:hover { text-decoration: none; }
 .topbar > .product { justify-self: start; }
-.topbar > .acting-as { justify-self: end; }
+.topbar > .topbar-end { justify-self: end; display: flex; align-items: center; gap: 12px; min-width: 0; }
+/* A service that is not ready: a chip with its name, linking to Cluster. */
+.service-marker { display: inline-flex; text-decoration: none; white-space: nowrap; }
+/* The trace ID jump: a small field like Acting as; / focuses it. */
+.trace-jump { margin: 0; }
+.trace-jump input { width: 112px; height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 16px; background: var(--canvas); color: var(--text); font: inherit; font-size: .8125rem; }
+.trace-jump input::placeholder { color: var(--muted); }
+.topbar.fit-logo .trace-jump { display: none; } /* a narrow top bar keeps the menu and Acting as */
+.service-marker:hover { text-decoration: none; filter: brightness(.97); }
+.service-marker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+.service-marker .chip { color: var(--danger-text); }
 .product .logo { color: var(--text); flex: none; }
 .product .logo-door { fill: var(--accent-tint); stroke: var(--accent); }
 .product .logo-leaf { stroke: var(--accent); }
@@ -95,8 +105,9 @@ time { white-space: nowrap; }
 .nav-popover .nav-planned { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; color: var(--muted); cursor: default; }
 
 /* Pages and panels */
-.content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
-.page { position: relative; height: 100%; display: grid; min-height: 0; }
+/* Each page clips itself; the content area clips nothing, so the toggles row placed over it never is. */
+.content { position: relative; min-width: 0; min-height: 0; }
+.page { position: relative; height: 100%; display: grid; min-height: 0; overflow: hidden; }
 /* Narrow windows: the side columns give way (the sidebar down to 200 px, the detail down to 320 px,
    their resize minimums) before the middle column drops under 420 px; from 1192 px on, every column
    keeps its set width. */
@@ -131,6 +142,8 @@ time { white-space: nowrap; }
 .page-decisions.no-list { grid-template-columns: minmax(0, 1fr) var(--detail-fit); }
 .page-decisions.no-detail { grid-template-columns: var(--list-fit) minmax(0, 1fr); }
 .page-decisions.no-list.no-detail { grid-template-columns: minmax(0, 1fr); }
+.decisions-panel .dec-workflow { max-width: 160px; overflow: hidden; text-overflow: ellipsis; } /* the Question takes the room */
+.decisions-panel .dec-by { max-width: 112px; overflow: hidden; text-overflow: ellipsis; }
 .page.no-detail > .decision-detail { display: none; }
 .page-sessions { grid-template-columns: var(--list-fit) minmax(0, 1fr) var(--detail-fit); }
 .page-sessions.no-list { grid-template-columns: minmax(0, 1fr) var(--detail-fit); }
@@ -152,7 +165,9 @@ time { white-space: nowrap; }
 .page-toggles .icon-button { border-color: transparent; background: transparent; }
 .page-toggles .icon-button:hover { background: var(--hover); }
 .page-toggles .icon-button.on { background: var(--accent-tint); color: var(--accent-text); }
-.page-toggles .icon-button:focus, .page-toggles .icon-button:focus-visible { outline: none; box-shadow: none; }
+/* A click leaves no ring; the keyboard always shows where it is. */
+.page-toggles .icon-button:focus:not(:focus-visible) { outline: none; box-shadow: none; }
+.page-toggles .icon-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border-right: 1px solid var(--line); }
 .panel.toggles-edge { border-right: 0; } /* the panel at the window's right edge draws no line there */
 .panel:last-child { border-right: 0; }
@@ -215,8 +230,8 @@ label { display: block; margin: 12px 0 4px; font-size: .75rem; font-weight: 500;
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* Segmented control */
-.segmented { display: inline-flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); }
-.segmented button { height: 28px; border: 0; background: transparent; color: var(--muted); }
+.segmented { display: inline-flex; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--canvas); } /* the options never touch its edge */
+.segmented button { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
 .segmented button[aria-checked="true"], .segmented button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
 
 /* Status chip: dot plus word on a 12% tint */
@@ -251,9 +266,14 @@ label { display: block; margin: 12px 0 4px; font-size: .75rem; font-weight: 500;
 .data-table tbody tr.clickable { cursor: pointer; }
 .data-table tbody tr:hover { background: var(--hover); }
 .data-table tbody tr.active, .data-table tbody tr[aria-selected="true"] { background: var(--accent-tint); }
+/* A marked row (Cmd/Ctrl+click, Shift+click, X): an accent edge and a lighter tint, apart from the one selected row. */
+.data-table tbody tr.marked { background: rgb(47 111 222 / .07); box-shadow: inset 3px 0 0 var(--accent); }
+.data-table tbody tr.marked[aria-selected="true"] { background: var(--accent-tint); }
 .data-table tbody tr:focus-visible { outline-offset: -2px; }
 .data-table tbody tr.run-failed { background: color-mix(in srgb, var(--failed) 8%, var(--panel)); }
 .data-table tbody tr.run-failed:hover { background: color-mix(in srgb, var(--failed) 13%, var(--panel)); }
+/* A selected failed row keeps its red tint and takes the accent outline, so the one selected stands out among failed rows. */
+.data-table tbody tr.run-failed[aria-selected="true"] { background: color-mix(in srgb, var(--failed) 8%, var(--panel)); box-shadow: inset 0 0 0 2px var(--accent); }
 .run-failure { max-width: 280px; overflow: hidden; color: var(--danger-text); text-overflow: ellipsis; }
 /* A run is named by its workflow: in a middle column under 640 px Failure gives way first (the
    row keeps its tint, state, and tooltip), so the Workflow column stays readable. */
@@ -320,6 +340,7 @@ ul.tree ul { padding-left: 14px; }
 ul.tree:focus-visible .tree-row.active { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tree-label { overflow: hidden; text-overflow: ellipsis; }
 .tree-sub { margin-left: auto; padding-left: 8px; color: var(--muted); font-size: .75rem; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#art-tree .tree-sub { flex: none; font-family: ui-monospace, SF Mono, Menlo, monospace; } /* a run folder's shortened trace ID */
 .tree-row.warn .tree-label { color: var(--danger-text); }
 .caret { flex: none; width: 20px; height: 32px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
 .caret .icon { display: inline-flex; transition: transform .12s ease-out; }
@@ -347,6 +368,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .canvas-scroll { position: relative; overflow: hidden; min-height: 0; }
 #canvas { display: block; width: 100%; height: 100%; user-select: none; touch-action: none; cursor: grab; } /* a drag pans it, or moves a node */
 #canvas.panning, #canvas.panning * { cursor: grabbing; }
+#canvas:focus { outline: none; }
+#canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; } /* Shift+F10 opens its menu: Run, Add step, … */
 .canvas-message { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; pointer-events: none; }
 .canvas-message > * { pointer-events: auto; }
 
@@ -358,7 +381,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tile.missing.selected .body { stroke-width: 3; }
 .tile.missing .sub { fill: var(--danger-text); }
 .tile:focus, .tile:focus-visible { outline: none; }
-.tile:focus-visible .body { stroke: var(--accent); stroke-width: 2; }
+.tile .focus-ring { fill: none; stroke: transparent; stroke-width: 2; pointer-events: none; }
+.tile:focus-visible .focus-ring { stroke: var(--accent); }
 .input-edge { stroke-dasharray: 4 4; }
 .input-tile { cursor: pointer; }
 .tile .name { fill: var(--text); font-size: 14px; font-weight: 600; }
@@ -400,6 +424,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .text-format-toggle { width: 42px; min-width: 42px; padding: 0; text-align: center; font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .content-format { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .file-block.markdown { white-space: normal; }
+/* Read as prose: a line of rendered Markdown runs at most about 75 characters; tables and code keep the full width. */
+.file-block.markdown :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, dl) { max-width: 64ch; } /* inside .markdown-body too; 64 widths of "0" hold about 75 characters of text */
+.wf-description-text { max-width: 64ch; }
 .markdown-body { max-width: 72ch; line-height: 1.55; overflow-wrap: anywhere; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
@@ -432,6 +459,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ctx-menu button:hover, .ctx-menu button:focus-visible { background: var(--hover); outline: none; }
 .menu-target { outline: 1px solid var(--accent); outline-offset: -1px; }
 .ctx-menu button.disabled { opacity: .5; cursor: default; }
+/* A submenu: its item ends in a chevron; opened, its label leads back. */
+.ctx-menu button.has-submenu::after { content: "›"; float: right; color: var(--muted); }
+.ctx-menu button.menu-back { font-weight: 600; }
+.ctx-menu button.menu-back::before { content: "‹ "; color: var(--muted); }
 .ctx-menu button.danger { color: var(--danger-text); }
 .picker-popover { width: min(360px, calc(100vw - 16px)); padding: 0; }
 .agent-policy-popover-list { max-height: 320px; overflow: auto; padding-top: 4px; }
@@ -635,6 +666,12 @@ select.fit { width: auto; }
 /* An agent's settings sit in one row above its files, each field as wide as its value; the row
    wraps only when the panel is too narrow. Group and Name share a row in a form and stack in a dialog. */
 .file-fields, .name-fields { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 8px; }
+/* Agent settings in named groups, one under the other; the fields of a group wrap together. */
+.file-fields > .settings-group { flex: 1 1 100%; min-width: 0; }
+.file-fields > .settings-group + .settings-group { padding-top: 16px; border-top: 1px solid var(--line); }
+.settings-group-title { margin: 0 0 8px; font-size: .75rem; font-weight: 600; color: var(--muted); }
+.settings-group-fields { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 8px; min-width: 0; }
+.registry-head-note { font-size: .8125rem; white-space: nowrap; }
 .file-fields .field label, .name-fields .field label { margin: 0 0 4px; }
 .registry-detail .file-fields .field input { min-width: 0; }
 .file-fields input, .file-fields select, .name-fields input { width: auto; max-width: 100%; }
@@ -679,6 +716,7 @@ select.fit { width: auto; }
 .model-dot.available { color: var(--done, #1f8a4c); }
 .model-dot.unavailable { color: var(--failed, #c23a3a); }
 .model-dot.unknown { color: var(--muted); }
+.model-state { display: inline-flex; align-items: center; min-height: 32px; margin-left: 4px; }
 .model-select option.available { color: var(--done, #1f8a4c); }
 .model-select option.unavailable { color: var(--failed, #c23a3a); }
 .model-select option.unknown { color: var(--muted); }
@@ -700,6 +738,8 @@ select.fit { width: auto; }
 .memory-reference-links ul { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; list-style: none; font-size: .8125rem; }
 .memory-reference-links li { min-width: 0; overflow-wrap: anywhere; }
 .content-panel .prompt-evidence-links, .content-panel .memory-reference-links { margin: 0; padding: 16px 24px 0; }
+/* In Blobstore's detail, already inset 24 px, they line up with the document under them, 16 px above it. */
+#art-detail .prompt-evidence-links, #art-detail .memory-reference-links { padding: 0; margin: 0 0 16px; }
 
 /* Interactive sessions (chat.js): chat and file tabs in the middle column, the session's files on the right. */
 .chat-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 320px); height: 100%; min-height: 0; } /* mounted without a files column of its own */
@@ -1013,7 +1053,87 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
   .series-3 { color: #dbad58; } .series-4 { color: #ef8383; } .series-5 { color: #6bc7d1; }
 }
 
+/* A read-only workflow graph (Runs detail, Overview): the same tiles, each showing its step's state
+   as a dot and a word on its second line, with its outline in the state colour. No ports to drag. */
+.run-graph { display: block; user-select: none; }
+.run-graph .port { cursor: default; pointer-events: none; }
+.run-graph .tile { cursor: pointer; }
+.run-graph .tile.state-idle .name { fill: var(--muted); }
+.tile .state-word { fill: var(--muted); }
+.tile .state-dot { fill: var(--muted); }
+.tile.state-running .body { stroke: var(--running); stroke-width: 2; }
+.tile.state-running .state-dot { fill: var(--running); animation: pulse 1.4s ease-in-out infinite; }
+.tile.state-done .body { stroke: var(--done); }
+.tile.state-done .state-dot { fill: var(--done); }
+.tile.state-failed .body { stroke: var(--failed); stroke-width: 2; }
+.tile.state-failed .state-dot { fill: var(--failed); }
+.tile.state-waiting .body, .tile.state-blocked .body { stroke: var(--waiting); stroke-width: 2; }
+.tile.state-waiting .state-dot { fill: var(--waiting); }
+.tile .state-dot.hollow { fill: none; stroke: var(--waiting); stroke-width: 2; }
+.run-graph .tile.selected .body { stroke: var(--accent); stroke-width: 2; }
+
+.run-graph-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); }
+.step-list li.step-focus { background: var(--accent-tint); }
+/* Keyboard shortcuts: each key as a small key cap. */
+kbd { display: inline-block; min-width: 20px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--canvas); color: var(--text); font: 600 .75rem/1.45 ui-monospace, SF Mono, Menlo, monospace; text-align: center; white-space: nowrap; }
+.shortcut-table td:first-child { width: 120px; }
+/* The full text of what is cut off in the row that has keyboard focus. */
+.focus-tip { position: fixed; z-index: 30; max-width: min(560px, calc(100vw - 16px)); padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); font-size: .8125rem; line-height: 1.45; overflow-wrap: anywhere; pointer-events: none; }
+.focus-tip > div + div { margin-top: 4px; }
+/* Connect to…: one checkbox per step, 40 px rows; a step that cannot receive the output says why. */
+.connect-options { display: flex; flex-direction: column; max-height: 50vh; overflow: auto; }
+.connect-option { display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.connect-option .muted { margin-left: auto; font-size: .8125rem; }
+/* A gate's map in its decision: the gate selected, the steps Approve hands to outlined dashed; the sentence under it says it in words. */
+.tile.next-approve .body { stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 2; }
+.gate-outcomes { margin: 8px 0 0; font-size: .8125rem; color: var(--muted); }
+
+/* Overview: the factory now. One column of sections: what needs a person, what runs, the last 24 hours, the services. */
+.page-overview { grid-template-columns: minmax(0, 1fr); }
+.page-overview .content-panel { border-right: 0; }
+.page-overview .panel-head .ov-updated { margin-left: auto; font-size: .8125rem; }
+.ov-body { overflow: auto; min-height: 0; }
+.ov-needs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.ov-need { display: flex; flex-direction: column; gap: 4px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); text-decoration: none; }
+.ov-need:hover { background: var(--hover); }
+.ov-need:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ov-need-count { font-size: 1.5rem; font-weight: 600; line-height: 1.25; }
+.ov-need:not(.ov-need-waiting):not(.ov-need-failed) .ov-need-count { color: var(--muted); }
+.ov-need-waiting { border-color: var(--waiting); }
+.ov-need-failed { border-color: var(--failed); }
+.ov-need-label { font-size: .8125rem; color: var(--muted); }
+.ov-waiting { list-style: none; margin: 16px 0 0; padding: 0; }
+.ov-waiting li a { display: grid; grid-template-columns: 96px minmax(0, max-content) minmax(0, 1fr); align-items: center; gap: 12px; min-height: 40px; border-bottom: 1px solid var(--line); color: var(--text); text-decoration: none; }
+.ov-waiting li:last-child a { border-bottom: 0; }
+.ov-waiting li a:hover { background: var(--hover); }
+.ov-waiting-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-waiting-question { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-running { display: grid; grid-template-columns: repeat(auto-fill, minmax(336px, 1fr)); gap: 16px; }
+.ov-running > p { margin: 0; }
+.ov-run { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); color: var(--text); text-decoration: none; }
+.ov-run:hover { border-color: var(--muted); }
+.ov-run:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ov-run-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: .8125rem; }
+.ov-run-name { font-weight: 600; font-size: .875rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-run-head .muted { margin-left: auto; white-space: nowrap; }
+.ov-run .run-graph .tile { cursor: inherit; }
+.ov-charts { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.ov-chart { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
+.ov-chart svg { width: 100%; height: auto; }
+.ov-chart-title { font-size: .875rem; font-weight: 600; color: var(--text); }
+.ov-figure { font-size: 1.5rem; font-weight: 600; line-height: 1.25; color: var(--text); }
+.ov-legend { display: flex; gap: 8px; flex-wrap: wrap; }
+.ov-bar-done { fill: var(--done); } .ov-bar-running { fill: var(--running); } .ov-bar-failed { fill: var(--failed); } .ov-bar-cost { fill: var(--accent); }
+.ov-services { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); column-gap: 24px; }
+.ov-services li { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; border-bottom: 1px solid var(--line); }
+.ov-service-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-service-count { font-variant-numeric: tabular-nums; }
+@media (max-width: 900px) {
+  .ov-needs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-charts { grid-template-columns: minmax(0, 1fr); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .chip-running .dot, .ctx-menu, .dialog, .panel-reveal { animation: none; }
+  .chip-running .dot, .tile.state-running .state-dot, .ctx-menu, .dialog, .panel-reveal { animation: none; }
   .caret .icon, .template-toggle .icon, .product:hover .logo-leaf { transition: none; }
 }

@@ -701,3 +701,23 @@ test("a nested workflow is found by its pinned reference: that version when it i
   ]);
   assert.deepEqual(plain(stepRows(["old"], [], defs, "outer@v1", true)), [{ id: "old", depth: 0 }]);
 });
+
+test("a decision shows its gate's place in the workflow and says what Approve and Reject lead to", () => {
+  const decisions = read("decisions.js");
+  const context = {};
+  vm.runInNewContext(`${decisions.slice(decisions.indexOf("const DecisionsLogic = {"), decisions.indexOf("(() => {"))}\nglobalThis.out = DecisionsLogic;`, context);
+  const title = (id) => id.charAt(0).toUpperCase() + id.slice(1);
+  const def = { steps: [{ id: "plan" }, { id: "accept", service: "gate", depends_on: ["plan"], on_reject: "plan" }, { id: "build", depends_on: ["accept"] }, { id: "docs", depends_on: ["accept"] }, { id: "end", service: "gate", depends_on: ["build"] }] };
+  const accept = context.out.outcomes(def, "accept", title);
+  assert.deepEqual([...accept.next], ["build", "docs"]);
+  assert.equal(accept.approve, "Approve: Build and Docs run next.");
+  assert.equal(accept.reject, "Reject: Plan runs again with your reason.");
+  const end = context.out.outcomes(def, "end", title);
+  assert.equal(end.approve, "Approve: the run completes.");
+  assert.equal(end.reject, "Reject: the run ends.");
+  assert.equal(context.out.outcomes(def, "gone", title), null);
+  // Drawn read-only from the version the run used, under the question; never for a publish decision.
+  assert.match(decisions, /if \(!publish\) gateMap\(c, \(box\) => detail\.querySelector\("\.panel-body > \.section"\)\?\.after\(box\)\);/);
+  assert.match(decisions, /runWorkflow\(c\.workflow, version\),/);
+  assert.match(decisions, /if \(out\.next\.includes\(s\.id\)\) g\.classList\.add\("next-approve"\);/);
+});

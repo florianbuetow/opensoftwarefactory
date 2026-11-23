@@ -11,6 +11,8 @@ spec = importlib.util.spec_from_file_location("git_host_server", Path(__file__).
 assert spec is not None
 assert spec.loader is not None
 server = importlib.util.module_from_spec(spec)
+os.environ["GIT_HOST_DATA"] = "/data"
+os.environ["SEED_DIR"] = "/seed"
 spec.loader.exec_module(server)
 
 

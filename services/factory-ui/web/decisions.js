@@ -9,6 +9,23 @@
 // ---- Logic without the DOM (covered by teams_ui_test.mjs) ----
 
 const DecisionsLogic = {
+  // outcomes says what follows a gate's decision in its workflow: Approve hands its input to the
+  // steps that depend on the gate; Reject sends the reason back to its on_reject step, or ends
+  // the run. names is the sentence under the gate's map, with the steps in title case.
+  outcomes(def, gate, title = (id) => id) {
+    const steps = def?.steps || [];
+    const s = steps.find((x) => x.id === gate);
+    if (!s) return null;
+    const next = steps.filter((x) => (x.depends_on || []).includes(gate)).map((x) => x.id);
+    const back = s.on_reject && steps.some((x) => x.id === s.on_reject) ? s.on_reject : "";
+    const list = (ids) => (ids.length < 3 ? ids.map(title).join(" and ") : `${ids.slice(0, -1).map(title).join(", ")} and ${title(ids[ids.length - 1])}`);
+    return {
+      next, back,
+      approve: next.length ? `Approve: ${list(next)} ${next.length === 1 ? "runs" : "run"} next.` : "Approve: the run completes.",
+      reject: back ? `Reject: ${title(back)} runs again with your reason.` : "Reject: the run ends.",
+    };
+  },
+
   // select keeps the page's selection, { selected, seen, none }, in step with what is listed.
   // A decision named by the hash (opened) is shown or nothing is: while it is not listed (its list
   // still loads, the gate does not wait yet, it does not exist) it stays selected with an empty
@@ -68,7 +85,7 @@ const DecisionsLogic = {
   const API = "/api/orchestrator/decisions";
   const POLL_MS = 3000;
   const HIDE_KEY = "factory.decisions.hidden";
-  const state = { filter: "", selected: "", shown: "", timer: null, pastTimer: null, banner: "", loaded: { pending: false, decided: false } };
+  const state = { filter: "", show: "", selected: "", shown: "", timer: null, pastTimer: null, banner: "", loaded: { pending: false, decided: false } };
   const pending = new Map(); // id -> { id, kind: "pending", d, workflow, step, question, trace, inputs, since }
   const past = new Map(); // id -> { id, kind: "decided", rec, workflow, step, question, trace, inputs, at }
   const decided = new Set(); // pending gates decided here (ID and round), so a poll in flight cannot bring them back
@@ -76,6 +93,17 @@ const DecisionsLogic = {
   const scanned = new Set(); // finished runs whose gate records are loaded
   const sidebar = $("decision-workflows");
   const tableBox = $("decision-table");
+  // The middle header shows which decisions are listed: all, the waiting gates, or the decided ones.
+  const SHOW = [["", "All"], ["pending", "Waiting"], ["decided", "Decided"]];
+  const showBox = document.querySelector(".decisions-panel > .panel-head");
+  function renderShow() {
+    const shown = showBox.querySelectorAll("[role=radio]");
+    if (shown.length) { shown.forEach((b, i) => b.setAttribute("aria-checked", String(state.show === SHOW[i][0]))); return; } // the 3 s redraws keep the focus
+    showBox.replaceChildren(h("div", { className: "segmented", role: "radiogroup", "aria-label": "Show" }, ...SHOW.map(([value, label]) => h("button", {
+      type: "button", role: "radio", "aria-checked": String(state.show === value),
+      onclick: () => { state.show = value; renderShow(); renderAll(); },
+    }, label))));
+  }
   const detail = $("decision-detail");
 
   const pendingId = (d) => `p:${d.workflow_id}|${d.step}`;
@@ -109,6 +137,19 @@ const DecisionsLogic = {
     hide(value, gone);
     setSaveState(gone.size === 1 ? "Removed" : `Removed ${gone.size} decisions`);
   }
+
+  const decidedMarks = marks(); // the decided gates marked to be removed at once
+
+  // removeManyDecided removes the marked decided gates from the list, after one confirmation.
+  async function removeManyDecided(list) {
+    if (!list.length || !(await confirmAction(`Remove ${list.length} decisions from the list?`, "Remove"))) return;
+    const value = hidden();
+    value.ids = [...new Set([...(value.ids || []), ...list.map((c) => c.id)])];
+    decidedMarks.clear();
+    hide(value, new Set(list.map((c) => c.id)));
+    setSaveState(`Removed ${list.length} decisions`);
+  }
+
   async function removeDecided(c) {
     if (!(await confirmAction("Remove this decision from the list?", "Remove"))) return;
     const value = hidden();
@@ -137,7 +178,7 @@ const DecisionsLogic = {
 
   // items lists what the table shows: pending first, then decided; each newest first.
   function items() {
-    const visible = (c) => (!state.filter || c.workflow === state.filter) && !isHidden(c);
+    const visible = (c) => (!state.filter || c.workflow === state.filter) && (!state.show || c.kind === state.show) && !isHidden(c);
     return [...[...pending.values()].filter(visible).sort(newest), ...[...past.values()].filter(visible).sort(newest)];
   }
   const find = (id) => pending.get(id) || past.get(id);
@@ -172,6 +213,11 @@ const DecisionsLogic = {
     const trace = ["View trace", () => { location.hash = `#artifacts?trace=${encodeURIComponent(c.trace)}`; }, "", "Opens the run's objects in Blobstore"];
     // A gate is decided only in its detail, under the evidence it exists to show: never from a row.
     if (c.kind === "pending") return [run, trace, "-", clearItem(state.filter)];
+    // Decided rows can be marked and removed together; a waiting gate never is.
+    if (decidedMarks.has(c.id) && decidedMarks.size > 1) {
+      const marked = items().filter((x) => decidedMarks.has(x.id));
+      return [[`Remove ${marked.length} decisions`, () => removeManyDecided(marked), "danger", "Removes the marked decisions from the list"], "-", ["Unmark all", () => { decidedMarks.clear(); renderTable(); }, "", "Clears the marks; Escape does too"]];
+    }
     return [run, trace, "-", ["Remove decision", () => removeDecided(c), "danger", "Removes this decision from the list"], "-", clearItem(state.filter)];
   }
 
@@ -180,15 +226,18 @@ const DecisionsLogic = {
     if (state.banner) { tableBox.replaceChildren(errorPanel(state.banner)); return; }
     if (!list.length) { tableBox.replaceChildren(emptyPanel("No decisions yet")); return; }
     const showWorkflow = !state.filter;
+    const decided = list.filter((c) => c.kind === "decided");
+    decidedMarks.keep(decided.map((c) => c.id));
     tableBox.replaceChildren(dataTable(["Status", ...(showWorkflow ? ["Workflow"] : []), "Question", "By", "Time"], list.map((c) => {
       const tr = h("tr", { "aria-selected": String(c.id === state.selected) },
         h("td", {}, chip(c)),
-        showWorkflow ? h("td", { className: "opt" }, titleCase(c.workflow)) : null,
+        showWorkflow ? h("td", { className: "opt dec-workflow", dataset: { full: titleCase(c.workflow) } }, titleCase(c.workflow)) : null, // gives the Question the room
         h("td", { className: "name-cell", dataset: { full: c.question } }, c.question),
-        h("td", { className: "opt" }, c.kind === "decided" ? c.rec.decided_by || "" : ""),
+        h("td", { className: "opt dec-by", dataset: { full: c.kind === "decided" ? c.rec.decided_by || "" : "" } }, c.kind === "decided" ? c.rec.decided_by || "" : ""),
         h("td", {}, time(c) ? timeEl(time(c)) : ""));
       tr.addEventListener("contextmenu", (ev) => openMenu(ev, menuFor(c)));
-      return clickableRow(tr, () => { location.hash = hashFor(c.id); });
+      const open = () => { location.hash = hashFor(c.id); };
+      return c.kind === "decided" ? markableRow(tr, c.id, () => decided.map((x) => x.id), decidedMarks, open, renderTable) : clickableRow(tr, open);
     }), { optional: showWorkflow ? [1, 3] : [2], name: showWorkflow ? 2 : 1 }));
   }
 
@@ -354,7 +403,49 @@ const DecisionsLogic = {
         inputs,
         outcome));
     earlierRounds(c, (box) => inputs.after(box));
+    if (!publish) gateMap(c, (box) => detail.querySelector(".panel-body > .section")?.after(box));
     fillTime(c);
+  }
+
+  // gateMap shows where the gate sits in the version of the workflow its run used: the graph,
+  // read-only, each step in its state in the run, the gate selected and the steps Approve hands
+  // to outlined, with a sentence for what Approve and Reject do. place puts it under the question.
+  function gateMap(c, place) {
+    const gate = stepPass(c.step || "").step;
+    const shown = c.id;
+    (async () => {
+      const record = runIndex.records.get(c.trace);
+      const version = Number(record?.workflow_version) || 0;
+      if (!gate || !c.workflow) return;
+      const [def, st] = await Promise.all([
+        runWorkflow(c.workflow, version), // also a run from before its workflow moved into a group
+        runIndex.status(c.trace, 3000, "").catch(() => null),
+      ]);
+      const out = DecisionsLogic.outcomes(def, gate, titleCase);
+      if (!out || state.shown !== shown) return;
+      const w = { ...def, steps: def.steps.map((s) => ({ ...s, position: s.position ? { ...s.position } : undefined })) };
+      WorkflowGraph.autoLayout(w);
+      const width = Math.max(280, (detail.clientWidth || 480) - 50);
+      const view = WorkflowGraph.fitView(w, width, { input: false, minScale: 0.2, maxScale: 0.6, height: 200, margin: 12 });
+      const svg = document.createElementNS(WorkflowGraph.SVG_NS, "svg");
+      svg.setAttribute("class", "run-graph gate-map");
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", 200);
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", `${titleCase(gate)} in ${titleCase(c.workflow)}. ${out.approve} ${out.reject}`);
+      const pending = c.kind === "pending";
+      WorkflowGraph.drawGraph(svg, w, {
+        view, selected: gate, idPrefix: "gate-",
+        stateOf: (id) => (id === gate && pending ? "waiting" : OverviewLogic.stepState(w, st, c.trace, decisionsState.pending, sessionsState.pending, id)),
+        onTile: (s, { g }) => {
+          g.removeAttribute("tabindex"); // a picture of the run: the sentence below says it in words
+          if (out.next.includes(s.id)) g.classList.add("next-approve");
+        },
+      });
+      place(h("div", { className: "section gate-map-section" },
+        h("div", { className: "run-graph-wrap" }, svg),
+        h("p", { className: "gate-outcomes" }, h("span", {}, out.approve), " ", h("span", {}, out.reject))));
+    })().catch(() => { /* the decision still shows; the map is only where it sits */ });
   }
 
   // fillTime shows the time once it is known (a new run's record may arrive after the detail).
@@ -426,6 +517,7 @@ const DecisionsLogic = {
 
   // renderAll draws the page; with nothing selected, the first item is selected.
   function renderAll() {
+    renderShow();
     const list = items();
     // A linked decision keeps the selection (and the hash) while its list still loads. An item
     // that was shown here and is gone (decided elsewhere, removed) leaves nothing selected: no

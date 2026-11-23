@@ -9,7 +9,7 @@ import vm from "node:vm";
 
 const read = (name) => fs.readFileSync(new URL(`web/${name}`, import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value)); // across the vm realm
-const workflows = read("workflows.js"), runs = read("runs.js"), app = read("app.js"), agents = read("agents.js"), chat = read("chat.js"), style = read("style.css");
+const workflows = read("workflows.js") + read("graph.js"), runs = read("runs.js"), app = read("app.js"), agents = read("agents.js"), chat = read("chat.js"), style = read("style.css");
 
 function editor() {
   const context = {};
@@ -284,8 +284,8 @@ test("where tiles leave no way, the back edge still runs: around everything, and
 
 test("the editor draws the back edge dashed in the failed colour and the Rejected port on the gate", () => {
   assert.match(style, /\.back-edge \{ stroke: var\(--failed\); stroke-width: 1\.5; stroke-dasharray: 6 4; fill: none; \}/);
-  assert.match(workflows, /el\("path", \{ d: route\.d, class: "back-edge", "marker-end": "url\(#arrow-reject\)" \}, g\);/);
-  assert.match(workflows, /el\("circle", \{ class: "port port-reject", cx: W, cy: L\.REJECT_PORT_Y, r: 5 \}, g\);/);
+  assert.match(workflows, /el\("path", \{ d: route\.d, class: "back-edge", "marker-end": `url\(#\$\{prefix\}arrow-reject\)` \}, g\);/);
+  assert.match(workflows, /el\("circle", \{ class: "port port-reject", cx: W, cy: L\(\)\.REJECT_PORT_Y, r: 5 \}, g\)/);
   assert.match(workflows, /g\.onclick = \(\) => removeBackEdge\(s\);/);
   assert.match(workflows, /const refusal = L\.rejectRefusal\(workflow\(\), d\.from, target\.id, titleCase\);\n\s+if \(refusal\) setStatus\(refusal, "error"\);/);
   assert.match(workflows, /field\("Rejections go to", "on_reject", onReject,/);

@@ -91,7 +91,9 @@ func TestInitTelemetryRejectsEndpointCredentialsWithoutEchoingThem(t *testing.T)
 	})
 	if err == nil {
 		if shutdown != nil {
-			_ = shutdown(context.Background())
+			if handlerErr := shutdown(context.Background()); handlerErr != nil {
+				t.Error(handlerErr)
+			}
 		}
 		t.Fatal("initTelemetry() accepted credentials in the endpoint URL")
 	}

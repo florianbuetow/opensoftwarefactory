@@ -16,12 +16,8 @@ import (
 )
 
 // TestBinaryMeasurementJourney launches the real blobstore and evaluation
-// executables. It is opt-in because compiling sibling commands is intentionally
-// heavier than the handler-level suite.
+// executables.
 func TestBinaryMeasurementJourney(t *testing.T) {
-	if os.Getenv("EVALUATION_BINARY_INTEGRATION") != "1" {
-		t.Skip("set EVALUATION_BINARY_INTEGRATION=1")
-	}
 	tmp := t.TempDir()
 	blobBin := filepath.Join(tmp, "blobstore")
 	evaluationBin := filepath.Join(tmp, "evaluation")

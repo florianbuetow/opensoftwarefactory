@@ -97,7 +97,8 @@ test("model options include colored availability and sort available first alphab
   assert.equal(options[3].children[0], "local");
   const selectedDot = nodes.find((n) => n.props.className === "model-dot unknown");
   assert.equal(selectedDot.className, "model-dot unavailable");
-  assert.equal(nodes.some((n) => n.props.className === "model-state"), false);
+  // The dot is never colour alone: the state stands beside the select as a chip.
+  assert.equal(nodes.some((n) => n.props.className === "model-state"), true);
   assert.equal(area.value, original);
 });
 

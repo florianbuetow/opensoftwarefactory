@@ -38,12 +38,14 @@ func TestModelDetailsRoutesAndIsolatesAuthentication(t *testing.T) {
 		}
 		w.Header().Set("X-Upstream", "model")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":"upstream/model","object":"model","owned_by":"provider"}`)
+		if _, err := io.WriteString(w, `{"id":"upstream/model","object":"model","owned_by":"provider"}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 
 	g := testGateway(t, upstream, true, Auth{Type: "bearer", Token: "configured-secret"})
-	req := httptest.NewRequest(http.MethodGet, "/v1/models/public-model", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/public-model", http.NoBody)
 	req.Header.Set("Authorization", "Bearer caller-secret")
 	recorder := httptest.NewRecorder()
 	g.ServeHTTP(recorder, req)
@@ -63,7 +65,9 @@ func TestChatForwardsMessagesAndUnrecognizedFields(t *testing.T) {
 			t.Fatal(err)
 		}
 		var model string
-		_ = json.Unmarshal(body["model"], &model)
+		if err := json.Unmarshal(body["model"], &model); err != nil {
+			t.Error(err)
+		}
 		if model != "upstream/model" {
 			t.Errorf("model = %q", model)
 		}
@@ -74,7 +78,9 @@ func TestChatForwardsMessagesAndUnrecognizedFields(t *testing.T) {
 			t.Errorf("extra fields not forwarded: %v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"upstream/model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
+		if _, err := io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"upstream/model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 
@@ -95,7 +101,9 @@ func TestUpstreamErrorIsTransparent(t *testing.T) {
 		w.Header().Set("Connection", "X-Hop")
 		w.Header().Set("X-Hop", "must-not-pass")
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, wantBody)
+		if _, err := io.WriteString(w, wantBody); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 
@@ -120,12 +128,16 @@ func TestNativeStreamingFlushesAndClientCancellationReachesUpstream(t *testing.T
 			t.Errorf("Accept = %q", r.Header.Get("Accept"))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: first\n\n")
+		if _, err := io.WriteString(w, "data: first\n\n"); err != nil {
+			t.Error(err)
+		}
 		w.(http.Flusher).Flush()
 		close(firstSent)
 		select {
 		case <-release:
-			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+				t.Error(err)
+			}
 		case <-r.Context().Done():
 		}
 	}))
@@ -135,12 +147,19 @@ func TestNativeStreamingFlushesAndClientCancellationReachesUpstream(t *testing.T
 	server := httptest.NewServer(g)
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"public-model","messages":[],"stream":true}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"public-model","messages":[],"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
 	select {
 	case <-firstSent:
 	case <-time.After(time.Second):
@@ -161,12 +180,17 @@ func TestNativeStreamingFlushesAndClientCancellationReachesUpstream(t *testing.T
 
 func TestSyntheticStreamingProducesCompletionChunks(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestBody, _ := io.ReadAll(r.Body)
+		requestBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
 		if bytes.Contains(requestBody, []byte(`"stream_options"`)) || !bytes.Contains(requestBody, []byte(`"stream":false`)) {
 			t.Errorf("synthetic request not converted: %s", requestBody)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion","created":7,"model":"upstream/model","system_fingerprint":"fp","choices":[{"index":0,"message":{"role":"assistant","content":"answer","tool_calls":[{"id":"call1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`)
+		if _, err := io.WriteString(w, `{"id":"c1","object":"chat.completion","created":7,"model":"upstream/model","system_fingerprint":"fp","choices":[{"index":0,"message":{"role":"assistant","content":"answer","tool_calls":[{"id":"call1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 
@@ -207,7 +231,9 @@ func TestSyntheticStreamingPreservesUpstreamErrors(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		_, _ = io.WriteString(w, `{"error":{"message":"provider down"}}`)
+		if _, err := io.WriteString(w, `{"error":{"message":"provider down"}}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 
@@ -221,7 +247,9 @@ func TestSyntheticStreamingPreservesUpstreamErrors(t *testing.T) {
 
 func TestGatewayHandlesConcurrentConnections(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"id":"upstream/model","object":"model"}`)
+		if _, err := io.WriteString(w, `{"id":"upstream/model","object":"model"}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 	g := testGateway(t, upstream, true, Auth{Type: "none"})
@@ -234,7 +262,7 @@ func TestGatewayHandlesConcurrentConnections(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			recorder := httptest.NewRecorder()
-			g.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models/public-model", nil))
+			g.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models/public-model", http.NoBody))
 			if recorder.Code != http.StatusOK {
 				errors <- recorder.Body.String()
 			}
@@ -256,7 +284,9 @@ func TestNullableStreamIsForwarded(t *testing.T) {
 		if string(body["stream"]) != "null" {
 			t.Errorf("stream changed: %s", body["stream"])
 		}
-		_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion"}`)
+		if _, err := io.WriteString(w, `{"id":"c1","object":"chat.completion"}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 	g := testGateway(t, upstream, true, Auth{Type: "none"})
@@ -272,7 +302,9 @@ func TestModelListReportsConfiguredModelsWithAvailability(t *testing.T) {
 	served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth, receivedPath = r.Header.Get("Authorization"), r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"upstream/model"},{"id":"unmapped"}]}`)
+		if _, err := io.WriteString(w, `{"object":"list","data":[{"id":"upstream/model"},{"id":"unmapped"}]}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer served.Close()
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +321,7 @@ func TestModelListReportsConfiguredModelsWithAvailability(t *testing.T) {
 	}
 	t.Cleanup(g.transport.CloseIdleConnections)
 	rec := httptest.NewRecorder()
-	g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	g.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -327,7 +359,9 @@ func TestLMStudioModelListUsesLoadedInstancesAndRoutesDiscoveredModels(t *testin
 		switch r.URL.Path {
 		case "/api/v1/models":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"models":[{"type":"llm","key":"qwen3-0.6b-mlx","loaded_instances":[]},{"type":"llm","key":"qwen/qwen3.6-35b-a3b","loaded_instances":[{"id":"qwen/qwen3.6-35b-a3b"}]},{"type":"embedding","key":"embed","loaded_instances":[{"id":"embed"}]}]}`)
+			if _, err := io.WriteString(w, `{"models":[{"type":"llm","key":"qwen3-0.6b-mlx","loaded_instances":[]},{"type":"llm","key":"qwen/qwen3.6-35b-a3b","loaded_instances":[{"id":"qwen/qwen3.6-35b-a3b"}]},{"type":"embedding","key":"embed","loaded_instances":[{"id":"embed"}]}]}`); err != nil {
+				t.Error(err)
+			}
 		case "/v1/chat/completions":
 			var body struct {
 				Model string `json:"model"`
@@ -337,7 +371,9 @@ func TestLMStudioModelListUsesLoadedInstancesAndRoutesDiscoveredModels(t *testin
 			}
 			chatModel = body.Model
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"choices":[]}`)
+			if _, err := io.WriteString(w, `{"choices":[]}`); err != nil {
+				t.Error(err)
+			}
 		default:
 			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -355,7 +391,7 @@ func TestLMStudioModelListUsesLoadedInstancesAndRoutesDiscoveredModels(t *testin
 	t.Cleanup(g.transport.CloseIdleConnections)
 
 	models := httptest.NewRecorder()
-	g.ServeHTTP(models, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	g.ServeHTTP(models, httptest.NewRequest(http.MethodGet, "/v1/models", http.NoBody))
 	if models.Code != http.StatusOK {
 		t.Fatalf("model status %d: %s", models.Code, models.Body)
 	}
@@ -426,7 +462,9 @@ func TestInterruptedUpstreamResponseLogsFailedCompletion(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "100")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"choices":[]}`)
+		if _, err := io.WriteString(w, `{"choices":[]}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 	var logs bytes.Buffer
@@ -462,9 +500,13 @@ func TestInterruptedUpstreamResponseLogsFailedCompletion(t *testing.T) {
 func TestChatLogsTheSamplingSettingsItPassesOn(t *testing.T) {
 	var received map[string]json.RawMessage
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&received)
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Error(err)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[]}`))
+		if _, err := w.Write([]byte(`{"choices":[]}`)); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer upstream.Close()
 	var logged bytes.Buffer

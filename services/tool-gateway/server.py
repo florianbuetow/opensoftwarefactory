@@ -142,7 +142,8 @@ def build_server(tools_path: Path) -> MCPServer:
 
 def build_app(tools_path: Path) -> Starlette:
     """Return the ASGI app: stateless streamable HTTP with JSON responses."""
-    return build_server(tools_path).streamable_http_app(stateless_http=True, json_response=True, host="0.0.0.0")
+    # The server runs in a pod and must be reachable from other pods, so it listens on all interfaces.
+    return build_server(tools_path).streamable_http_app(stateless_http=True, json_response=True, host="0.0.0.0")  # nosec B104
 
 
 def mtime(path: Path) -> float | None:
@@ -170,7 +171,7 @@ def main() -> None:
     app = build_app(tools_path)
     threading.Thread(target=watch, args=(tools_path,), daemon=True).start()
     log("INFO", "tool gateway listening", address=f"0.0.0.0:{port}", tools_path=str(tools_path))
-    uvicorn.run(app, host="0.0.0.0", port=port, access_log=False, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=port, access_log=False, log_level="warning")  # nosec B104
 
 
 if __name__ == "__main__":

@@ -24,7 +24,9 @@ func (s *service) podSpec(p devPod, repo repository) map[string]any {
 		"workingDir":      "/workspace",
 		// The image's user 1000 has its home at /home/dev; the root filesystem stays writable
 		// so that commands can use it and /tmp.
-		"env":   append(token("work-token"), map[string]any{"name": "HOME", "value": "/home/dev"}),
+		"env": append(token("work-token"),
+			map[string]any{"name": "HOME", "value": "/home/dev"},
+			map[string]any{"name": "PORT", "value": strconv.Itoa(workPort)}),
 		"ports": []map[string]any{{"name": "tools", "containerPort": workPort}},
 		"resources": map[string]any{
 			"requests": map[string]any{"cpu": "100m", "memory": "128Mi"},
@@ -51,7 +53,7 @@ func (s *service) podSpec(p devPod, repo repository) map[string]any {
 		"imagePullPolicy": s.cfg.pullPolicy,
 		"command":         []string{"python", "/opt/devpod/githelper.py"},
 		"workingDir":      "/workspace",
-		"env":             token("helper-token"),
+		"env":             append(token("helper-token"), map[string]any{"name": "PORT", "value": strconv.Itoa(helperPort)}),
 		"ports":           []map[string]any{{"name": "git", "containerPort": helperPort}},
 		"resources": map[string]any{
 			"requests": map[string]any{"cpu": "25m", "memory": "64Mi"},

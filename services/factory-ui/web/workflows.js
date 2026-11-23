@@ -578,26 +578,14 @@ const WorkflowLogic = (() => {
 
 (() => {
   const API = "/api/orchestrator";
-  const SVG_NS = "http://www.w3.org/2000/svg";
-  const TILE_W = 220, TILE_H = 64;
-  const BAND_W = 12; // the side bands of a workflow node
-  const TOP = 40, ROW_H = TILE_H + 72, COL_W = TILE_W + 48, GRAPH_MARGIN = 32;
+  // The graph is drawn by WorkflowGraph (graph.js); the editor adds moving, connecting and menus.
+  const G = WorkflowGraph;
+  const { TILE_W, TILE_H, TOP, ROW_H, COL_W, el, inPort, outPort, kind, edgePath, fit } = G;
   const L = WorkflowLogic;
   const SPECIAL = ["agent", "gate", "interactive", "route", "workflow", "team", "merge", "batch", ...L.POD_KINDS];
-  const TYPE_ICON = { agent: "agent", gate: "gate", interactive: "chat", route: "workflow", workflow: "workflow" };
   const TYPE_NAME = { agent: "Agent", gate: "Human Gate", interactive: "Interactive Session", route: "Router", workflow: "Workflow", team: "Team", merge: "Merge", batch: "Batch", devpod: "Dev Pod", "devpod-stop": "Stop Dev Pod", command: "Command" };
   // A new step is named by its kind and the lowest free number: Step 1, Dev Pod 1, Stop Dev Pod 1.
   const STEP_WORD = { agent: "step", devpod: "dev-pod", "devpod-stop": "stop-dev-pod" };
-  // A team's tile icon: three members joined by channels.
-  const TEAM_ICON = '<circle cx="8" cy="4" r="2"/><circle cx="3.5" cy="12" r="2"/><circle cx="12.5" cy="12" r="2"/><path d="M7 5.8L4.6 10.2M9 5.8l2.4 4.4M5.5 12h5"/>';
-  // A merge's tile icon: two lines that join into one. A batch's: three results stacked in a tray.
-  const MERGE_ICON = '<path d="M3 2.5l5 5.5v5.5M13 2.5L8 8"/>';
-  const BATCH_ICON = '<path d="M2 9.5V12a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9.5"/><path d="M5 10h6M5 6.5h6M5 3h6"/>';
-  // A dev pod's tile icon: a box. A command's: a shell prompt. A stop step's: the box crossed out.
-  const DEVPOD_ICON = '<path d="M8 2l5 2.8v6.4L8 14l-5-2.8V4.8z"/><path d="M3 4.8l5 2.8 5-2.8M8 7.6V14"/>';
-  const COMMAND_ICON = '<path d="M3 4.5L6.5 8 3 11.5M8.5 12H13"/>';
-  const DEVPOD_STOP_ICON = '<rect x="3" y="3" width="10" height="10" rx="1.5"/><path d="M6 6l4 4M10 6l-4 4"/>';
-  const KIND_ICON = { team: TEAM_ICON, merge: MERGE_ICON, batch: BATCH_ICON, devpod: DEVPOD_ICON, command: COMMAND_ICON, "devpod-stop": DEVPOD_STOP_ICON };
   // An agent step runs one agent; an interactive step lets a person chat with its main agent
   // (agent) and any further ones (agents).
   const usesAgent = (s) => s.service === "agent" || s.service === "interactive";
@@ -642,9 +630,6 @@ const WorkflowLogic = (() => {
   const pinNewest = (name) => L.newestRef(stored(), name);
   // nestable: the stored workflows the one on the canvas may start without reaching itself.
   const nestable = () => L.nestableWorkflows(stored(), workflow().name);
-  const inPort = (s) => ({ x: s.position.x + TILE_W / 2, y: s.position.y });
-  const outPort = (s) => ({ x: s.position.x + TILE_W / 2, y: s.position.y + TILE_H });
-  const kind = (s) => (SPECIAL.includes(s.service) ? s.service : "custom");
 
   // ---- Save: edits stay on the page until Save stores them as the next version. ----
 
@@ -806,92 +791,8 @@ const WorkflowLogic = (() => {
     renderInspector();
   }
 
-  // ---- Layout ----
-
-  // autoLayout gives steps without a position a row per dependency depth; siblings sit side by side.
-  function autoLayout(w) {
-    const depth = {};
-    const depthOf = (s, seen = new Set()) => {
-      if (depth[s.id] !== undefined) return depth[s.id];
-      if (seen.has(s.id)) return 0;
-      seen.add(s.id);
-      const deps = (s.depends_on || []).map((d) => w.steps.find((x) => x.id === d)).filter(Boolean);
-      return (depth[s.id] = deps.length ? 1 + Math.max(...deps.map((d) => depthOf(d, seen))) : 0);
-    };
-    for (const s of w.steps) if (!s.position) s.position = freeSlot(w, depthOf(s));
-  }
-
-  // freeSlot returns the leftmost position in a row that no positioned step overlaps.
-  function freeSlot(w, row) {
-    const y = TOP + row * ROW_H;
-    for (let col = 0; ; col++) {
-      const x = col * COL_W;
-      const busy = w.steps.some((o) => o.position &&
-        o.position.x < x + TILE_W + 24 && o.position.x + TILE_W + 24 > x &&
-        o.position.y < y + TILE_H + 24 && o.position.y + TILE_H + 24 > y);
-      if (!busy) return { x, y };
-    }
-  }
-
-  function el(name, attrs = {}, parent) {
-    const e = document.createElementNS(SVG_NS, name);
-    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
-    if (parent) parent.appendChild(e);
-    return e;
-  }
-
-  // edgePath draws a dependency from an output port (bottom) to an input port (top). It ends
-  // 14 px above the port centre, so the arrowhead (about 8 px long) touches the port circle
-  // (radius 5 plus its stroke) instead of hiding under it.
-  // edgePath draws a dependency from an output port down to an input port. An edge that skips a
-  // row would run behind the tiles in between, so it turns aside in the gap under its source, runs
-  // down the free channel beside the source column (toward its target; for the same column, left
-  // of the leftmost column, else right), and turns back in the gap above its target. Edges that
-  // skip more rows run a little further out, so parallel edges stay apart and no line crosses a tile.
-  function edgePath(a, b, left = false) {
-    const sx = laneX(a, b, left);
-    if (sx !== null) {
-      const gap = ROW_H - TILE_H;
-      return `M${a.x},${a.y} C${a.x},${a.y + gap * 0.7} ${sx},${a.y + gap * 0.2} ${sx},${a.y + gap * 0.85}`
-        + ` L${sx},${b.y - gap * 0.85} C${sx},${b.y - gap * 0.2} ${b.x},${b.y - gap * 0.7} ${b.x},${b.y - 14}`;
-    }
-    const dy = Math.max(30, Math.abs(b.y - a.y) / 2);
-    return `M${a.x},${a.y} C${a.x},${a.y + dy} ${b.x},${b.y - dy} ${b.x},${b.y - 14}`;
-  }
-
-  // dependencyPath draws the arrow from a step to one that depends on it: down from port to
-  // port, or, for a step beside its source, from side to side (see WorkflowLogic.edgeRoute), so
-  // that no arrow runs behind a tile. It ends 9 px before the tile, where the arrowhead touches it.
-  function dependencyPath(w, from, s) {
-    const route = L.edgeRoute(from.position, s.position, w.steps.filter((o) => o !== from && o !== s && o.position).map((o) => o.position), { w: TILE_W, h: TILE_H });
-    if (route.kind === "down") return edgePath(outPort(from), inPort(s), bowsLeft(w, from, s));
-    const d = route.dir;
-    const a = { x: from.position.x + (d > 0 ? TILE_W : 0), y: from.position.y + TILE_H / 2 };
-    const b = { x: s.position.x + (d > 0 ? 0 : TILE_W), y: s.position.y + TILE_H / 2 };
-    if (route.kind === "side") {
-      const dx = Math.max(16, Math.abs(b.x - a.x) / 2);
-      return `M${a.x},${a.y} C${a.x + d * dx},${a.y} ${b.x - d * dx},${b.y} ${b.x - d * 9},${b.y}`;
-    }
-    // Under the tiles in between: down the channel beside the source, along the gap under the row, up the channel beside the target.
-    // The channels sit in the middle of the 20 px gap between two columns, and the arrow leaves and
-    // enters below the tiles' middle, so it does not lie on a side-to-side arrow of the same tile.
-    const xa = a.x + d * 10, xb = b.x - d * 10, y = route.y, r = 8, ya = a.y + 14, yb = b.y + 14;
-    return `M${a.x},${ya} Q${xa},${ya} ${xa},${ya + r} L${xa},${y - r} Q${xa},${y} ${xa + d * r},${y}`
-      + ` L${xb - d * r},${y} Q${xb},${y} ${xb},${y - r} L${xb},${yb + r} Q${xb},${yb} ${b.x - d * 9},${yb}`;
-  }
-
-  // laneX is the x of the lane an arrow from port a to port b runs down, or null when it skips no row.
-  function laneX(a, b, left) {
-    const rows = Math.round((b.y - a.y) / ROW_H);
-    if (rows < 2) return null;
-    const spread = Math.min(rows - 2, 4) * 6; // stays inside the 48 px channel between columns
-    return b.x > a.x + TILE_W / 2 ? a.x + TILE_W / 2 + 12 + spread
-      : b.x < a.x - TILE_W / 2 ? a.x - TILE_W / 2 - 12 - spread
-        : left ? Math.min(a.x, b.x) - TILE_W / 2 - 28 - spread * 2 : Math.max(a.x, b.x) + TILE_W / 2 + 12 + spread;
-  }
-
-  // bowsLeft: an arrow within the leftmost column takes the lane left of it.
-  const bowsLeft = (w, from, s) => Math.min(from.position.x, s.position.x) <= Math.min(...w.steps.map((x) => x.position.x)) + 1;
+  // ---- Layout: WorkflowGraph.autoLayout places steps without a position. ----
+  const { autoLayout, freeSlot } = G;
 
   // missingRef: the first agent version a step is pinned to that the registry no longer has, or "".
   // missingWorkflow: a reference to a workflow that is not stored, or to a version it does not have.
@@ -929,11 +830,6 @@ const WorkflowLogic = (() => {
       default: return `${s.service || "?"} · ${s.activity || "Process"}`;
     }
   }
-
-  const fit = (text, width, px = 6.6) => {
-    const max = Math.max(4, Math.floor(width / px));
-    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-  };
 
   // ---- Rendering ----
 
@@ -1100,7 +996,7 @@ const WorkflowLogic = (() => {
     });
     // With a team open, the workflow is a link back to its graph and the team is the current part.
     if (team) {
-      const back = h("a", { href: currentHash(), title: "Back to the workflow graph" }, titleCase(w.name));
+      const back = h("a", { href: currentHash(), title: "Shows the workflow graph again" }, titleCase(w.name));
       back.addEventListener("click", (ev) => { ev.preventDefault(); state.teamOpen = null; render(); });
       parts.push(back, h("span", { className: "wf-path-sep", "aria-hidden": "true" }, "›"),
         h("span", { className: "wf-path-current", "aria-current": "page" }, `${titleCase(team.id)} (team)`));
@@ -1164,7 +1060,7 @@ const WorkflowLogic = (() => {
         box.querySelector("textarea")?.focus();
       };
       const text = h("p", { className: "wf-description-text", tabIndex: 0,
-        title: "Double-click to edit this version's description" }, markdownInline(singleLineDescription(w.description) || "No description"));
+        title: `The description of v${shownVersion() || 1}, kept with that version; a double-click or Enter edits it` }, markdownInline(singleLineDescription(w.description) || "No description"));
       text.addEventListener("dblclick", (ev) => { if (!ev.target.closest?.("a")) beginEdit(); });
       text.addEventListener("keydown", (ev) => {
         if (ev.target === text && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); beginEdit(); }
@@ -1292,7 +1188,10 @@ const WorkflowLogic = (() => {
     const check = (except = "") => {
       groupProblem.textContent = nameProblem.textContent = "";
       const fail = (p, field, text) => { p.textContent = text; field.focus(); return ""; };
-      const g = groupSlug(group.value), n = slug(name.value), full = `${g}/${n}`;
+      // A group typed as it is shown ("ECC" for ecc) is the existing group, and a name that differs
+      // from the one being renamed only in case is that name: showing acronyms in capitals never moves a workflow.
+      const typed = groupSlug(group.value), g = [...groupList()].find((x) => sameName(x, typed)) || typed;
+      const n = slug(name.value), full = except && sameName(`${g}/${n}`, except) ? except : `${g}/${n}`;
       if (!g) return fail(groupProblem, group, group.value.trim() ? "Use letters, digits, and dashes; separate nested groups with /." : "Enter a group.");
       if (g.split("/").length > 3) return fail(groupProblem, group, "Groups nest at most three deep.");
       if (!n) return fail(nameProblem, name, name.value.trim() ? "Use letters, digits, and dashes." : "Enter a name.");
@@ -1424,34 +1323,19 @@ const WorkflowLogic = (() => {
     } catch { return false; }
   }
 
-  // placeGraph restores or fits the view the first time a workflow is drawn and returns the graph group.
+  // placeGraph restores or fits the view the first time a workflow is drawn. The fit keeps the
+  // lanes of arrows that skip rows and the back edges in view too (see WorkflowGraph.bounds).
   function placeGraph(svg, w) {
     const visible = svg.parentElement.clientWidth;
     view.width = visible;
     if (view.fitted && !view.touched && visible !== view.fitWidth) view.fitted = false;
     if (!view.fitted && visible && restoreView(w.name)) { view.fitted = true; view.touched = true; }
     if (!view.fitted && visible) {
-      const ip = inputPos(w);
-      const boxes = [...w.steps.map((s) => ({ ...s.position, w: TILE_W, h: TILE_H })), ...(ip ? [{ ...ip, w: TILE_W, h: TILE_H }] : [])];
-      // Arrows that skip rows run in lanes beside the tiles; the fit keeps those in view too.
-      for (const s of w.steps) for (const d of s.depends_on || []) {
-        const f = step(d);
-        const x = f ? laneX(outPort(f), inPort(s), bowsLeft(w, f, s)) : null;
-        if (x !== null) boxes.push({ x: x - 8, y: s.position.y, w: 16, h: TILE_H });
-      }
-      // So do the back edges, which run around the tiles.
-      for (const s of w.steps) for (const p of backEdge(w, s)?.points || []) boxes.push({ x: p.x - 8, y: p.y - 8, w: 16, h: 16 });
-      const minX = Math.min(...boxes.map((b) => b.x)), maxX = Math.max(...boxes.map((b) => b.x + b.w));
-      const minY = Math.min(...boxes.map((b) => b.y));
-      const graphW = maxX - minX;
-      // A graph wider than the canvas starts zoomed out to fit (down to half size).
-      view.scale = Math.max(0.5, Math.min(1, (visible - 2 * GRAPH_MARGIN) / graphW));
-      view.ox = Math.max(GRAPH_MARGIN, (visible - graphW * view.scale) / 2) - minX * view.scale;
-      view.oy = GRAPH_MARGIN - minY * view.scale;
-      view.fitted = true;
-      view.fitWidth = visible;
+      // A graph wider than the canvas starts zoomed out until all of it fits: no tile is cut off.
+      const { ox, oy, scale } = G.fitView(w, visible, { minScale: MIN_SCALE });
+      Object.assign(view, { ox, oy, scale, fitted: true, fitWidth: visible });
     }
-    return el("g", { class: "graph", transform: `translate(${view.ox},${view.oy}) scale(${view.scale})` }, svg);
+    return { ox: view.ox, oy: view.oy, scale: view.scale };
   }
 
   new ResizeObserver(() => {
@@ -1482,12 +1366,6 @@ const WorkflowLogic = (() => {
 
   function renderCanvas() {
     const svg = $("canvas");
-    svg.replaceChildren();
-    const defs = el("defs", {}, svg);
-    const marker = el("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 2, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, defs);
-    el("path", { d: "M0,0 L10,5 L0,10 z", fill: "var(--edge)" }, marker);
-    const rejectMarker = el("marker", { id: "arrow-reject", viewBox: "0 0 10 10", refX: 2, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, defs);
-    el("path", { d: "M0,0 L10,5 L0,10 z", fill: "var(--failed)" }, rejectMarker);
     renderCanvasMessage();
     const w = workflow();
     // An opened team takes the place of the graph: its members and channels, as in the node panel.
@@ -1495,133 +1373,44 @@ const WorkflowLogic = (() => {
     teamCanvas.hidden = !team;
     svg.style.display = team ? "none" : "";
     teamCanvas.replaceChildren(team ? teamPanel(team) : "");
-    if (team) return;
-    if (!w || !w.steps.length) return;
-    const root = placeGraph(svg, w);
-
-    for (const s of w.steps) {
-      for (const d of s.depends_on || []) {
-        const from = step(d);
-        if (!from) continue;
-        const g = el("g", {}, root);
-        el("title", {}, g).textContent = `${titleCase(s.id)} depends on ${titleCase(d)}; a click removes it`;
-        const path = dependencyPath(w, from, s);
-        el("path", { d: path, class: "edge-hit" }, g);
-        el("path", { d: path, class: "edge", "marker-end": "url(#arrow)" }, g);
+    if (team || !w || !w.steps.length) { G.drawGraph(svg, null); return; }
+    // The input node points at the steps of the stored version that start the run.
+    const savedIds = new Set((state.baseline ? JSON.parse(state.baseline).steps : []).map((s) => s.id));
+    G.drawGraph(svg, w, {
+      view: placeGraph(svg, w), subtitle, missing: missingRef, selected: state.selected, input: true,
+      inputEdge: (s) => savedIds.has(s.id),
+      edgeTitle: (s, d) => `${titleCase(s.id)} depends on ${titleCase(d)}; a click removes it`,
+      onEdge: (g, s, d) => {
         g.onclick = () => removeDependency(s, d);
         g.addEventListener("contextmenu", (ev) => openMenu(ev, [["Remove dependency", () => removeDependency(s, d), "danger", `${titleCase(s.id)} no longer receives the output of ${titleCase(d)}`]]));
-      }
-    }
-
-    // A gate's back edge: where its rejections go. Dashed, in the failed colour, around the tiles.
-    for (const s of w.steps) {
-      const route = backEdge(w, s);
-      if (!route) continue;
-      const g = el("g", { class: "back-edge-group", "data-gate": s.id }, root);
-      el("title", {}, g).textContent = L.backEdgeTip(s, step(s.on_reject), titleCase);
-      el("path", { d: route.d, class: "edge-hit" }, g);
-      el("path", { d: route.d, class: "back-edge", "marker-end": "url(#arrow-reject)" }, g);
-      g.onclick = () => removeBackEdge(s);
-      g.addEventListener("contextmenu", (ev) => openMenu(ev, [["Remove back edge", () => removeBackEdge(s), "danger", `A rejection at ${titleCase(s.id)} ends the run again`]]));
-    }
-
-    const ip = inputPos(w);
-    if (ip) {
-      const savedIds = new Set((state.baseline ? JSON.parse(state.baseline).steps : []).map((s) => s.id));
-      for (const s of w.steps.filter((s) => savedIds.has(s.id) && !(s.depends_on || []).length)) {
-        el("path", { d: edgePath({ x: ip.x + TILE_W / 2, y: ip.y + TILE_H }, inPort(s)), class: "edge input-edge", "marker-end": "url(#arrow)" }, root);
-      }
-      drawInputTile(root, defs, ip);
-    }
-
-    w.steps.forEach((s, i) => drawTile(root, defs, s, i));
+      },
+      onBackEdge: (g, s) => {
+        g.onclick = () => removeBackEdge(s);
+        g.addEventListener("contextmenu", (ev) => openMenu(ev, [["Remove back edge", () => removeBackEdge(s), "danger", `A rejection at ${titleCase(s.id)} ends the run again`]]));
+      },
+      onInput: (g) => {
+        const open = (ev) => { ev.stopPropagation(); openInputs(); };
+        g.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        g.addEventListener("click", open);
+        g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(ev); } });
+      },
+      onTile: editTile,
+    });
   }
 
-  // backEdge is the route of a gate's back edge to the step its rejections go to, or null for
-  // a step without one. A team's outline reaches 8 px past its box, where its stack shows.
-  function backEdge(w, s) {
-    const target = s.service === "gate" && s.on_reject ? w.steps.find((o) => o.id === s.on_reject) : null;
-    if (!target?.position || !s.position || target === s) return null;
-    return L.backEdgeRoute(s.position, target.position, w.steps.filter((o) => o !== s && o !== target && o.position).map((o) => o.position),
-      { w: TILE_W, h: TILE_H }, target.service === "team" ? 8 : 0);
-  }
-
-  // inputPos places the input node one row above the first steps, centred over them.
-  function inputPos(w) {
-    const roots = w.steps.filter((s) => !(s.depends_on || []).length);
-    if (!roots.length) return null;
-    const minX = Math.min(...roots.map((s) => s.position.x)), maxX = Math.max(...roots.map((s) => s.position.x + TILE_W));
-    return { x: Math.round((minX + maxX) / 2 - TILE_W / 2), y: Math.min(...roots.map((s) => s.position.y)) - ROW_H };
-  }
-
-  function drawInputTile(root, defs, p) {
-    const g = el("g", { class: "tile input-tile", transform: `translate(${p.x},${p.y})`, tabindex: 0, role: "button", "aria-label": "Input" }, root);
-    el("title", {}, g).textContent = "Opens Select Inputs to start runs";
-    el("rect", { class: "body", width: TILE_W, height: TILE_H, rx: 8 }, g);
-    const ic = el("g", { class: "type-icon", transform: "translate(12,24)", stroke: "currentColor", fill: "none", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
-    ic.innerHTML = ICONS.run;
-    el("text", { x: 34, y: 37, class: "name" }, g).textContent = "Input";
-    el("circle", { class: "port", cx: TILE_W / 2, cy: TILE_H, r: 5 }, g);
-    const open = (ev) => { ev.stopPropagation(); openInputs(); };
-    g.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-    g.addEventListener("click", open);
-    g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(ev); } });
-  }
-
-  // The outline of a tile comes from WorkflowLogic.tileOutline. Icon and text move in by this
-  // much where a band or a slanted edge takes the room.
-  const TILE_PAD = { workflow: BAND_W, gate: 6, interactive: 8, merge: 12, devpod: 10, command: 8, "devpod-stop": 12 };
-  const TRAY_LINE_Y = 8; // a batch's second line, under its top edge
-
-  function drawTile(root, defs, s, i) {
-    const W = TILE_W, H = TILE_H;
-    const g = el("g", {
-      class: `tile kind-${kind(s)}${state.selected === s.id ? " selected" : ""}${missingAgent(s) ? " missing" : ""}`,
-      transform: `translate(${s.position.x},${s.position.y})`,
-      tabindex: 0, role: "button", "data-step": s.id,
-      "aria-label": `Step ${s.id}:${subtitle(s) ? " " + subtitle(s) : ""}`,
-    }, root);
-    // Every kind of step has its own outline, all inside the same box so ports and arrows stay put.
-    const outline = L.tileOutline(kind(s), W, H);
-    const clip = el("clipPath", { id: `tile-clip-${i}` }, defs);
-    el("path", { d: outline }, clip);
-    // A team is a stack of tiles: two more outlines show behind the front one.
-    if (s.service === "team") for (const d of [8, 4]) el("rect", { class: "stack", x: d, y: -d, width: W, height: H, rx: 8 }, g);
-    const body = el("path", { class: "body", d: outline }, g);
-    // A workflow node has a band down each side, the flowchart sign for a process defined elsewhere:
-    // it holds a whole workflow. Its icon and text move in by the band, as they do by a slanted edge.
-    const pad = TILE_PAD[s.service] || 0;
-    if (s.service === "workflow") {
-      for (const x of [1, W - pad]) el("rect", { class: "band", x, y: 1, width: pad - 1, height: H - 2, "clip-path": `url(#tile-clip-${i})` }, g);
-      for (const x of [pad, W - pad]) el("line", { class: "band-line", x1: x, y1: 1, x2: x, y2: H - 1 }, g);
-    }
-    // A batch is a tray: a second line runs under its top edge.
-    if (s.service === "batch") el("line", { class: "tray-line", x1: 1, y1: TRAY_LINE_Y, x2: W - 1, y2: TRAY_LINE_Y }, g);
-    const ic = el("g", { class: "type-icon", transform: `translate(${12 + pad},13)`, stroke: "currentColor", fill: "none", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" }, g);
-    ic.innerHTML = KIND_ICON[s.service] || ICONS[TYPE_ICON[s.service] || "step"];
-    const sub = subtitle(s);
-    if (!sub) ic.setAttribute("transform", `translate(${12 + pad},24)`); // a one-line tile centres its name
-    const shownName = fit(titleCase(s.id), W - 46 - 2 * pad, 8), shownSub = sub ? fit(sub, W - 24 - 2 * pad) : "";
-    // A tooltip only when the tile cuts its name or second line off.
-    if (missingAgent(s)) el("title", {}, g).textContent = `${titleCase(s.id)}: ${missingRef(s)} no longer exists`; // the reason, always
-    else if (shownName !== titleCase(s.id) || shownSub !== sub) el("title", {}, g).textContent = sub ? `${titleCase(s.id)}: ${sub}` : titleCase(s.id);
-    el("text", { x: 34 + pad, y: sub ? 26 : 37, class: "name" }, g).textContent = shownName;
-    if (sub) el("text", { x: 12 + pad, y: 50, class: "sub" }, g).textContent = shownSub;
-    el("title", {}, el("circle", { class: "port", cx: W / 2, cy: 0, r: 5 }, g)).textContent = s.service === "route"
+  // editTile adds the editing to a drawn tile: moving it, dragging a dependency or a rejection
+  // from its ports, its menu, and selecting it from the keyboard.
+  function editTile(s, { g, body, inPort: input, out, rejected }) {
+    el("title", {}, input).textContent = s.service === "route"
       ? "Receives the one output whose route field names the workflow to start"
       : (s.depends_on || []).length ? "Receives the outputs of the steps it depends on" : "Receives the run input";
     body.onpointerdown = (ev) => startMove(ev, s);
     for (const t of g.querySelectorAll("text, .type-icon")) t.onpointerdown = (ev) => startMove(ev, s);
-    // Nothing may depend on a route step, so it has no output port.
-    if (s.service !== "route") {
-      const out = el("circle", { class: "port", cx: W / 2, cy: H, r: 6 }, g);
+    if (out) {
       el("title", {}, out).textContent = "Creates a dependency when dragged onto another step";
       out.onpointerdown = (ev) => startConnect(ev, s);
     }
-    // A gate has a second output port, Rejected, on its right edge below the corner: clear of
-    // the output port at the bottom and of the arrows that enter a tile's side at its middle.
-    if (s.service === "gate") {
-      const rejected = el("circle", { class: "port port-reject", cx: W, cy: L.REJECT_PORT_Y, r: 5 }, g);
+    if (rejected) {
       el("title", {}, rejected).textContent = "Rejected: sends a rejection back to an earlier step when dragged onto it";
       rejected.onpointerdown = (ev) => startReject(ev, s);
     }
@@ -1635,7 +1424,8 @@ const WorkflowLogic = (() => {
     });
   }
 
-  const focusTile = (id) => [...$("canvas").querySelectorAll(".tile")].find((t) => t.getAttribute("aria-label")?.startsWith(`Step ${id}:`))?.focus();
+
+  const focusTile = (id) => [...$("canvas").querySelectorAll(".tile")].find((t) => t.getAttribute("data-step") === id)?.focus();
 
   // ---- Inspector ----
 
@@ -2124,7 +1914,7 @@ const WorkflowLogic = (() => {
       }, h("span", { className: "team-member-name" }, m.name), word ? h("span", { className: "team-member-kind" }, word) : null);
       tile.addEventListener("focusin", () => { teamHost = tile.closest("#team-canvas") ? "team-canvas" : "inspector"; });
       // The port under the tile: a drag from it onto another member draws a channel between the two.
-      const port = h("span", { className: "team-port", title: `Drag onto another member to draw a channel from ${m.name}` });
+      const port = h("span", { className: "team-port", title: `Draws a channel from ${m.name} when dragged onto another member` });
       tile.append(port);
       let draft = null; // the line that follows the pointer while a channel is drawn
       const pointAt = (ev) => { const box = lines.getBoundingClientRect(); return { x: ev.clientX - box.left, y: ev.clientY - box.top }; };
@@ -2439,15 +2229,54 @@ const WorkflowLogic = (() => {
       return;
     }
     if (target && target !== d.from) {
-      const deps = target.depends_on || [];
-      if (deps.includes(d.from.id)) setStatus("That dependency already exists", "error");
-      else if (target.service === "route" && L.isNode(d.from)) setStatus(`A route step cannot follow a ${d.from.service}`, "error");
-      else if (target.service === "route" && deps.length) setStatus("A route step has only one dependency", "error");
-      else if (target.service === "workflow" && deps.length) setStatus("A workflow step has only one dependency", "error");
-      else if (reaches(target.id, d.from.id)) setStatus("That dependency would create a cycle", "error");
-      else { target.depends_on = [...deps, d.from.id]; markDirty(); }
+      const refusal = connectRefusal(d.from, target);
+      if (refusal) setStatus(refusal, "error");
+      else { target.depends_on = [...(target.depends_on || []), d.from.id]; markDirty(); }
     }
     render();
+  }
+
+  // connectRefusal says why target cannot depend on from, or "": the rules of a drop on a step.
+  function connectRefusal(from, target) {
+    const deps = target.depends_on || [];
+    if (from.service === "route") return "Nothing may depend on a route step";
+    if (deps.includes(from.id)) return "That dependency already exists";
+    if (target.service === "route" && L.isNode(from)) return `A route step cannot follow a ${from.service}`;
+    if (target.service === "route" && deps.length) return "A route step has only one dependency";
+    if (target.service === "workflow" && deps.length) return "A workflow step has only one dependency";
+    if (reaches(target.id, from.id)) return "That dependency would create a cycle";
+    return "";
+  }
+
+  // connectDialog is the keyboard's way to draw and remove arrows: every other step, checked
+  // when it depends on s. A step that cannot depend on s is disabled, with the reason beside it.
+  // Apply makes the change as one edit, which Cmd/Ctrl+Z undoes.
+  function connectDialog(s) {
+    const others = workflow().steps.filter((o) => o !== s);
+    const checks = [];
+    const boxes = others.map((o) => {
+      const on = (o.depends_on || []).includes(s.id);
+      const refusal = on ? "" : connectRefusal(s, o);
+      const box = h("input", { type: "checkbox", checked: on, disabled: !!refusal, dataset: { step: o.id } });
+      checks.push(box);
+      return h("label", { className: "connect-option" }, box, h("span", {}, titleCase(o.id)), refusal ? h("span", { className: "muted" }, refusal) : null);
+    });
+    const apply = h("button", { type: "button", className: "primary", onclick: () => {
+      const wanted = new Set(checks.filter((b) => b.checked).map((b) => b.dataset.step));
+      const changed = others.filter((o) => wanted.has(o.id) !== (o.depends_on || []).includes(s.id));
+      dlg.close();
+      if (!changed.length) return;
+      withUndo("Connected", () => {
+        for (const o of changed) o.depends_on = wanted.has(o.id) ? [...(o.depends_on || []), s.id] : (o.depends_on || []).filter((x) => x !== s.id);
+        markDirty();
+        render();
+      });
+    } }, "Apply");
+    const dlg = openDialog({
+      title: `Connect ${titleCase(s.id)} to`,
+      body: others.length ? h("div", { className: "connect-options", role: "group", "aria-label": `Steps that receive the output of ${titleCase(s.id)}` }, ...boxes) : h("p", { className: "muted" }, "No other step yet."),
+      footer: [h("button", { type: "button", onclick: () => dlg.close() }, "Cancel"), apply],
+    });
   }
 
   // reaches reports whether step `to` depends, directly or transitively, on step `from`.
@@ -2477,6 +2306,8 @@ const WorkflowLogic = (() => {
     const ref = usesAgent(s) && s.agent ? s.agent.split("@") : null;
     if (ref?.length === 2 && ref[0] && ref[1] && agentDef(s.agent).status !== "error") items.push(["View agent", () => { location.hash = `#agents/${ref[0]}/${ref[1]}`; }, "", `Opens ${s.agent} in Agents`]);
     if (s.service === "workflow" && s.workflow && !missingWorkflow(s.workflow)) items.push(["Open workflow", () => openNested(s.workflow), "", `Opens ${refLabel(s.workflow)}, the workflow version this step runs`]);
+    // The keyboard draws and removes arrows here, as a drag from the output port does.
+    if (s.service !== "route") items.push(["Connect to…", () => connectDialog(s), "", `Chooses the steps that receive the output of ${titleCase(s.id)}`]);
     if ((s.depends_on || []).length || workflow().steps.some((o) => (o.depends_on || []).includes(s.id))) {
       items.push("-", ["Remove all dependencies", () => removeAllDependencies(s), "danger", `Removes every arrow into and out of ${titleCase(s.id)}`]);
     }
@@ -2492,18 +2323,21 @@ const WorkflowLogic = (() => {
       items.push(
         ["Run workflow…", openInputs, "", blocked || `Opens Select Inputs to start runs of v${shownVersion()}`, !!blocked],
         "-",
-        ["Add agent", () => addStep("agent"), "", "Adds an agent node without connections"],
-        ["Add human gate", () => addStep("gate"), "", "Adds a human approval node without connections"],
-        ["Add interactive session", () => addStep("interactive"), "", "Adds a chat session node without connections"],
-        ["Add workflow", () => addStep("workflow"), "", "Adds a child workflow node without connections"],
-        ["Add team", () => addStep("team"), "", "Adds a team node without connections"],
-        ["Add router", () => addStep("route"), "", "Adds a routing node without connections"],
-        ["Add service", () => addStep("service"), "", "Adds a custom service node without connections"],
-        ["Add merge", () => addStep("merge"), "", "Adds a merge node: it waits for a result from every source and forwards them together"],
-        ["Add batch", () => addStep("batch"), "", "Adds a batch node: it collects results and forwards them together once it holds its size"],
-        ["Add dev pod", () => addStep("devpod"), "", "Adds a dev pod node: it starts a sandbox with a clone of a repository on a work branch"],
-        ["Add command", () => addStep("command"), "", "Adds a command node: it runs one command in the dev pod, without a model"],
-        ["Add stop dev pod", () => addStep("devpod-stop"), "", "Adds a node that deletes the dev pod"],
+        // The twelve kinds of step sit in one submenu, so the menu itself stays short.
+        ["Add step", null, "", "Adds a step of a kind you choose, without connections", false, [
+          ["Add agent", () => addStep("agent"), "", "Adds an agent node without connections"],
+          ["Add human gate", () => addStep("gate"), "", "Adds a human approval node without connections"],
+          ["Add interactive session", () => addStep("interactive"), "", "Adds a chat session node without connections"],
+          ["Add workflow", () => addStep("workflow"), "", "Adds a child workflow node without connections"],
+          ["Add team", () => addStep("team"), "", "Adds a team node without connections"],
+          ["Add router", () => addStep("route"), "", "Adds a routing node without connections"],
+          ["Add service", () => addStep("service"), "", "Adds a custom service node without connections"],
+          ["Add merge", () => addStep("merge"), "", "Adds a merge node: it waits for a result from every source and forwards them together"],
+          ["Add batch", () => addStep("batch"), "", "Adds a batch node: it collects results and forwards them together once it holds its size"],
+          ["Add dev pod", () => addStep("devpod"), "", "Adds a dev pod node: it starts a sandbox with a clone of a repository on a work branch"],
+          ["Add command", () => addStep("command"), "", "Adds a command node: it runs one command in the dev pod, without a model"],
+          ["Add stop dev pod", () => addStep("devpod-stop"), "", "Adds a node that deletes the dev pod"],
+        ]],
         ["Auto-arrange", autoArrange, "", "Discards the saved positions and lays the steps out top to bottom"],
         "-",
       );

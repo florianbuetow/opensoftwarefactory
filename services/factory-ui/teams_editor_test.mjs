@@ -3,7 +3,8 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = fs.readFileSync(new URL("web/workflows.js", import.meta.url), "utf8");
+// The editor draws its graph through WorkflowGraph (graph.js): the drawing is read in both.
+const source = fs.readFileSync(new URL("web/workflows.js", import.meta.url), "utf8") + fs.readFileSync(new URL("web/graph.js", import.meta.url), "utf8");
 const refSource = fs.readFileSync(new URL("web/workflowref.js", import.meta.url), "utf8"); // loaded before workflows.js
 const style = fs.readFileSync(new URL("web/style.css", import.meta.url), "utf8");
 

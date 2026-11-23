@@ -8,7 +8,7 @@ import vm from "node:vm";
 
 const read = (name) => fs.readFileSync(new URL(`web/${name}`, import.meta.url), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value)); // across the vm realm
-const workflows = read("workflows.js"), runs = read("runs.js"), app = read("app.js"), decisions = read("decisions.js"), style = read("style.css");
+const workflows = read("workflows.js") + read("graph.js"), runs = read("runs.js"), app = read("app.js"), decisions = read("decisions.js"), style = read("style.css");
 
 function editor() {
   const context = {};
@@ -60,7 +60,7 @@ test("a merge is a funnel and a batch a tray, each its own outline inside the sa
   // The tray is a plain box; its second line under the top edge is drawn by the page.
   assert.equal(tileOutline("batch", W, H), tileOutline("workflow", W, H));
   assert.match(workflows, /if \(s\.service === "batch"\) el\("line", \{ class: "tray-line", x1: 1, y1: TRAY_LINE_Y, x2: W - 1, y2: TRAY_LINE_Y \}, g\);/);
-  assert.match(workflows, /const outline = L\.tileOutline\(kind\(s\), W, H\);/);
+  assert.match(workflows, /const outline = L\(\)\.tileOutline\(kind\(s\), W, H\);/);
 });
 
 test("the tiles read Merge and Batch, with what they do as their second line", () => {
@@ -127,7 +127,7 @@ test("what the orchestrator would refuse shows as problems: no source, no size, 
   assert.deepEqual(of(w.steps[4]), []);
   assert.deepEqual(of(w.steps[0]), []);
   // An arrow from a node onto a route step is refused at once, with the reason.
-  assert.match(workflows, /target\.service === "route" && L\.isNode\(d\.from\)\) setStatus\(`A route step cannot follow a \$\{d\.from\.service\}`, "error"\)/);
+  assert.match(workflows, /if \(target\.service === "route" && L\.isNode\(from\)\) return `A route step cannot follow a \$\{from\.service\}`;/, "the drop and Connect to… share the rule");
 });
 
 test("the styles of the nodes sit in their own marked block", () => {
