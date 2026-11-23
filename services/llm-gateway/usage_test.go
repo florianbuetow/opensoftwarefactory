@@ -15,24 +15,26 @@ import (
 	"time"
 )
 
+const pendingListPath = "/list/gateway-measurements-pending"
+
 func TestNormalizeUsagePreservesZeroCacheAndMissing(t *testing.T) {
 	c := usageContext{ID: "id", RunID: "run", ExecutionID: "exec", Vendor: "v", Model: "resolved", RequestedModel: "asked", Effort: "low", OccurredAt: time.Now(), Modes: map[string]string{}}
-	m := normalizeUsage(c, json.RawMessage(`{"prompt_tokens":0,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0},"provider_cost":0.01}`), true)
+	m := normalizeUsage(&c, json.RawMessage(`{"prompt_tokens":0,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0},"provider_cost":0.01}`), true)
 	if m.InputTokens == nil || *m.InputTokens != 0 || m.CachedInputTokens == nil || *m.CachedInputTokens != 0 || m.UncachedInputTokens == nil || *m.UncachedInputTokens != 0 || m.OutputTokens == nil || *m.OutputTokens != 2 {
 		t.Fatalf("measurement %+v", m)
 	}
 	if m.ReasoningTokens != nil || !strings.Contains(strings.Join(m.Missing, ","), "reasoning_tokens/provider usage omitted") || !strings.Contains(string(m.RawUsage), "provider_cost") {
 		t.Fatalf("missing/raw %+v %s", m.Missing, m.RawUsage)
 	}
-	missing := normalizeUsage(c, nil, false)
-	if missing.Status != "missing" || missing.InputTokens != nil || !strings.Contains(strings.Join(missing.Missing, ","), "raw_usage/provider omitted usage") {
+	missing := normalizeUsage(&c, nil, false)
+	if missing.Status != statusMissing || missing.InputTokens != nil || !strings.Contains(strings.Join(missing.Missing, ","), "raw_usage/provider omitted usage") {
 		t.Fatalf("missing %+v", missing)
 	}
 }
 
 func TestNormalizeUsageKeepsUnknownEffortAbsent(t *testing.T) {
 	c := usageContext{ID: "id", Vendor: "v", Model: "m", RequestedModel: "asked", OccurredAt: time.Now(), Modes: map[string]string{}}
-	m := normalizeUsage(c, json.RawMessage(`{"prompt_tokens":1,"completion_tokens":1}`), true)
+	m := normalizeUsage(&c, json.RawMessage(`{"prompt_tokens":1,"completion_tokens":1}`), true)
 	data, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +117,7 @@ func TestGatewayPersistsOutboxBeforeEvaluation(t *testing.T) {
 	}))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "vendor", BaseURL: upstream.URL, Auth: Auth{Type: "none"}, Streaming: true, Models: map[string]string{"public": "resolved"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +179,7 @@ func TestGatewayFailsBeforeProviderWhenAttemptIntentIsNotDurable(t *testing.T) {
 	eval := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("evaluation called") }))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: upstream.URL, Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +246,7 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 	eval := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { evalCalls.Add(1); w.WriteHeader(http.StatusCreated) }))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: upstream.URL, Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +269,7 @@ func TestPeriodicReplaySkipsActiveProviderAttempt(t *testing.T) {
 			if err := json.Unmarshal(data, &out); err != nil {
 				t.Error(err)
 			}
-			if out.Phase != "active" || out.Measurement.DurationMS != nil {
+			if out.Phase != phaseActive || out.Measurement.DurationMS != nil {
 				t.Fatalf("active outbox %+v", out)
 			}
 		}
@@ -289,7 +291,7 @@ func TestReplayOutboxTreatsMatchingConflictAsDelivered(t *testing.T) {
 	deleted := false
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/list/gateway-measurements-pending":
+		case r.Method == http.MethodGet && r.URL.Path == pendingListPath:
 			if handlerErr := json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/attempt.json"}}}); handlerErr != nil {
 				t.Error(handlerErr)
 			}
@@ -329,7 +331,7 @@ func TestReplayOutboxTreatsMatchingConflictAsDelivered(t *testing.T) {
 	}))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: "http://provider.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +358,7 @@ func TestReplayContinuesAfterBadPendingItem(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/list/gateway-measurements-pending":
+		case pendingListPath:
 			if handlerErr := json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/bad.json"}, {"id": "gateway-measurements-pending/good.json"}}}); handlerErr != nil {
 				t.Error(handlerErr)
 			}
@@ -380,7 +382,7 @@ func TestReplayContinuesAfterBadPendingItem(t *testing.T) {
 	eval := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { delivered = true; w.WriteHeader(http.StatusCreated) }))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: "http://unused.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +395,7 @@ func TestReplayContinuesAfterBadPendingItem(t *testing.T) {
 }
 
 func TestConflictUpgradesSameMissingAttemptWithCAS(t *testing.T) {
-	reported := usageMeasurement{SchemaVersion: 1, ID: "attempt", Kind: "usage", RunID: "run", ExecutionID: "exec", OccurredAt: time.Now().UTC(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: "gateway-measurements/attempt.json", Status: "reported", Missing: []string{}, RawUsage: json.RawMessage(`{"prompt_tokens":1}`)}
+	reported := usageMeasurement{SchemaVersion: 1, ID: "attempt", Kind: "usage", RunID: "run", ExecutionID: "exec", OccurredAt: time.Now().UTC(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: "gateway-measurements/attempt.json", Status: statusReported, Missing: []string{}, RawUsage: json.RawMessage(`{"prompt_tokens":1}`)}
 	cas := false
 	eval := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -406,7 +408,7 @@ func TestConflictUpgradesSameMissingAttemptWithCAS(t *testing.T) {
 			if err := json.Unmarshal(data, &existing); err != nil {
 				t.Error(err)
 			}
-			existing["status"] = "missing"
+			existing["status"] = statusMissing
 			delete(existing, "raw_usage")
 			existing["missing"] = []string{"raw_usage/provider omitted usage"}
 			existing["revision"] = "rev1"
@@ -424,11 +426,11 @@ func TestConflictUpgradesSameMissingAttemptWithCAS(t *testing.T) {
 	}))
 	defer eval.Close()
 	c := Config{EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: "http://unused.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.deliverOutbox(context.Background(), &usageOutbox{Phase: "final", Measurement: reported}); err != nil {
+	if err := g.deliverOutbox(context.Background(), &usageOutbox{Phase: phaseFinal, Measurement: reported}); err != nil {
 		t.Fatal(err)
 	}
 	if !cas {
@@ -438,7 +440,7 @@ func TestConflictUpgradesSameMissingAttemptWithCAS(t *testing.T) {
 
 func TestStartupFinalizesAbandonedActiveAttempt(t *testing.T) {
 	m := usageMeasurement{SchemaVersion: 1, ID: "abandoned", Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: "gateway-measurements/abandoned.json", Status: "missing", Missing: []string{"raw_usage/provider omitted usage"}}
-	outbox, err := json.Marshal(usageOutbox{Phase: "active", Measurement: m})
+	outbox, err := json.Marshal(usageOutbox{Phase: phaseActive, Measurement: m})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +451,7 @@ func TestStartupFinalizesAbandonedActiveAttempt(t *testing.T) {
 	blobs := map[string][]byte{m.ArtifactID: outbox, "gateway-measurements-pending/abandoned.json": marker}
 	var delivered usageMeasurement
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/list/gateway-measurements-pending" {
+		if r.URL.Path == pendingListPath {
 			if handlerErr := json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]string{{"id": "gateway-measurements-pending/abandoned.json"}}}); handlerErr != nil {
 				t.Error(handlerErr)
 			}
@@ -482,21 +484,21 @@ func TestStartupFinalizesAbandonedActiveAttempt(t *testing.T) {
 	}))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: "http://unused.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := g.replayUsageOutbox(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if delivered.Status != "missing" || delivered.DurationMS != nil || !strings.Contains(strings.Join(delivered.Missing, ","), "response/process interrupted") {
+	if delivered.Status != statusMissing || delivered.DurationMS != nil || !strings.Contains(strings.Join(delivered.Missing, ","), "response/process interrupted") {
 		t.Fatalf("delivered %+v", delivered)
 	}
 	var stored usageOutbox
 	if err := json.Unmarshal(blobs[m.ArtifactID], &stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored.Phase != "final" {
+	if stored.Phase != phaseFinal {
 		t.Fatalf("stored phase %q", stored.Phase)
 	}
 }
@@ -507,7 +509,7 @@ func TestStartupRecoversMoreThanOnePendingBatch(t *testing.T) {
 	for i := 0; i < total; i++ {
 		id := fmt.Sprintf("attempt-%03d", i)
 		artifact := usageOutboxPrefix + "/" + id + ".json"
-		out, err := json.Marshal(usageOutbox{Phase: "active", Measurement: usageMeasurement{SchemaVersion: 1, ID: id, Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: artifact, Status: "missing", Missing: []string{"raw_usage/provider omitted usage"}}})
+		out, err := json.Marshal(usageOutbox{Phase: phaseActive, Measurement: usageMeasurement{SchemaVersion: 1, ID: id, Kind: "usage", OccurredAt: time.Now(), Vendor: "v", Model: "m", RequestedModel: "m", Modes: map[string]string{}, ArtifactID: artifact, Status: "missing", Missing: []string{"raw_usage/provider omitted usage"}}})
 		if err != nil {
 			t.Error(err)
 		}
@@ -554,7 +556,7 @@ func TestStartupRecoversMoreThanOnePendingBatch(t *testing.T) {
 	eval := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { delivered++; w.WriteHeader(http.StatusCreated) }))
 	defer eval.Close()
 	c := Config{BlobstoreURL: blob.URL, EvaluationURL: eval.URL, Providers: []Provider{{Name: "v", BaseURL: "http://unused.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"m": "m"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

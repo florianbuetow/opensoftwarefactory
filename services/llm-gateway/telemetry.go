@@ -20,6 +20,7 @@ const (
 	telemetryBatchSize = 128
 )
 
+// TelemetryConfig is where the gateway sends its traces.
 type TelemetryConfig struct {
 	Endpoint string `yaml:"endpoint"`
 	Insecure bool   `yaml:"insecure"`
@@ -72,7 +73,7 @@ func initTelemetry(ctx context.Context, config TelemetryConfig) (func(context.Co
 
 func validateTelemetryEndpoint(endpoint string) error {
 	parsed, err := url.ParseRequestURI(endpoint)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+	if err != nil || parsed.Host == "" || (parsed.Scheme != schemeHTTP && parsed.Scheme != schemeHTTPS) ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("telemetry endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment")
 	}

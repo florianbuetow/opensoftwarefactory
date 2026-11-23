@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,24 +22,32 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// jsonNull is the JSON text of a null value.
+const jsonNull = "null"
+
+// Gateway routes model requests to providers and records their usage.
 type Gateway struct {
 	routes         map[string]route
-	providers      []*Provider
 	transport      *http.Transport
 	log            *slog.Logger
+	evidenceClient *http.Client
 	blobstoreURL   string
 	evaluationURL  string
-	evidenceClient *http.Client
+	providers      []*Provider
 	replayMu       sync.Mutex
 	replayOffset   int
 }
 
-func newGateway(c Config, l *slog.Logger) (*Gateway, error) {
-	routes, err := routes(&c)
+func newGateway(c *Config, l *slog.Logger) (*Gateway, error) {
+	routes, err := routes(c)
 	if err != nil {
 		return nil, err
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("default HTTP transport is not an *http.Transport")
+	}
+	t := base.Clone()
 	t.MaxIdleConns = 100
 	t.MaxIdleConnsPerHost = 16
 	// Compression must not obscure upstream bodies or SSE framing.
@@ -64,7 +73,7 @@ func (g *Gateway) resolveRoute(ctx context.Context, model string) (route, bool) 
 	var found route
 	matches := 0
 	for _, p := range g.providers {
-		if p.ModelDiscovery != "lm-studio" {
+		if p.ModelDiscovery != discoveryLMStudio {
 			continue
 		}
 		catalog := g.providerModels(ctx, p)
@@ -178,10 +187,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			requestSettings["stream"] = "none"
 		}
-		if raw, ok := request["temperature"]; ok && string(raw) != "null" {
+		if raw, ok := request["temperature"]; ok && string(raw) != jsonNull {
 			requestSettings["temperature"] = string(raw)
 		}
-		if raw, ok := request["service_tier"]; ok && string(raw) != "null" {
+		if raw, ok := request["service_tier"]; ok && string(raw) != jsonNull {
 			var tier string
 			if json.Unmarshal(raw, &tier) != nil || strings.TrimSpace(tier) == "" {
 				fail(400, "service_tier must be a non-empty string", "invalid_request_error")
@@ -189,7 +198,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			modes["service_tier"] = tier
 		}
-		if raw, ok := request["modes"]; ok && string(raw) != "null" {
+		if raw, ok := request["modes"]; ok && string(raw) != jsonNull {
 			var supplied map[string]string
 			if json.Unmarshal(raw, &supplied) != nil || supplied == nil {
 				fail(400, "modes must be an object of string values", "invalid_request_error")
@@ -204,7 +213,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if synthetic {
-			if raw, ok := request["stream_options"]; ok && string(raw) != "null" {
+			if raw, ok := request["stream_options"]; ok && string(raw) != jsonNull {
 				var options struct {
 					IncludeUsage bool `json:"include_usage"`
 				}
@@ -298,7 +307,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var usageCtx usageContext
 	if attemptID != "" {
 		usageCtx = usageContextFromRequest(r, span, attemptID, requestedAt, selected, requestedModel, effort, modes, requestSettings)
-		if beginErr := g.beginUsageAttempt(ctx, usageCtx); beginErr != nil {
+		if beginErr := g.beginUsageAttempt(ctx, &usageCtx); beginErr != nil {
 			fail(503, "Usage evidence unavailable", "api_error")
 			return
 		}
@@ -306,7 +315,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	response, err := g.transport.RoundTrip(upstream)
 	if err != nil {
 		if attemptID != "" {
-			g.completeUsage(ctx, usageCtx, nil, false)
+			g.completeUsage(ctx, &usageCtx, nil, false)
 		}
 		fail(502, "Upstream connection failed", "api_error")
 		return
@@ -323,7 +332,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if synthetic && status >= 200 && status < 300 {
 		completion, readErr := readCompletion(response.Body)
 		if readErr != nil {
-			g.completeUsage(ctx, usageCtx, nil, false)
+			g.completeUsage(ctx, &usageCtx, nil, false)
 			fail(502, "Invalid upstream completion", "api_error")
 			return
 		}
@@ -334,14 +343,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(status)
-		if err = writeCompletionStream(w, completion, includeUsage); err != nil {
-			g.completeUsage(ctx, usageCtx, completion.Usage, false)
+		if err = writeCompletionStream(w, &completion, includeUsage); err != nil {
+			g.completeUsage(ctx, &usageCtx, completion.Usage, false)
 			requestError = "stream interrupted"
 			span.SetStatus(codes.Error, "stream interrupted")
 			requestLog.WarnContext(ctx, "stream interrupted", "provider", provider)
 			panic(http.ErrAbortHandler)
 		}
-		g.completeUsage(ctx, usageCtx, completion.Usage, true)
+		g.completeUsage(ctx, &usageCtx, completion.Usage, true)
 		return
 	}
 	copyHeaders(w.Header(), response.Header)
@@ -356,7 +365,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	observer := newUsageObserver(streaming)
 	if _, err = io.Copy(dst, io.TeeReader(response.Body, observer)); err != nil {
 		if attemptID != "" {
-			g.completeUsage(ctx, usageCtx, observer.Usage(), false)
+			g.completeUsage(ctx, &usageCtx, observer.Usage(), false)
 		}
 		requestError = "response interrupted"
 		span.SetStatus(codes.Error, "response interrupted")
@@ -364,7 +373,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 	if attemptID != "" {
-		g.completeUsage(ctx, usageCtx, observer.Usage(), true)
+		g.completeUsage(ctx, &usageCtx, observer.Usage(), true)
 	}
 }
 
@@ -447,7 +456,7 @@ func (g *Gateway) providerModels(ctx context.Context, p *Provider) providerCatal
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	endpoint := p.BaseURL + "/models"
-	if p.ModelDiscovery == "lm-studio" {
+	if p.ModelDiscovery == discoveryLMStudio {
 		u, err := url.Parse(p.BaseURL)
 		if err != nil {
 			return providerCatalog{}
@@ -475,7 +484,7 @@ func (g *Gateway) providerModels(ctx context.Context, p *Provider) providerCatal
 		g.log.WarnContext(ctx, "model list unavailable", "provider", p.Name, "status", res.StatusCode)
 		return providerCatalog{}
 	}
-	if p.ModelDiscovery == "lm-studio" {
+	if p.ModelDiscovery == discoveryLMStudio {
 		var list struct {
 			Models []struct {
 				Type            string `json:"type"`
@@ -548,17 +557,17 @@ func (f flushWriter) Write(p []byte) (int, error) {
 type completion struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
-	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int                        `json:"index"`
 		Message      map[string]json.RawMessage `json:"message"`
 		FinishReason json.RawMessage            `json:"finish_reason"`
 		Logprobs     json.RawMessage            `json:"logprobs"`
+		Index        int                        `json:"index"`
 	} `json:"choices"`
 	Usage             json.RawMessage `json:"usage"`
 	SystemFingerprint json.RawMessage `json:"system_fingerprint"`
 	ServiceTier       json.RawMessage `json:"service_tier"`
+	Created           int64           `json:"created"`
 }
 
 func readCompletion(r io.Reader) (completion, error) {
@@ -579,7 +588,7 @@ func readCompletion(r io.Reader) (completion, error) {
 		if choice.Message == nil {
 			return c, fmt.Errorf("missing message")
 		}
-		if raw, ok := choice.Message["tool_calls"]; ok && string(raw) != "null" {
+		if raw, ok := choice.Message["tool_calls"]; ok && string(raw) != jsonNull {
 			var calls []map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &calls); err != nil {
 				return c, err
@@ -604,7 +613,7 @@ func readCompletion(r io.Reader) (completion, error) {
 	return c, nil
 }
 
-func writeCompletionStream(w http.ResponseWriter, c completion, includeUsage bool) error {
+func writeCompletionStream(w http.ResponseWriter, c *completion, includeUsage bool) error {
 	chunk := map[string]any{"id": c.ID, "object": "chat.completion.chunk", "created": c.Created, "model": c.Model}
 	if c.SystemFingerprint != nil {
 		chunk["system_fingerprint"] = c.SystemFingerprint

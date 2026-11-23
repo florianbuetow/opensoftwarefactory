@@ -11,26 +11,38 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+const (
+	schemeHTTP        = "http"
+	schemeHTTPS       = "https"
+	authNone          = "none"
+	discoveryLMStudio = "lm-studio"
+)
+
+// Auth is how the gateway authenticates to one provider.
 type Auth struct {
 	Type     string `yaml:"type"`
 	Token    string `yaml:"token"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 }
+
+// Provider is one upstream model API and the public model names it serves.
 type Provider struct {
+	Models         map[string]string `yaml:"models"`
 	Name           string            `yaml:"name"`
 	BaseURL        string            `yaml:"base_url"`
 	Auth           Auth              `yaml:"auth"`
-	Streaming      bool              `yaml:"streaming"`
 	ModelDiscovery string            `yaml:"model_discovery"`
-	Models         map[string]string `yaml:"models"`
+	Streaming      bool              `yaml:"streaming"`
 }
+
+// Config is the gateway configuration file.
 type Config struct {
 	Providers     []Provider      `yaml:"providers"`
 	LogLevel      string          `yaml:"log_level"`
-	Telemetry     TelemetryConfig `yaml:"telemetry"`
 	BlobstoreURL  string          `yaml:"blobstore_url"`
 	EvaluationURL string          `yaml:"evaluation_url"`
+	Telemetry     TelemetryConfig `yaml:"telemetry"`
 }
 type route struct {
 	provider *Provider
@@ -65,7 +77,7 @@ func routes(c *Config) (map[string]route, error) {
 			continue
 		}
 		u, err := url.Parse(endpoint)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		if err != nil || u.Host == "" || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("%s must be an HTTP(S) URL without credentials, query or fragment", name)
 		}
 	}
@@ -79,12 +91,12 @@ func routes(c *Config) (map[string]route, error) {
 		}
 		names[p.Name] = true
 		u, err := url.Parse(p.BaseURL)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		if err != nil || u.Host == "" || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("provider base_url must be an HTTP(S) URL without credentials, query or fragment")
 		}
 		p.BaseURL = strings.TrimRight(p.BaseURL, "/")
 		switch p.Auth.Type {
-		case "none":
+		case authNone:
 		case "bearer":
 			if p.Auth.Token == "" || strings.ContainsAny(p.Auth.Token, "\r\n") {
 				return nil, fmt.Errorf("bearer token is missing or invalid")
@@ -96,7 +108,7 @@ func routes(c *Config) (map[string]route, error) {
 		default:
 			return nil, fmt.Errorf("auth.type must be none, bearer or basic")
 		}
-		if p.ModelDiscovery != "" && p.ModelDiscovery != "lm-studio" {
+		if p.ModelDiscovery != "" && p.ModelDiscovery != discoveryLMStudio {
 			return nil, fmt.Errorf("model_discovery must be empty or lm-studio")
 		}
 		if len(p.Models) == 0 {

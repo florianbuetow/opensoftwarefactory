@@ -48,7 +48,8 @@ func run() (err error) {
 	if level != slog.LevelDebug && level != slog.LevelInfo && level != slog.LevelWarn && level != slog.LevelError {
 		return fmt.Errorf("unsupported log_level")
 	}
-	if err = os.MkdirAll(*logsPath, 0o700); err != nil {
+	err = os.MkdirAll(*logsPath, 0o700)
+	if err != nil {
 		return err
 	}
 	f, err := os.OpenFile(filepath.Join(*logsPath, "gateway.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -68,7 +69,7 @@ func run() (err error) {
 			logger.Warn("telemetry shutdown failed")
 		}
 	}()
-	gateway, err := newGateway(c, logger)
+	gateway, err := newGateway(&c, logger)
 	if err != nil {
 		return err
 	}

@@ -23,21 +23,25 @@ const (
 	usageOutboxPrefix  = "gateway-measurements"
 	usagePendingPrefix = "gateway-measurements-pending"
 	usageReplayLimit   = 100
+
+	statusReported = "reported"
+	statusMissing  = "missing"
+	phaseActive    = "active"
+	phaseFinal     = "final"
 )
 
 type usageContext struct {
 	ID, RunID, ExecutionID, ParentExecutionID, Agent, AgentRef string
 	AgentVersion                                               *int
 	TraceID, SpanID, Vendor, Model, RequestedModel, Effort     string
-	ActivityID, ActivityAttempt, Turn                          string
 	DurationMS                                                 *int64
 	OccurredAt                                                 time.Time
 	Modes                                                      map[string]string
 	RequestSettings                                            map[string]string
+	ActivityID, ActivityAttempt, Turn                          string
 }
 
 type usageMeasurement struct {
-	SchemaVersion       int               `json:"schema_version"`
 	ID                  string            `json:"id"`
 	Kind                string            `json:"kind"`
 	RunID               string            `json:"run_id"`
@@ -63,12 +67,13 @@ type usageMeasurement struct {
 	Status              string            `json:"status"`
 	Missing             []string          `json:"missing"`
 	RawUsage            json.RawMessage   `json:"raw_usage,omitempty"`
+	SchemaVersion       int               `json:"schema_version"`
 }
 
 type usageOutbox struct {
-	Measurement usageMeasurement `json:"measurement"`
 	Attribution usageAttribution `json:"attribution"`
 	Phase       string           `json:"phase"`
+	Measurement usageMeasurement `json:"measurement"`
 }
 
 type usagePending struct {
@@ -76,11 +81,11 @@ type usagePending struct {
 }
 
 type usageAttribution struct {
+	RequestSettings map[string]string `json:"request_settings,omitempty"`
 	ActivityID      string            `json:"activity_id,omitempty"`
 	ActivityAttempt string            `json:"activity_attempt,omitempty"`
 	Turn            string            `json:"turn,omitempty"`
 	AgentRef        string            `json:"agent_ref,omitempty"`
-	RequestSettings map[string]string `json:"request_settings,omitempty"`
 }
 
 func newAttemptID() (string, error) {
@@ -127,9 +132,9 @@ func usageContextFromRequest(r *http.Request, span trace.Span, id string, at tim
 // usageObserver sees a copy of bytes while the original response is forwarded.
 // Native SSE retains at most one bounded frame and the last non-null usage object.
 type usageObserver struct {
-	streaming  bool
 	pending    []byte
 	raw        json.RawMessage
+	streaming  bool
 	overflow   bool
 	discarding bool
 }
@@ -151,7 +156,8 @@ func nextSSEFrame(data []byte) (end, separator int) {
 func (o *usageObserver) Write(p []byte) (int, error) {
 	originalLen := len(p)
 	if o.streaming && o.discarding {
-		combined := append(o.pending, p...)
+		o.pending = append(o.pending, p...)
+		combined := o.pending
 		end, separator := nextSSEFrame(combined)
 		if end < 0 {
 			o.pending = append(o.pending[:0], combined[max(0, len(combined)-1):]...)
@@ -199,7 +205,7 @@ func (o *usageObserver) Write(p []byte) (int, error) {
 				continue
 			}
 			var object map[string]json.RawMessage
-			if json.Unmarshal(data, &object) == nil && len(object["usage"]) > 0 && string(object["usage"]) != "null" {
+			if json.Unmarshal(data, &object) == nil && len(object["usage"]) > 0 && string(object["usage"]) != jsonNull {
 				o.raw = append(o.raw[:0], object["usage"]...)
 			}
 		}
@@ -212,18 +218,18 @@ func (o *usageObserver) Usage() json.RawMessage {
 		return append(json.RawMessage(nil), o.raw...)
 	}
 	var object map[string]json.RawMessage
-	if !o.overflow && json.Unmarshal(o.pending, &object) == nil && len(object["usage"]) > 0 && string(object["usage"]) != "null" {
+	if !o.overflow && json.Unmarshal(o.pending, &object) == nil && len(object["usage"]) > 0 && string(object["usage"]) != jsonNull {
 		return append(json.RawMessage(nil), object["usage"]...)
 	}
 	return nil
 }
 
-func normalizeUsage(c usageContext, raw json.RawMessage, complete bool) usageMeasurement {
+func normalizeUsage(c *usageContext, raw json.RawMessage, complete bool) usageMeasurement {
 	m := usageMeasurement{
 		SchemaVersion: 1, ID: c.ID, Kind: "usage", RunID: c.RunID, ExecutionID: c.ExecutionID, ParentExecutionID: c.ParentExecutionID,
 		Agent: c.Agent, AgentVersion: c.AgentVersion, TraceID: c.TraceID, SpanID: c.SpanID, OccurredAt: c.OccurredAt,
 		Vendor: c.Vendor, Model: c.Model, RequestedModel: c.RequestedModel, Effort: c.Effort, Modes: c.Modes,
-		ArtifactID: usageOutboxPrefix + "/" + c.ID + ".json", Status: "reported", Missing: []string{}, RawUsage: raw,
+		ArtifactID: usageOutboxPrefix + "/" + c.ID + ".json", Status: statusReported, Missing: []string{}, RawUsage: raw,
 	}
 	m.DurationMS = c.DurationMS
 	if c.RunID == "" {
@@ -245,7 +251,7 @@ func normalizeUsage(c usageContext, raw json.RawMessage, complete bool) usageMea
 		m.Missing = append(m.Missing, "span_id/trace context unavailable")
 	}
 	if len(raw) == 0 {
-		m.Status = "missing"
+		m.Status = statusMissing
 		m.Missing = append(m.Missing, "raw_usage/provider omitted usage", "input_tokens/provider usage omitted", "output_tokens/provider usage omitted", "cached_input_tokens/provider usage omitted", "uncached_input_tokens/provider usage omitted", "reasoning_tokens/provider usage omitted")
 		if !complete {
 			m.Missing = append(m.Missing, "response/interrupted before terminal usage")
@@ -312,36 +318,38 @@ func normalizeUsage(c usageContext, raw json.RawMessage, complete bool) usageMea
 	return m
 }
 
-func (g *Gateway) beginUsageAttempt(ctx context.Context, c usageContext) error {
+func (g *Gateway) beginUsageAttempt(ctx context.Context, c *usageContext) error {
 	if g.blobstoreURL == "" && g.evaluationURL == "" {
 		return nil
 	}
 	if g.blobstoreURL == "" || g.evaluationURL == "" {
 		return errors.New("usage evidence destinations are not configured")
 	}
-	outbox := usageOutbox{Phase: "active", Measurement: normalizeUsage(c, nil, false), Attribution: usageAttribution{
+	outbox := usageOutbox{Phase: phaseActive, Measurement: normalizeUsage(c, nil, false), Attribution: usageAttribution{
 		ActivityID: c.ActivityID, ActivityAttempt: c.ActivityAttempt, Turn: c.Turn, AgentRef: c.AgentRef, RequestSettings: c.RequestSettings,
 	}}
-	if err := g.storeOutbox(ctx, outbox, true); err != nil {
+	if err := g.storeOutbox(ctx, &outbox, true); err != nil {
 		return err
 	}
 	return g.storePending(ctx, usagePending{ArtifactID: outbox.Measurement.ArtifactID}, true)
 }
 
-func (g *Gateway) completeUsage(ctx context.Context, c usageContext, raw json.RawMessage, complete bool) {
+func (g *Gateway) completeUsage(ctx context.Context, c *usageContext, raw json.RawMessage, complete bool) {
 	if g.blobstoreURL == "" && g.evaluationURL == "" {
 		return
 	}
 	duration := max(int64(0), time.Since(c.OccurredAt).Milliseconds())
-	c.DurationMS = &duration
-	outbox := usageOutbox{Phase: "final", Measurement: normalizeUsage(c, raw, complete), Attribution: usageAttribution{
+	// The duration goes on a copy, so the caller's context stays as it was.
+	measured := *c
+	measured.DurationMS = &duration
+	outbox := usageOutbox{Phase: phaseFinal, Measurement: normalizeUsage(&measured, raw, complete), Attribution: usageAttribution{
 		ActivityID: c.ActivityID, ActivityAttempt: c.ActivityAttempt, Turn: c.Turn, AgentRef: c.AgentRef, RequestSettings: c.RequestSettings,
 	}}
 	deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	var err error
 	for range 3 {
-		if err = g.storeOutbox(deliveryCtx, outbox, false); err == nil {
+		if err = g.storeOutbox(deliveryCtx, &outbox, false); err == nil {
 			break
 		}
 	}
@@ -358,7 +366,7 @@ func (g *Gateway) completeUsage(ctx context.Context, c usageContext, raw json.Ra
 	}
 }
 
-func (g *Gateway) storeOutbox(ctx context.Context, outbox usageOutbox, createOnly bool) (err error) {
+func (g *Gateway) storeOutbox(ctx context.Context, outbox *usageOutbox, createOnly bool) (err error) {
 	data, err := json.Marshal(outbox)
 	if err != nil {
 		return err
@@ -513,7 +521,7 @@ func (g *Gateway) compareExistingMeasurement(ctx context.Context, endpoint strin
 		return err
 	}
 	if !bytes.Equal(wantJSON, gotJSON) {
-		if got["status"] == "missing" && want["status"] == "reported" && sameAttemptIdentity(got, want) && revision != "" {
+		if got["status"] == statusMissing && want["status"] == statusReported && sameAttemptIdentity(got, want) && revision != "" {
 			req, reqErr := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(expected))
 			if reqErr != nil {
 				return reqErr
@@ -641,20 +649,20 @@ func (g *Gateway) replayPendingUsage(ctx context.Context, recoverActive bool) (e
 			replayErrors = append(replayErrors, fmt.Errorf("reading outbox %s: %w", pending.ArtifactID, err))
 			continue
 		}
-		if outbox.Phase == "active" {
+		if outbox.Phase == phaseActive {
 			if !recoverActive {
 				continue
 			}
-			outbox.Phase = "final"
+			outbox.Phase = phaseFinal
 			outbox.Measurement.DurationMS = nil
-			outbox.Measurement.Status = "missing"
+			outbox.Measurement.Status = statusMissing
 			outbox.Measurement.RawUsage = nil
 			outbox.Measurement.Missing = append(outbox.Measurement.Missing, "response/process interrupted before final usage")
-			if err := g.storeOutbox(ctx, outbox, false); err != nil {
+			if err := g.storeOutbox(ctx, &outbox, false); err != nil {
 				replayErrors = append(replayErrors, err)
 				continue
 			}
-		} else if outbox.Phase != "" && outbox.Phase != "final" {
+		} else if outbox.Phase != "" && outbox.Phase != phaseFinal {
 			replayErrors = append(replayErrors, fmt.Errorf("outbox %s has invalid phase", pending.ArtifactID))
 			continue
 		}

@@ -21,7 +21,7 @@ func testGateway(t *testing.T, upstream *httptest.Server, streaming bool, auth A
 		Name: "test", BaseURL: upstream.URL, Auth: auth, Streaming: streaming,
 		Models: map[string]string{"public-model": "upstream/model"},
 	}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,9 @@ func TestNativeStreamingFlushesAndClientCancellationReachesUpstream(t *testing.T
 		if _, err := io.WriteString(w, "data: first\n\n"); err != nil {
 			t.Error(err)
 		}
-		w.(http.Flusher).Flush()
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+		}
 		close(firstSent)
 		select {
 		case <-release:
@@ -204,26 +206,42 @@ func TestSyntheticStreamingProducesCompletionChunks(t *testing.T) {
 	if len(frames) != 4 || frames[3] != "data: [DONE]" {
 		t.Fatalf("unexpected SSE frames: %q", frames)
 	}
-	var first, finish, usage map[string]any
-	for index, target := range []*map[string]any{&first, &finish, &usage} {
+	type chunk struct {
+		Usage *struct {
+			TotalTokens *int `json:"total_tokens"`
+		} `json:"usage"`
+		Choices []struct {
+			FinishReason *string `json:"finish_reason"`
+			Delta        struct {
+				Content   *string `json:"content"`
+				Role      *string `json:"role"`
+				ToolCalls []struct {
+					Index *int `json:"index"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	var first, finish, usage chunk
+	for index, target := range []*chunk{&first, &finish, &usage} {
 		if err := json.Unmarshal([]byte(strings.TrimPrefix(frames[index], "data: ")), target); err != nil {
 			t.Fatal(err)
 		}
 	}
-	choice := first["choices"].([]any)[0].(map[string]any)
-	delta := choice["delta"].(map[string]any)
-	if delta["content"] != "answer" || delta["role"] != "assistant" {
-		t.Fatalf("completion content not reconstructed: %v", delta)
+	if len(first.Choices) == 0 {
+		t.Fatalf("first chunk has no choices: %q", frames[0])
 	}
-	tool := delta["tool_calls"].([]any)[0].(map[string]any)
-	if tool["index"] != float64(0) {
-		t.Fatalf("tool call index missing: %v", tool)
+	delta := first.Choices[0].Delta
+	if delta.Content == nil || *delta.Content != "answer" || delta.Role == nil || *delta.Role != "assistant" {
+		t.Fatalf("completion content not reconstructed: %q", frames[0])
 	}
-	if finish["choices"].([]any)[0].(map[string]any)["finish_reason"] != "tool_calls" {
-		t.Fatalf("finish reason changed: %v", finish)
+	if len(delta.ToolCalls) == 0 || delta.ToolCalls[0].Index == nil || *delta.ToolCalls[0].Index != 0 {
+		t.Fatalf("tool call index missing: %q", frames[0])
 	}
-	if usage["choices"] == nil || usage["usage"].(map[string]any)["total_tokens"] != float64(5) {
-		t.Fatalf("usage chunk invalid: %v", usage)
+	if len(finish.Choices) == 0 || finish.Choices[0].FinishReason == nil || *finish.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("finish reason changed: %q", frames[1])
+	}
+	if usage.Choices == nil || usage.Usage == nil || usage.Usage.TotalTokens == nil || *usage.Usage.TotalTokens != 5 {
+		t.Fatalf("usage chunk invalid: %q", frames[2])
 	}
 }
 
@@ -281,7 +299,7 @@ func TestNullableStreamIsForwarded(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 		}
-		if string(body["stream"]) != "null" {
+		if string(body["stream"]) != jsonNull {
 			t.Errorf("stream changed: %s", body["stream"])
 		}
 		if _, err := io.WriteString(w, `{"id":"c1","object":"chat.completion"}`); err != nil {
@@ -315,7 +333,7 @@ func TestModelListReportsConfiguredModelsWithAvailability(t *testing.T) {
 		{Name: "local", BaseURL: served.URL, Auth: Auth{Type: "bearer", Token: "secret"}, Models: map[string]string{"public-model": "upstream/model", "missing-model": "upstream/missing"}},
 		{Name: "offline", BaseURL: down.URL, Auth: Auth{Type: "none"}, Models: map[string]string{"far-model": "upstream/far"}},
 	}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +402,7 @@ func TestLMStudioModelListUsesLoadedInstancesAndRoutesDiscoveredModels(t *testin
 		Name: "lm-studio", BaseURL: upstream.URL + "/v1", Auth: Auth{Type: "none"}, Streaming: true,
 		ModelDiscovery: "lm-studio", Models: map[string]string{"small": "qwen3-0.6b-mlx"},
 	}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +454,7 @@ func TestModelListAcceptsOnlyGet(t *testing.T) {
 
 func TestFailureLogIncludesRunCorrelation(t *testing.T) {
 	var logs bytes.Buffer
-	g, err := newGateway(Config{Providers: []Provider{{Name: "test", BaseURL: "http://unused.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"public": "upstream"}}}}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	g, err := newGateway(&Config{Providers: []Provider{{Name: "test", BaseURL: "http://unused.invalid", Auth: Auth{Type: "none"}, Models: map[string]string{"public": "upstream"}}}}, slog.New(slog.NewJSONHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +486,7 @@ func TestInterruptedUpstreamResponseLogsFailedCompletion(t *testing.T) {
 	}))
 	defer upstream.Close()
 	var logs bytes.Buffer
-	g, err := newGateway(Config{Providers: []Provider{{
+	g, err := newGateway(&Config{Providers: []Provider{{
 		Name: "test", BaseURL: upstream.URL, Auth: Auth{Type: "none"}, Streaming: true,
 		Models: map[string]string{"public": "upstream"},
 	}}}, slog.New(slog.NewJSONHandler(&logs, nil)))
@@ -511,7 +529,7 @@ func TestChatLogsTheSamplingSettingsItPassesOn(t *testing.T) {
 	defer upstream.Close()
 	var logged bytes.Buffer
 	c := Config{Providers: []Provider{{Name: "test", BaseURL: upstream.URL, Auth: Auth{Type: "none"}, Models: map[string]string{"public-model": "upstream/model"}}}}
-	g, err := newGateway(c, slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	g, err := newGateway(&c, slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	if err != nil {
 		t.Fatal(err)
 	}
