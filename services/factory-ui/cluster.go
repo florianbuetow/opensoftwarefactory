@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +37,7 @@ var podNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`
 //	/api/cluster/pods              /api/v1/namespaces/<ns>/pods
 //	/api/cluster/services          /api/v1/namespaces/<ns>/services
 //	/api/cluster/events            /api/v1/namespaces/<ns>/events
-//	/api/cluster/pods/{name}/log   /api/v1/namespaces/<ns>/pods/{name}/log
+//	/api/cluster/pods/{name}/log   /api/v1/namespaces/<ns>/pods/{name}/log, for a pod the namespace lists
 type clusterProxy struct {
 	logger  *slog.Logger
 	client  *http.Client // built on first use, guarded by mu
@@ -77,7 +80,24 @@ func (c *clusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot read the service account"})
 		return
 	}
-	target := c.apiBase + strings.ReplaceAll(resource, "{ns}", url.PathEscape(ns))
+	resource = strings.ReplaceAll(resource, "{ns}", url.PathEscape(ns))
+	if pod, isLog := podLogRoute(strings.TrimPrefix(r.URL.Path, "/api/cluster")); isLog {
+		// The log is read under a name Kubernetes lists for the namespace, never under the
+		// name the request carries.
+		names, listErr := c.podNames(r.Context(), client, token, ns)
+		if listErr != nil {
+			c.logger.Error("listing pods failed", "error", listErr)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes API unavailable"})
+			return
+		}
+		listed := slices.Index(names, pod)
+		if listed < 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("pods %q not found", pod)})
+			return
+		}
+		resource = strings.ReplaceAll(resource, "{pod}", url.PathEscape(names[listed]))
+	}
+	target := c.apiBase + resource
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
@@ -119,8 +139,52 @@ func (c *clusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
+// podNames returns the names of the pods Kubernetes lists in the namespace.
+func (c *clusterProxy) podNames(ctx context.Context, client *http.Client, token, ns string) (_ []string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+"/api/v1/namespaces/"+url.PathEscape(ns)+"/pods", http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = closeAfter(err, resp.Body) }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pod list returned %s", resp.Status)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&list)
+	if err != nil {
+		return nil, fmt.Errorf("decoding pod list: %w", err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		names = append(names, list.Items[i].Metadata.Name)
+	}
+	return names, nil
+}
+
+// podLogRoute returns the pod a /pods/{name}/log path below /api/cluster asks for.
+func podLogRoute(path string) (pod string, ok bool) {
+	parts := strings.Split(path, "/")
+	if len(parts) != 4 || parts[0] != "" || parts[1] != "pods" || parts[3] != "log" || !podNamePattern.MatchString(parts[2]) {
+		return "", false
+	}
+	return parts[2], true
+}
+
 // clusterRoute maps a path below /api/cluster to a Kubernetes API path, with {ns}
-// standing for the namespace, and keeps only the query parameters that path allows.
+// standing for the namespace and {pod} for the pod whose log is read, and keeps only the
+// query parameters that path allows.
 func clusterRoute(path string, q url.Values) (string, url.Values, bool) {
 	switch path {
 	case "/nodes":
@@ -134,8 +198,7 @@ func clusterRoute(path string, q url.Values) (string, url.Values, bool) {
 	case "/events":
 		return "/api/v1/namespaces/{ns}/events", nil, true
 	}
-	parts := strings.Split(path, "/")
-	if len(parts) != 4 || parts[0] != "" || parts[1] != "pods" || parts[3] != "log" || !podNamePattern.MatchString(parts[2]) {
+	if _, isLog := podLogRoute(path); !isLog {
 		return "", nil, false
 	}
 	kept := url.Values{}
@@ -144,7 +207,7 @@ func clusterRoute(path string, q url.Values) (string, url.Values, bool) {
 			kept[k] = v[:1]
 		}
 	}
-	return "/api/v1/namespaces/{ns}/pods/" + parts[2] + "/log", kept, true
+	return "/api/v1/namespaces/{ns}/pods/{pod}/log", kept, true
 }
 
 // read returns a trimmed service account file. The token rotates, so it is read on every request.

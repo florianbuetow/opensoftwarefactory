@@ -152,6 +152,23 @@ func TestLoadObservabilityReadsLocalCredentials(t *testing.T) {
 	}
 }
 
+// The configuration directory is shared with other pods: a link placed there must not make
+// the UI read a file outside it.
+func TestLoadObservabilityRefusesLinkOutOfConfigDirectory(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "elsewhere.env")
+	if err := os.WriteFile(outside, []byte("ZO_ROOT_USER_EMAIL=ada@example.test\nZO_ROOT_USER_PASSWORD=safe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "openobserve.env")
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	client := loadObservability("http://openobserve:5080", path, "http://logs:2020", "http://traces:13133", "http://traces:8888/metrics")
+	if client.configured() {
+		t.Fatalf("credentials read through a link out of the configuration directory: %+v", client)
+	}
+}
+
 func TestUnlimitedRetentionDoesNotUseSevenDayWindow(t *testing.T) {
 	client := &observabilityClient{retentionKnown: true}
 	now := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)

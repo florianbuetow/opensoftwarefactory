@@ -78,7 +78,7 @@ func loadObservability(base, configPath, collectorBase, tracingHealth, tracingMe
 		tracingHealth: strings.TrimRight(tracingHealth, "/"), tracingMetrics: strings.TrimRight(tracingMetrics, "/"),
 		http: &http.Client{Timeout: 15 * time.Second},
 	}
-	data, err := os.ReadFile(filepath.Clean(configPath))
+	data, err := readInDirectory(configPath)
 	if err != nil {
 		return client
 	}
@@ -98,6 +98,17 @@ func loadObservability(base, configPath, collectorBase, tracingHealth, tracingMe
 		}
 	}
 	return client
+}
+
+// readInDirectory reads the file at path without leaving the directory that holds it: a
+// link placed there that points anywhere else is refused.
+func readInDirectory(path string) (_ []byte, err error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = closeAfter(err, root) }()
+	return root.ReadFile(filepath.Base(path))
 }
 
 func (o *observabilityClient) configured() bool {

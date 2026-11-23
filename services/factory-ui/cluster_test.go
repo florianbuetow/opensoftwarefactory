@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,20 +16,29 @@ type kubeRequest struct {
 	path, query, auth string
 }
 
+// podsPath is where the fake cluster lists the namespace's pods.
+const podsPath = "/api/v1/namespaces/factory/pods"
+
 // fakeCluster starts a TLS Kubernetes stand-in and a service account directory that trusts it.
+// It lists the pods api-1, api-7d9f-x2, and gone; the log of gone is no longer there. A log
+// request reaches it twice: the pod list first, then the log.
 func fakeCluster(t *testing.T) (proxy *clusterProxy, got chan kubeRequest) {
 	t.Helper()
-	got = make(chan kubeRequest, 1)
+	got = make(chan kubeRequest, 2)
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got <- kubeRequest{r.URL.EscapedPath(), r.URL.RawQuery, r.Header.Get("Authorization")}
-		if r.URL.Path == "/api/v1/namespaces/factory/pods/missing/log" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"kind":"Status","message":"pods \"missing\" not found"}`))
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[]}`))
+		answer := `{"items":[]}`
+		switch r.URL.Path {
+		case podsPath:
+			answer = `{"items":[{"metadata":{"name":"api-1"}},{"metadata":{"name":"api-7d9f-x2"}},{"metadata":{"name":"gone"}}]}`
+		case podsPath + "/gone/log":
+			w.WriteHeader(http.StatusNotFound)
+			answer = `{"kind":"Status","message":"pods \"gone\" not found"}`
+		}
+		if _, err := w.Write([]byte(answer)); err != nil {
+			t.Error(err)
+		}
 	}))
 	t.Cleanup(api.Close)
 	dir := t.TempDir()
@@ -71,6 +81,11 @@ func TestClusterPathsAndQueries(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, http.NoBody))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET %s: status %d %s", tc.path, rec.Code, rec.Body)
+		}
+		if strings.HasSuffix(tc.wantPath, "/log") {
+			if list := <-got; list.path != podsPath || list.query != "" || list.auth != "Bearer secret-1" {
+				t.Errorf("GET %s looked the pod up with %+v, want the pod list", tc.path, list)
+			}
 		}
 		r := <-got
 		if r.path != tc.wantPath || r.query != tc.wantQuery || r.auth != "Bearer secret-1" {
@@ -159,8 +174,31 @@ func TestClusterAllowlist(t *testing.T) {
 func TestClusterErrorsBecomeJSON(t *testing.T) {
 	c, got := fakeCluster(t)
 	rec := httptest.NewRecorder()
-	clusterUI(t, c).ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/missing/log", http.NoBody))
+	clusterUI(t, c).ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/gone/log", http.NoBody))
 	<-got
+	if r := <-got; r.path != podsPath+"/gone/log" {
+		t.Fatalf("kubernetes got %+v, want the log request", r)
+	}
+	var body map[string]string
+	if rec.Code != http.StatusNotFound || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body["error"] != `pods "gone" not found` {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A log is read only for a pod the namespace lists: any other name is answered here and
+// never becomes part of a request to Kubernetes.
+func TestClusterLogsOnlyListedPods(t *testing.T) {
+	c, got := fakeCluster(t)
+	rec := httptest.NewRecorder()
+	clusterUI(t, c).ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/missing/log?tailLines=100", http.NoBody))
+	if list := <-got; list.path != podsPath || list.query != "" {
+		t.Errorf("kubernetes got %+v, want the pod list", list)
+	}
+	select {
+	case r := <-got:
+		t.Errorf("kubernetes reached with the unlisted name: %+v", r)
+	default:
+	}
 	var body map[string]string
 	if rec.Code != http.StatusNotFound || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body["error"] != `pods "missing" not found` {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
