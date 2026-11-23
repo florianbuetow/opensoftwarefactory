@@ -279,10 +279,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	span.SetName(operation)
 	provider = selected.provider.Name
 	requestLog.DebugContext(ctx, "request routed", append([]any{"operation", operation, "provider", provider, "stream", streaming, "synthetic_stream", synthetic}, sampling...)...)
-	endpoint := selected.provider.BaseURL + path
+	// A caller's query string is never passed on to a provider.
 	if r.URL.RawQuery != "" {
-		endpoint += "?" + r.URL.RawQuery
+		fail(400, "Query parameters are not supported", "invalid_request_error")
+		return
 	}
+	endpoint := selected.provider.BaseURL + path
 	upstream, err := http.NewRequestWithContext(ctx, r.Method, endpoint, body)
 	if err != nil {
 		fail(502, "Unable to construct upstream request", "api_error")

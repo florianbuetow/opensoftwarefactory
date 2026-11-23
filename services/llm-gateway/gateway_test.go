@@ -11,9 +11,33 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestAQueryStringIsRefusedAndNeverReachesTheProvider(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+
+	g := testGateway(t, upstream, false, Auth{Type: "none"})
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/v1/chat/completions?api-version=1", strings.NewReader(`{"model":"public-model","messages":[]}`)),
+		httptest.NewRequest(http.MethodGet, "/v1/models/public-model?expand=1", http.NoBody),
+	} {
+		recorder := httptest.NewRecorder()
+		g.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "Query parameters are not supported") {
+			t.Fatalf("%s: status=%d body=%s", request.URL, recorder.Code, recorder.Body.String())
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("the provider was called %d times", calls.Load())
+	}
+}
 
 func testGateway(t *testing.T, upstream *httptest.Server, streaming bool, auth Auth) *Gateway {
 	t.Helper()

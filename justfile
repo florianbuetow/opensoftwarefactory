@@ -220,6 +220,7 @@ help:
     @printf "  %-38s %s\n" "just ci-check" "Check guardrail tool prerequisites"
     @printf "  %-38s %s\n" "just ci-init" "Prepare the Go and Python CI tools"
     @printf "  %-38s %s\n" "just test" "Run the Go and Python test suites"
+    @printf "  %-38s %s\n" "just e2e" "Run the end-to-end tests against the running factory"
     @printf "  %-38s %s\n" "just test-coverage" "Measure Go and Python test coverage"
     @printf "  %-38s %s\n" "just ci" "Run the guardrails quietly (also ci-quiet)"
     @printf "  %-38s %s\n" "just ci-verbose" "Run the guardrails and stream their output"
@@ -612,7 +613,7 @@ check:
     node --check scripts/init-openobserve.js
     node --check scripts/init-orchestrator.js
     node --check scripts/sync-seeds.js
-    node --check scripts/verify-ui-live.js
+    node --check scripts/e2e-ui.js
     node --check scripts/init-jetstream.js
     node --check scripts/verify-factory-measurements.js
     node --check scripts/verify-workflow-events.js
@@ -625,7 +626,7 @@ check:
     node --check scripts/migrate-unpack-inputs.js
     node --check scripts/migrate-unpack-inputs.test.js
     for script in services/factory-ui/web/*.js; do node --check "$script"; done
-    node --test scripts/auxiliary-targets.test.js scripts/verify.test.js scripts/verify-ui-live.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
+    node --test scripts/auxiliary-targets.test.js scripts/scripts.test.js scripts/e2e-ui.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
     kubectl kustomize infra/kubernetes/overlays/local >/dev/null
     for module in llm-gateway blobstore mcp-gateway connectors orchestrator registry evaluation agent factory-ui; do
         test -z "$(gofmt -l "services/$module")"
@@ -725,6 +726,10 @@ code-stats:
 test:
     @bash scripts/ci-go.sh test
     @bash scripts/ci-python.sh test
+
+# Run the end-to-end tests against the running factory; they fail unless it is fully up.
+e2e:
+    @./scripts/e2e.sh
 
 # Run the tests and enforce the template coverage thresholds.
 test-coverage:

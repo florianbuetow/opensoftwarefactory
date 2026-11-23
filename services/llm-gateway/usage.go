@@ -361,7 +361,7 @@ func (g *Gateway) completeUsage(ctx context.Context, c *usageContext, raw json.R
 		g.log.Error("usage measurement delivery failed", "attempt_id", c.ID, "error", err)
 		return
 	}
-	if err := g.deletePending(deliveryCtx, c.ID); err != nil {
+	if err := g.deletePending(deliveryCtx, outbox.Measurement.ID); err != nil {
 		g.log.Error("usage pending marker removal failed", "attempt_id", c.ID, "error", err)
 	}
 }
