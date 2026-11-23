@@ -199,6 +199,7 @@
   .topic ul { margin: 18px 0 0; padding: 0; list-style: none; display: grid; gap: 14px; font-size: 16px; }
   .topic li { background: rgba(0,0,0,.2); border-radius: 12px; padding: 12px 16px; }
   .topic.light li { background: rgba(255,255,255,.75); }
+  .topic li.soon { background: transparent; border: 1.5px dashed currentColor; }
   .start + .topic { margin-top: 96px; }
 
   .start { max-width: 1100px; margin: 96px auto 0; padding: 0 24px; text-align: center; }
@@ -458,6 +459,7 @@
       <li><strong>Git repositories:</strong> Connect GitHub or plain Git repositories, or use the bundled local <code>git-host</code> for experiments.</li>
       <li><strong>Dev pods:</strong> Spin up sandboxed clones on dedicated work branches so agents can edit files and run commands safely.</li>
       <li><strong>Access &amp; approvals:</strong> Control read/write credentials per repository and require human approval before publishing changes.</li>
+      <li class="soon"><strong>Coming soon:</strong> Slack, Jira, Linear, and Telegram connectors.</li>
     </ul>
   </section>
 
@@ -470,6 +472,7 @@
       <li><strong>Policies:</strong> Versioned rules stored in <code>policy-registry</code> and copied into each run's evidence folder when applied.</li>
       <li><strong>Skills:</strong> Versioned skill folders in <code>skill-registry</code> carrying instructions and scripts.</li>
       <li><strong>Artifacts:</strong> Inspect every stored blob in <code>blobstore</code> with its creator and trace ID.</li>
+      <li class="soon"><strong>Coming soon:</strong> Knowledge base, agentic search, and hybrid retrieval.</li>
     </ul>
   </section>
 
