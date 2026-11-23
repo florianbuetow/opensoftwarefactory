@@ -27,6 +27,15 @@ func integrationBuild(t *testing.T, dir, target string) string {
 	return out
 }
 
+// integrationGet sends a GET request to endpoint.
+func integrationGet(endpoint string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, endpoint, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	return http.DefaultClient.Do(request)
+}
+
 func integrationAddr(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -60,9 +69,11 @@ func integrationWaitHTTP(t *testing.T, endpoint string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := http.Get(endpoint)
+		response, err := integrationGet(endpoint)
 		if err == nil {
-			response.Body.Close()
+			if closeErr := response.Body.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
 			if response.StatusCode/100 == 2 {
 				return
 			}
@@ -78,7 +89,7 @@ func integrationPutConfig(t *testing.T, gateway, name string, config map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := http.NewRequest(http.MethodPut, gateway+"/api/services/"+name, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPut, gateway+"/api/services/"+name, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +98,11 @@ func integrationPutConfig(t *testing.T, gateway, name string, config map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
 	if response.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(response.Body)
 		t.Fatalf("configure %s: HTTP %d: %s", name, response.StatusCode, data)
@@ -126,7 +141,9 @@ func TestAgentUsesRealGatewayForHTTPAndStdioTools(t *testing.T) {
 	policy := map[string]any{"allowlist": []string{"echo", "blocked"}, "denylist": []string{"blocked"}}
 	httpConfig := map[string]any{"transport": "streamable-http", "url": mockURL + "/mcp"}
 	integrationPutConfig(t, gatewayURL, "docs", map[string]any{"mcpconfig": httpConfig, "allowlist": policy["allowlist"], "denylist": policy["denylist"]})
-	stdioCalls := filepath.Join(t.TempDir(), "stdio-calls")
+	const stdioCallsName = "stdio-calls"
+	stdioDir := t.TempDir()
+	stdioCalls := filepath.Join(stdioDir, stdioCallsName)
 	stdioConfig := map[string]any{"transport": "stdio", "command": mockBinary, "args": []string{}, "env": map[string]string{"MOCK_CALLS_FILE": stdioCalls}}
 	integrationPutConfig(t, gatewayURL, "code", map[string]any{"mcpconfig": stdioConfig, "allowlist": policy["allowlist"], "denylist": policy["denylist"]})
 
@@ -153,9 +170,9 @@ func TestAgentUsesRealGatewayForHTTPAndStdioTools(t *testing.T) {
 		{"docs__echo", "from http"},
 		{"code__echo", "from stdio"},
 	} {
-		result, failed, err := service.runTool(context.Background(), routes, integrationToolCall(tc.alias, `{"text":"`+tc.text+`"}`))
-		if err != nil {
-			t.Fatal(err)
+		result, failed, runErr := service.runTool(context.Background(), routes, integrationToolCall(tc.alias, `{"text":"`+tc.text+`"}`))
+		if runErr != nil {
+			t.Fatal(runErr)
 		}
 		if failed {
 			t.Fatalf("%s was reported as a tool failure", tc.alias)
@@ -166,28 +183,42 @@ func TestAgentUsesRealGatewayForHTTPAndStdioTools(t *testing.T) {
 	}
 
 	deniedClient := &mcpClient{url: gatewayURL + "/mcp/docs", http: http.DefaultClient}
-	if err := deniedClient.connect(context.Background()); err != nil {
-		t.Fatal(err)
+	if connectErr := deniedClient.connect(context.Background()); connectErr != nil {
+		t.Fatal(connectErr)
 	}
-	defer deniedClient.close()
-	if _, _, err := deniedClient.callTool(context.Background(), "blocked", json.RawMessage(`{"text":"must not run"}`)); err == nil {
+	defer func() {
+		if closeErr := deniedClient.close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
+	if _, _, callErr := deniedClient.callTool(context.Background(), "blocked", json.RawMessage(`{"text":"must not run"}`)); callErr == nil {
 		t.Fatal("direct gateway call to denied tool succeeded")
 	}
 
-	response, err := http.Get(mockURL + "/calls")
+	response, err := integrationGet(mockURL + "/calls")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var httpCalls []string
-	if err := json.NewDecoder(response.Body).Decode(&httpCalls); err != nil {
-		response.Body.Close()
-		t.Fatal(err)
+	decodeErr := json.NewDecoder(response.Body).Decode(&httpCalls)
+	if closeErr := response.Body.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
-	response.Body.Close()
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
 	if len(httpCalls) != 1 || httpCalls[0] != "echo" {
 		t.Fatalf("HTTP upstream calls = %v", httpCalls)
 	}
-	stdioData, err := os.ReadFile(stdioCalls)
+	// The mock wrote its calls into a folder this test owns; the read is confined to that folder.
+	stdioRoot, err := os.OpenRoot(stdioDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdioData, err := stdioRoot.ReadFile(stdioCallsName)
+	if closeErr := stdioRoot.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

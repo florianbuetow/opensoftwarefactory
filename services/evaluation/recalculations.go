@@ -16,42 +16,55 @@ import (
 	"github.com/google/uuid"
 )
 
+// The statuses of a recalculation or backfill job.
+const (
+	jobPending           = "pending"
+	jobRunning           = "running"
+	jobRunningWithErrors = "running_with_errors"
+	jobRetrying          = "retrying"
+	jobStartFailed       = "start_failed"
+	jobProjectionPending = "projection_pending"
+	jobComplete          = "complete"
+	jobFailed            = "failed"
+	jobCancelled         = "cancelled"
+)
+
 type recalculationJob struct {
 	ID              string                              `json:"id"`
 	Revision        string                              `json:"revision,omitempty"`
 	Status          string                              `json:"status"`
-	Processed       int                                 `json:"processed"`
-	Pending         int                                 `json:"pending"`
 	Error           string                              `json:"error,omitempty"`
 	WorkflowID      string                              `json:"workflow_id,omitempty"`
 	MeasurementIDs  []string                            `json:"measurement_ids,omitempty"`
 	From            *time.Time                          `json:"from,omitempty"`
 	To              *time.Time                          `json:"to,omitempty"`
 	DisplayCurrency string                              `json:"display_currency"`
-	Generation      int64                               `json:"generation"`
 	Prices          []Price                             `json:"prices"`
-	Conversions     []Conversion                        `json:"conversions"`
-	Next            int                                 `json:"next"`
 	CreatedAt       time.Time                           `json:"created_at"`
 	UpdatedAt       time.Time                           `json:"updated_at"`
 	BatchResults    map[string]recalculationBatchResult `json:"batch_results,omitempty"`
+	Conversions     []Conversion                        `json:"conversions"`
+	Processed       int                                 `json:"processed"`
+	Pending         int                                 `json:"pending"`
+	Generation      int64                               `json:"generation"`
+	Next            int                                 `json:"next"`
 }
 
 type recalculationBatchResult struct {
-	Processed         int    `json:"processed"`
-	Pending           int    `json:"pending"`
 	NextCursor        string `json:"next_cursor,omitempty"`
-	Done              bool   `json:"done"`
-	ProjectionPending bool   `json:"projection_pending"`
 	Status            string `json:"status"`
 	Error             string `json:"error,omitempty"`
+	Processed         int    `json:"processed"`
+	Pending           int    `json:"pending"`
+	Done              bool   `json:"done"`
+	ProjectionPending bool   `json:"projection_pending"`
 }
 
 type recalculationInput struct {
-	MeasurementIDs  []string   `json:"measurement_ids"`
 	From            *time.Time `json:"from"`
 	To              *time.Time `json:"to"`
 	DisplayCurrency string     `json:"display_currency"`
+	MeasurementIDs  []string   `json:"measurement_ids"`
 }
 
 func (s *service) allocateGeneration(ctx context.Context) (int64, error) {
@@ -87,7 +100,7 @@ func (s *service) startRecalculation(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 400, err)
 		return
 	}
-	if in.DisplayCurrency != "EUR" && in.DisplayCurrency != "USD" {
+	if in.DisplayCurrency != currencyEUR && in.DisplayCurrency != currencyUSD {
 		s.fail(w, 422, errors.New("display_currency must be EUR or USD"))
 		return
 	}
@@ -118,8 +131,8 @@ func (s *service) startRecalculation(w http.ResponseWriter, r *http.Request) {
 		s.dependencyFailure(w, err)
 		return
 	}
-	job := recalculationJob{ID: uuid.NewString(), Status: "pending", MeasurementIDs: in.MeasurementIDs, From: in.From, To: in.To, DisplayCurrency: in.DisplayCurrency, Generation: gen, Prices: prices, Conversions: conversions, BatchResults: map[string]recalculationBatchResult{}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	ids, err := s.selectedUsageIDs(r.Context(), job)
+	job := recalculationJob{ID: uuid.NewString(), Status: jobPending, MeasurementIDs: in.MeasurementIDs, From: in.From, To: in.To, DisplayCurrency: in.DisplayCurrency, Generation: gen, Prices: prices, Conversions: conversions, BatchResults: map[string]recalculationBatchResult{}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	ids, err := s.selectedUsageIDs(r.Context(), &job)
 	if err != nil {
 		s.dependencyFailure(w, err)
 		return
@@ -135,22 +148,26 @@ func (s *service) startRecalculation(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.http.Do(req)
 	if err != nil {
-		job.Status = "start_failed"
+		job.Status = jobStartFailed
 		job.Error = err.Error()
 	} else {
-		defer resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				s.log.Error("closing the orchestrator response failed", "recalculation", job.ID, "error", closeErr)
+			}
+		}()
 		if resp.StatusCode/100 != 2 {
-			job.Status = "start_failed"
+			job.Status = jobStartFailed
 			job.Error = "orchestrator returned " + resp.Status
 		} else {
 			var accepted struct {
 				WorkflowID string `json:"workflow_id"`
 			}
 			if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&accepted) != nil || accepted.WorkflowID == "" {
-				job.Status = "start_failed"
+				job.Status = jobStartFailed
 				job.Error = "orchestrator response omitted workflow_id"
 			} else {
-				job.Status = "running"
+				job.Status = jobRunning
 				job.WorkflowID = accepted.WorkflowID
 			}
 		}
@@ -158,11 +175,11 @@ func (s *service) startRecalculation(w http.ResponseWriter, r *http.Request) {
 	job.UpdatedAt = time.Now().UTC()
 	jobRevision, _ = s.writeObject(r.Context(), jobPrefix+"/"+job.ID+".json", job, jobRevision)
 	job.Revision = jobRevision
-	if job.Status == "start_failed" {
-		writeJSON(w, 503, recalculationResponse(job))
+	if job.Status == jobStartFailed {
+		writeJSON(w, 503, recalculationResponse(&job))
 		return
 	}
-	writeJSON(w, 202, recalculationResponse(job))
+	writeJSON(w, 202, recalculationResponse(&job))
 }
 
 func (s *service) getRecalculation(w http.ResponseWriter, r *http.Request) {
@@ -181,11 +198,11 @@ func (s *service) getRecalculation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job.Revision = o.Revision
-	writeJSON(w, 200, recalculationResponse(job))
+	writeJSON(w, 200, recalculationResponse(&job))
 }
 
-func recalculationResponse(job recalculationJob) map[string]any {
-	out := map[string]any{"id": job.ID, "revision": job.Revision, "status": job.Status, "processed": job.Processed, "pending": job.Pending, "workflow_id": job.WorkflowID, "done": job.Status == "complete", "projection_pending": job.Status == "projection_pending"}
+func recalculationResponse(job *recalculationJob) map[string]any {
+	out := map[string]any{"id": job.ID, "revision": job.Revision, "status": job.Status, "processed": job.Processed, "pending": job.Pending, "workflow_id": job.WorkflowID, "done": job.Status == jobComplete, "projection_pending": job.Status == jobProjectionPending}
 	if job.Error != "" {
 		out["error"] = job.Error
 	}
@@ -194,10 +211,10 @@ func recalculationResponse(job recalculationJob) map[string]any {
 
 type batchInput struct {
 	DisplayCurrency string     `json:"display_currency"`
-	MeasurementIDs  []string   `json:"measurement_ids"`
 	From            *time.Time `json:"from"`
 	To              *time.Time `json:"to"`
 	Cursor          string     `json:"cursor,omitempty"`
+	MeasurementIDs  []string   `json:"measurement_ids"`
 	Limit           int        `json:"limit"`
 }
 
@@ -245,7 +262,7 @@ func (s *service) recalculationBatch(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 412, fmt.Errorf("expected offset %d", job.Next))
 		return
 	}
-	ids, err := s.selectedUsageIDs(r.Context(), job)
+	ids, err := s.selectedUsageIDs(r.Context(), &job)
 	if err != nil {
 		s.dependencyFailure(w, err)
 		return
@@ -256,13 +273,13 @@ func (s *service) recalculationBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	failures := 0
 	for _, id := range ids[offset:end] {
-		m, err := s.loadMeasurement(r.Context(), "usage", id)
-		if err != nil {
+		m, loadErr := s.loadMeasurement(r.Context(), kindUsage, id)
+		if loadErr != nil {
 			failures++
 			continue
 		}
-		cost, err := calculateCostWith(m, job.DisplayCurrency, job.Generation, job.Prices, job.Conversions)
-		if err != nil {
+		cost, costErr := calculateCostWith(&m, job.DisplayCurrency, job.Generation, job.Prices, job.Conversions)
+		if costErr != nil {
 			failures++
 			continue
 		}
@@ -278,9 +295,9 @@ func (s *service) recalculationBatch(w http.ResponseWriter, r *http.Request) {
 			failures++
 			continue
 		}
-		op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: costPrefix + "/" + id + ".json", MeasurementID: id, ExpectedRevision: condition, Replacement: raw, AffectedHour: m.OccurredAt.UTC().Truncate(time.Hour), Generation: job.Generation, Phase: "intent", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: costPrefix + "/" + id + ".json", MeasurementID: id, ExpectedRevision: condition, Replacement: raw, AffectedHour: m.OccurredAt.UTC().Truncate(time.Hour), Generation: job.Generation, Phase: opIntent, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 		_, opErr := s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, "*")
-		if err = opErr; err != nil {
+		if opErr != nil {
 			failures++
 			continue
 		}
@@ -297,24 +314,25 @@ func (s *service) recalculationBatch(w http.ResponseWriter, r *http.Request) {
 	projectionsComplete := false
 	hours := map[time.Time]bool{}
 	for _, id := range ids {
-		if m, e := s.loadMeasurement(r.Context(), "usage", id); e == nil {
+		if m, e := s.loadMeasurement(r.Context(), kindUsage, id); e == nil {
 			hours[m.OccurredAt.UTC().Truncate(time.Hour)] = true
 		}
 	}
 	if failures == 0 && end == len(ids) {
 		projectionsComplete, _ = s.recalculationProjectionComplete(r.Context(), hours, job.Generation)
 	}
-	if failures > 0 {
-		job.Status = "running_with_errors"
+	switch {
+	case failures > 0:
+		job.Status = jobRunningWithErrors
 		job.Error = strconv.Itoa(failures) + " records failed in last batch"
-	} else if end == len(ids) && !projectionsComplete {
-		job.Status = "projection_pending"
+	case end == len(ids) && !projectionsComplete:
+		job.Status = jobProjectionPending
 		job.Error = ""
-	} else if end == len(ids) && projectionsComplete {
-		job.Status = "complete"
+	case end == len(ids) && projectionsComplete:
+		job.Status = jobComplete
 		job.Error = ""
-	} else {
-		job.Status = "running"
+	default:
+		job.Status = jobRunning
 		job.Error = ""
 	}
 	job.UpdatedAt = time.Now().UTC()
@@ -323,7 +341,7 @@ func (s *service) recalculationBatch(w http.ResponseWriter, r *http.Request) {
 	if !done {
 		next = strconv.Itoa(job.Next)
 	}
-	result := recalculationBatchResult{Processed: batchProcessed, Pending: job.Pending, NextCursor: next, Done: done, ProjectionPending: job.Status == "projection_pending", Status: job.Status, Error: job.Error}
+	result := recalculationBatchResult{Processed: batchProcessed, Pending: job.Pending, NextCursor: next, Done: done, ProjectionPending: job.Status == jobProjectionPending, Status: job.Status, Error: job.Error}
 	if job.BatchResults == nil {
 		job.BatchResults = map[string]recalculationBatchResult{}
 	}
@@ -346,11 +364,18 @@ func (s *service) recalculationBatch(w http.ResponseWriter, r *http.Request) {
 func (s *service) recalculationProjectionComplete(ctx context.Context, hours map[time.Time]bool, generation int64) (bool, error) {
 	for hour := range hours {
 		object, err := s.readObject(ctx, s.projectionObject(hour))
+		if errors.Is(err, errNotFound) {
+			return false, nil // the hour has not been projected yet
+		}
 		if err != nil {
-			return false, nil
+			return false, err
 		}
 		var manifest projectionManifest
-		if json.Unmarshal(object.Data, &manifest) != nil || manifest.Phase != "complete" || manifest.Generation < generation {
+		err = json.Unmarshal(object.Data, &manifest)
+		if err != nil {
+			return false, fmt.Errorf("projection manifest of %s is malformed: %w", hour.Format(time.RFC3339), err)
+		}
+		if manifest.Phase != phaseComplete || manifest.Generation < generation {
 			return false, nil
 		}
 	}
@@ -364,7 +389,7 @@ func (s *service) recalculationProjectionComplete(ctx context.Context, hours map
 			return false, e
 		}
 		var op mutationOperation
-		if json.Unmarshal(object.Data, &op) == nil && op.Generation == generation && op.Phase != "complete" && op.Phase != "cancelled" {
+		if json.Unmarshal(object.Data, &op) == nil && op.Generation == generation && op.Phase != opComplete && op.Phase != opCancelled {
 			return false, nil
 		}
 	}
@@ -390,7 +415,7 @@ func sameTime(a, b *time.Time) bool {
 	return a.Equal(*b)
 }
 
-func (s *service) selectedUsageIDs(ctx context.Context, job recalculationJob) ([]string, error) {
+func (s *service) selectedUsageIDs(ctx context.Context, job *recalculationJob) ([]string, error) {
 	ids, err := s.listObjects(ctx, usagePrefix)
 	if err != nil {
 		return nil, err
@@ -405,7 +430,7 @@ func (s *service) selectedUsageIDs(ctx context.Context, job recalculationJob) ([
 		if len(selected) > 0 && !selected[id] {
 			continue
 		}
-		m, e := s.loadMeasurement(ctx, "usage", id)
+		m, e := s.loadMeasurement(ctx, kindUsage, id)
 		if e != nil {
 			return nil, e
 		}

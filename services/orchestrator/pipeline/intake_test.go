@@ -13,8 +13,8 @@ import (
 )
 
 type conditionalMemory struct {
-	mu   sync.Mutex
 	data map[string][]byte
+	mu   sync.Mutex
 }
 
 func (c *conditionalMemory) Put(_ context.Context, id string, data []byte, _ Meta) error {
@@ -44,8 +44,8 @@ func (c *conditionalMemory) PutIfAbsent(_ context.Context, id string, data []byt
 	return "r1", nil
 }
 
-func (c *conditionalMemory) GetWithRevision(ctx context.Context, id string) ([]byte, string, error) {
-	data, err := c.Get(ctx, id)
+func (c *conditionalMemory) GetWithRevision(ctx context.Context, id string) (data []byte, revision string, err error) {
+	data, err = c.Get(ctx, id)
 	return data, "r1", err
 }
 
@@ -63,8 +63,8 @@ func TestInitializeIntakeRetriesSameExecutionAndStopsAnother(t *testing.T) {
 	store := &conditionalMemory{data: map[string][]byte{}}
 	a := Activities{Store: store, Conditional: store}
 	req := InitializeIntakeRequest{TraceID: "run", ExecutionID: "exec-1", Definition: Definition{Name: "group/score", Version: 2}, Intake: IntakeInput{BindingID: "binding", BindingRevision: "rev", EventID: "event", Event: []byte(`{"run_id":"target"}`), Binding: []byte(`{"id":"binding"}`)}}
-	req.Intake.AcceptanceHash, _ = IntakeAcceptanceHash(req.Definition, req.Intake)
-	first, err := a.InitializeIntake(context.Background(), req)
+	req.Intake.AcceptanceHash, _ = IntakeAcceptanceHash(&req.Definition, &req.Intake)
+	first, err := a.InitializeIntake(context.Background(), &req)
 	if err != nil || !first.Proceed {
 		t.Fatalf("first = %+v, %v", first, err)
 	}
@@ -72,8 +72,8 @@ func TestInitializeIntakeRetriesSameExecutionAndStopsAnother(t *testing.T) {
 	var receipt IntakeReceipt
 	_ = json.Unmarshal(store.data["intake-receipts/run.json"], &receipt)
 	receipt.Phase, receipt.InitializedAt = "claimed", nil
-	store.data["intake-receipts/run.json"] = dataForReceipt(receipt)
-	retry, err := a.InitializeIntake(context.Background(), req)
+	store.data["intake-receipts/run.json"] = dataForReceipt(&receipt)
+	retry, err := a.InitializeIntake(context.Background(), &req)
 	if err != nil || !retry.Proceed {
 		t.Fatalf("retry = %+v, %v", retry, err)
 	}
@@ -87,7 +87,7 @@ func TestInitializeIntakeRetriesSameExecutionAndStopsAnother(t *testing.T) {
 		t.Fatal("intake metadata was not initialized")
 	}
 	req.ExecutionID = "exec-2"
-	other, err := a.InitializeIntake(context.Background(), req)
+	other, err := a.InitializeIntake(context.Background(), &req)
 	if err != nil || other.Proceed {
 		t.Fatalf("other execution = %+v, %v", other, err)
 	}
@@ -95,7 +95,7 @@ func TestInitializeIntakeRetriesSameExecutionAndStopsAnother(t *testing.T) {
 
 func TestInitializeIntakeRequiresConditionalStore(t *testing.T) {
 	a := Activities{Store: &conditionalMemory{data: map[string][]byte{}}}
-	_, err := a.InitializeIntake(context.Background(), InitializeIntakeRequest{})
+	_, err := a.InitializeIntake(context.Background(), &InitializeIntakeRequest{})
 	if err == nil {
 		t.Fatal("missing conditional capability was accepted")
 	}
@@ -105,17 +105,17 @@ func TestInitializeIntakeTakesOverOnlyClaimedMatchingReceipt(t *testing.T) {
 	store := &conditionalMemory{data: map[string][]byte{}}
 	a := Activities{Store: store, Conditional: store}
 	req := InitializeIntakeRequest{TraceID: "run", ExecutionID: "old", Definition: Definition{Name: "group/score", Version: 2}, Intake: IntakeInput{BindingID: "b", BindingRevision: "r", EventID: "e", Event: []byte(`{"run_id":"target"}`), Binding: []byte(`{"id":"b"}`)}}
-	req.Intake.AcceptanceHash, _ = IntakeAcceptanceHash(req.Definition, req.Intake)
-	if out, err := a.InitializeIntake(context.Background(), req); err != nil || !out.Proceed {
+	req.Intake.AcceptanceHash, _ = IntakeAcceptanceHash(&req.Definition, &req.Intake)
+	if out, err := a.InitializeIntake(context.Background(), &req); err != nil || !out.Proceed {
 		t.Fatalf("first=%+v err=%v", out, err)
 	}
 	var receipt IntakeReceipt
 	_ = json.Unmarshal(store.data["intake-receipts/run.json"], &receipt)
 	receipt.Phase = "claimed"
 	receipt.InitializedAt = nil
-	store.data["intake-receipts/run.json"] = dataForReceipt(receipt)
+	store.data["intake-receipts/run.json"] = dataForReceipt(&receipt)
 	req.ExecutionID = "replacement"
-	out, err := a.InitializeIntake(context.Background(), req)
+	out, err := a.InitializeIntake(context.Background(), &req)
 	if err != nil || !out.Proceed {
 		t.Fatalf("takeover=%+v err=%v", out, err)
 	}
@@ -125,7 +125,7 @@ func TestInitializeIntakeTakesOverOnlyClaimedMatchingReceipt(t *testing.T) {
 	}
 	req.ExecutionID = "conflict"
 	req.Intake.AcceptanceHash = "different"
-	if _, err = a.InitializeIntake(context.Background(), req); err == nil {
+	if _, err = a.InitializeIntake(context.Background(), &req); err == nil {
 		t.Fatal("different pinned configuration took over receipt")
 	}
 }
@@ -140,7 +140,7 @@ func TestLegacyReplayVersionSkipsNewIntakeInitializationCommand(t *testing.T) {
 	}, activity.RegisterOptions{Name: DefaultActivity})
 	env.RegisterActivityWithOptions(func(context.Context, FinishRunRequest) error { return nil }, activity.RegisterOptions{Name: FinishRunActivity})
 	def := Definition{Name: "group/legacy", Version: 1, Steps: []Step{{ID: "work", Service: "test"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "run", Definition: def, Inputs: []Item{{Source: InputSource, Artifact: "runs/run/input"}}, Intake: &IntakeInput{AcceptanceHash: "new-only"}})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "run", Definition: def, Inputs: []Item{{Source: InputSource, Artifact: "runs/run/input"}}, Intake: &IntakeInput{AcceptanceHash: "new-only"}})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("legacy replay path failed: %v", err)
 	}

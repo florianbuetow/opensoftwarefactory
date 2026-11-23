@@ -35,21 +35,29 @@ func seedDefaults(ctx context.Context, blobs, dir string, logger *slog.Logger) {
 
 // seedDirectory stores every regular file below dir without overwriting an
 // existing object. Object IDs always use slash-separated paths.
-func seedDirectory(ctx context.Context, blobs, dir string) error {
-	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+func seedDirectory(ctx context.Context, blobs, dir string) (err error) {
+	root, err := os.OpenRoot(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { err = closeAfter(err, root) }()
+	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() || !entry.Type().IsRegular() {
 			return nil
 		}
-		id, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
+		id, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
 		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
+		body, readErr := root.ReadFile(id)
+		if readErr != nil {
+			return readErr
 		}
 		return ensureObject(ctx, blobs, filepath.ToSlash(id), string(body))
 	})
@@ -62,7 +70,7 @@ func seedDirectory(ctx context.Context, blobs, dir string) error {
 // ensureObject PUTs an object unless it already exists.
 func ensureObject(ctx context.Context, blobs, id, body string) error {
 	base := strings.TrimRight(blobs, "/")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/meta/"+id, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/meta/"+id, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -70,7 +78,10 @@ func ensureObject(ctx context.Context, blobs, id, body string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	err = resp.Body.Close()
+	if err != nil {
+		return err
+	}
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		return nil
@@ -86,7 +97,10 @@ func ensureObject(ctx context.Context, blobs, id, body string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	err = resp.Body.Close()
+	if err != nil {
+		return err
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("PUT %s: %s", id, resp.Status)
 	}

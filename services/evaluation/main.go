@@ -25,68 +25,69 @@ import (
 
 const setPrefix = "evaluation-sets"
 
+// runStatusUnknown is the status of a run whose state could not be read.
+const runStatusUnknown = "Unknown"
+
+// RunSnapshot is what an evaluation set keeps of a run: its identity, timing,
+// status and agents as they were when the run was added.
 type RunSnapshot struct {
 	TraceID            string    `json:"trace_id"`
 	Workflow           string    `json:"workflow"`
-	Agents             []string  `json:"agents"`
 	Started            time.Time `json:"started"`
 	Finished           time.Time `json:"finished,omitempty"`
 	Status             string    `json:"status"`
-	DurationMS         int64     `json:"duration_ms,omitempty"`
-	DurationKnown      bool      `json:"duration_known"`
 	InputArtifact      string    `json:"input_artifact,omitempty"`
 	DistributedTraceID string    `json:"distributed_trace_id,omitempty"`
+	IndexError         string    `json:"index_error,omitempty"`
+	Agents             []string  `json:"agents"`
+	DurationMS         int64     `json:"duration_ms,omitempty"`
+	DurationKnown      bool      `json:"duration_known"`
 	SourcePresent      bool      `json:"source_present"`
 	AgentsComplete     bool      `json:"agents_complete"`
 	HistoryUnavailable bool      `json:"history_unavailable,omitempty"`
-	IndexError         string    `json:"index_error,omitempty"`
 }
 
+// EvaluationSet is a named selection of run snapshots. Every update raises its revision.
 type EvaluationSet struct {
-	SchemaVersion int           `json:"schema_version"`
 	ID            string        `json:"id"`
 	Name          string        `json:"name"`
 	Description   string        `json:"description,omitempty"`
 	Created       time.Time     `json:"created"`
 	Updated       time.Time     `json:"updated"`
 	CreatedBy     string        `json:"created_by,omitempty"`
-	Revision      int           `json:"revision"`
 	Runs          []RunSnapshot `json:"runs"`
+	SchemaVersion int           `json:"schema_version"`
+	Revision      int           `json:"revision"`
 }
 
 type setInput struct {
 	Name             string   `json:"name"`
 	Description      string   `json:"description"`
-	RunIDs           []string `json:"run_ids"`
 	ExpectedRevision *int     `json:"expected_revision,omitempty"`
-}
-type setSummary struct {
-	ID, Name, Description, CreatedBy string
-	Created, Updated                 time.Time
-	RunCount, MissingRunCount        int
+	RunIDs           []string `json:"run_ids"`
 }
 
-func (s setSummary) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		ID          string    `json:"id"`
-		Name        string    `json:"name"`
-		Description string    `json:"description,omitempty"`
-		Created     time.Time `json:"created"`
-		Updated     time.Time `json:"updated"`
-		CreatedBy   string    `json:"created_by,omitempty"`
-		RunCount    int       `json:"run_count"`
-		Missing     int       `json:"missing_run_count"`
-	}{s.ID, s.Name, s.Description, s.Created, s.Updated, s.CreatedBy, s.RunCount, s.MissingRunCount})
+// setSummary is a set as the list shows it: without its runs, with their count
+// and the number of runs whose source is gone.
+type setSummary struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Description     string    `json:"description,omitempty"`
+	Created         time.Time `json:"created"`
+	Updated         time.Time `json:"updated"`
+	CreatedBy       string    `json:"created_by,omitempty"`
+	RunCount        int       `json:"run_count"`
+	MissingRunCount int       `json:"missing_run_count"`
 }
 
 type service struct {
+	http                 *http.Client
+	log                  *slog.Logger
 	blobs, orchestrator  string
 	openobserve          string
 	openobserveUser      string
 	openobservePassword  string
 	projectionStream     string
-	http                 *http.Client
-	log                  *slog.Logger
 	setMu, measurementMu sync.Mutex
 }
 
@@ -97,7 +98,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	shutdown, err := initTelemetry(context.Background())
 	if err != nil {
@@ -118,7 +119,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { err = closeAfter(err, lock) }()
 	projectionStreamName := env("EVALUATION_PROJECTION_STREAM", projectionStream)
 	if !validProjectionStream(projectionStreamName) {
 		return fmt.Errorf("EVALUATION_PROJECTION_STREAM must match ^[a-z][a-z0-9_]{0,95}$")
@@ -182,17 +183,17 @@ func (s *service) listRuns(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 400, fmt.Errorf("started_to must be RFC3339"))
 		return
 	}
-	min, err := optionalInt(q.Get("duration_min_ms"))
+	minDuration, err := optionalInt(q.Get("duration_min_ms"))
 	if err != nil {
 		s.fail(w, 400, fmt.Errorf("duration_min_ms must be a non-negative integer"))
 		return
 	}
-	maxv, err := optionalInt(q.Get("duration_max_ms"))
+	maxDuration, err := optionalInt(q.Get("duration_max_ms"))
 	if err != nil {
 		s.fail(w, 400, fmt.Errorf("duration_max_ms must be a non-negative integer"))
 		return
 	}
-	if min != nil && maxv != nil && *min > *maxv {
+	if minDuration != nil && maxDuration != nil && *minDuration > *maxDuration {
 		s.fail(w, 400, fmt.Errorf("duration range is invalid"))
 		return
 	}
@@ -201,11 +202,12 @@ func (s *service) listRuns(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 502, err)
 		return
 	}
-	var filtered []RunSnapshot
+	filtered := make([]RunSnapshot, 0, len(runs))
 	incomplete := 0
 	historyUnavailable := 0
 	historyOmitted := 0
-	for _, run := range runs {
+	for i := range runs {
+		run := &runs[i]
 		matches, uncertain := matchesBaseFilters(run, q.Get("workflow"), q.Get("agent"), from, to)
 		if !matches {
 			if uncertain {
@@ -218,7 +220,7 @@ func (s *service) listRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		if run.HistoryUnavailable {
 			historyUnavailable++
-			if q.Get("status") != "" || min != nil || maxv != nil {
+			if q.Get("status") != "" || minDuration != nil || maxDuration != nil {
 				historyOmitted++
 				continue
 			}
@@ -226,16 +228,16 @@ func (s *service) listRuns(w http.ResponseWriter, r *http.Request) {
 		if q.Get("status") != "" && !strings.EqualFold(run.Status, q.Get("status")) {
 			continue
 		}
-		if (min != nil || maxv != nil) && !run.DurationKnown {
+		if (minDuration != nil || maxDuration != nil) && !run.DurationKnown {
 			if run.IndexError == "" {
 				incomplete++
 			}
 			continue
 		}
-		if min != nil && run.DurationMS < *min || maxv != nil && run.DurationMS > *maxv {
+		if minDuration != nil && run.DurationMS < *minDuration || maxDuration != nil && run.DurationMS > *maxDuration {
 			continue
 		}
-		filtered = append(filtered, run)
+		filtered = append(filtered, *run)
 	}
 	if cursor := q.Get("cursor"); cursor != "" {
 		ct, id, err := decodeCursor(cursor)
@@ -244,9 +246,9 @@ func (s *service) listRuns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		n := filtered[:0]
-		for _, run := range filtered {
-			if run.Started.Before(ct) || run.Started.Equal(ct) && run.TraceID < id {
-				n = append(n, run)
+		for i := range filtered {
+			if filtered[i].Started.Before(ct) || filtered[i].Started.Equal(ct) && filtered[i].TraceID < id {
+				n = append(n, filtered[i])
 			}
 		}
 		filtered = n
@@ -269,7 +271,7 @@ func (s *service) listRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"runs": filtered, "next_cursor": next, "incomplete_runs": incomplete, "history_unavailable": historyUnavailable, "history_unavailable_omitted": historyOmitted})
 }
 
-func matchesBaseFilters(run RunSnapshot, workflow, agent string, from, to *time.Time) (bool, bool) {
+func matchesBaseFilters(run *RunSnapshot, workflow, agent string, from, to *time.Time) (matches, uncertain bool) {
 	if workflow != "" {
 		if run.Workflow == "" && run.IndexError != "" {
 			return false, true
@@ -309,14 +311,15 @@ func (s *service) listSets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]setSummary, 0, len(sets))
-	for _, set := range sets {
+	for i := range sets {
+		set := &sets[i]
 		missing := 0
-		for _, run := range set.Runs {
-			if !present[run.TraceID] {
+		for j := range set.Runs {
+			if !present[set.Runs[j].TraceID] {
 				missing++
 			}
 		}
-		out = append(out, setSummary{set.ID, set.Name, set.Description, set.CreatedBy, set.Created, set.Updated, len(set.Runs), missing})
+		out = append(out, setSummary{ID: set.ID, Name: set.Name, Description: set.Description, Created: set.Created, Updated: set.Updated, CreatedBy: set.CreatedBy, RunCount: len(set.Runs), MissingRunCount: missing})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Updated.After(out[j].Updated) })
 	writeJSON(w, 200, map[string]any{"sets": out})
@@ -362,7 +365,7 @@ func (s *service) createSet(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	set := EvaluationSet{SchemaVersion: 1, ID: uuid.NewString(), Name: strings.TrimSpace(in.Name), Description: strings.TrimSpace(in.Description), Created: now, Updated: now, CreatedBy: strings.TrimSpace(r.Header.Get("X-Creator")), Revision: 1, Runs: runs}
-	if err = s.saveSet(r.Context(), set); err != nil {
+	if err = s.saveSet(r.Context(), &set); err != nil {
 		s.fail(w, 502, err)
 		return
 	}
@@ -404,8 +407,8 @@ func (s *service) updateSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	existing := map[string]RunSnapshot{}
-	for _, run := range current.Runs {
-		existing[run.TraceID] = run
+	for i := range current.Runs {
+		existing[current.Runs[i].TraceID] = current.Runs[i]
 	}
 	runs, err := s.snapshots(r.Context(), in.RunIDs, existing)
 	if err != nil {
@@ -414,7 +417,7 @@ func (s *service) updateSet(w http.ResponseWriter, r *http.Request) {
 	}
 	current.Name, current.Description, current.Runs, current.Updated = strings.TrimSpace(in.Name), strings.TrimSpace(in.Description), runs, time.Now().UTC()
 	current.Revision++
-	if err = s.saveSet(r.Context(), current); err != nil {
+	if err = s.saveSet(r.Context(), &current); err != nil {
 		s.fail(w, 502, err)
 		return
 	}
@@ -443,9 +446,9 @@ func decodeSetInput(w http.ResponseWriter, r *http.Request) (setInput, bool) {
 }
 
 func duplicateName(sets []EvaluationSet, name, except string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	for _, set := range sets {
-		if set.ID != except && strings.ToLower(set.Name) == n {
+	name = strings.TrimSpace(name)
+	for i := range sets {
+		if sets[i].ID != except && strings.EqualFold(sets[i].Name, name) {
 			return true
 		}
 	}
@@ -458,8 +461,8 @@ func (s *service) snapshots(ctx context.Context, ids []string, existing map[stri
 		return nil, err
 	}
 	byID := map[string]RunSnapshot{}
-	for _, run := range catalog {
-		byID[run.TraceID] = run
+	for i := range catalog {
+		byID[catalog[i].TraceID] = catalog[i]
 	}
 	out := make([]RunSnapshot, 0, len(ids))
 	for _, id := range ids {
@@ -494,26 +497,17 @@ func (s *service) catalog(ctx context.Context) ([]RunSnapshot, error) {
 		return nil, err
 	}
 	sem := make(chan struct{}, 8)
-	type result struct {
-		run RunSnapshot
-		err error
-	}
-	ch := make(chan result, len(ids))
+	ch := make(chan RunSnapshot, len(ids))
 	for id := range ids {
 		go func(id string) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			run, err := s.readRun(ctx, id)
-			ch <- result{run, err}
+			ch <- s.readRun(ctx, id)
 		}(id)
 	}
 	runs := make([]RunSnapshot, 0, len(ids))
 	for range ids {
-		v := <-ch
-		if v.err != nil {
-			return nil, v.err
-		}
-		runs = append(runs, v.run)
+		runs = append(runs, <-ch)
 	}
 	sort.Slice(runs, func(i, j int) bool {
 		if runs[i].Started.Equal(runs[j].Started) {
@@ -524,29 +518,32 @@ func (s *service) catalog(ctx context.Context) ([]RunSnapshot, error) {
 	return runs, nil
 }
 
-func (s *service) readRun(ctx context.Context, id string) (RunSnapshot, error) {
+// readRun builds the snapshot of one run. It does not fail: what it cannot
+// read is named in the snapshot's IndexError, so the run is still listed.
+func (s *service) readRun(ctx context.Context, id string) RunSnapshot {
 	var rec struct {
+		Started            time.Time `json:"started"`
 		TraceID            string    `json:"trace_id"`
 		DistributedTraceID string    `json:"distributed_trace_id"`
 		Workflow           string    `json:"workflow"`
 		InputArtifact      string    `json:"input_artifact"`
-		Started            time.Time `json:"started"`
 	}
 	if err := s.getJSON(ctx, s.blobs+"/blobs/runs/"+id+"/run.json", &rec); err != nil {
-		return RunSnapshot{TraceID: id, Agents: []string{}, Status: "Unknown", SourcePresent: true, IndexError: "Cannot read run record"}, nil
+		s.log.Warn("run record is unreadable", "run", id, "error", err)
+		return RunSnapshot{TraceID: id, Agents: []string{}, Status: runStatusUnknown, SourcePresent: true, IndexError: "Cannot read run record"}
 	}
 	var status struct {
-		Status        string    `json:"status"`
 		Started       time.Time `json:"started"`
 		Finished      time.Time `json:"finished"`
+		Status        string    `json:"status"`
 		DurationMS    int64     `json:"duration_ms"`
 		DurationKnown bool      `json:"duration_known"`
 	}
 	run := RunSnapshot{TraceID: id, Workflow: rec.Workflow, Agents: []string{}, Started: rec.Started, InputArtifact: rec.InputArtifact, DistributedTraceID: rec.DistributedTraceID, SourcePresent: true}
 	if err := s.getJSON(ctx, s.orchestrator+"/api/runs/"+id, &status); errors.Is(err, errNotFound) {
-		run.Status, run.HistoryUnavailable = "Unknown", true
+		run.Status, run.HistoryUnavailable = runStatusUnknown, true
 	} else if err != nil {
-		run.Status, run.IndexError = "Unknown", "Cannot read run status"
+		run.Status, run.IndexError = runStatusUnknown, "Cannot read run status"
 	} else {
 		if !status.Started.IsZero() {
 			run.Started = status.Started
@@ -561,10 +558,10 @@ func (s *service) readRun(ctx context.Context, id string) (RunSnapshot, error) {
 		}
 		run.IndexError += "Cannot read agent records"
 	}
-	return run, nil
+	return run
 }
 
-func (s *service) runAgents(ctx context.Context, id string) ([]string, bool, error) {
+func (s *service) runAgents(ctx context.Context, id string) (agents []string, complete bool, err error) {
 	var listing struct {
 		Objects []struct {
 			ID string `json:"id"`
@@ -581,7 +578,8 @@ func (s *service) runAgents(ctx context.Context, id string) ([]string, bool, err
 		var rec struct {
 			Agent string `json:"agent"`
 		}
-		if err := s.getJSON(ctx, s.blobs+"/blobs/"+o.ID, &rec); err != nil {
+		err = s.getJSON(ctx, s.blobs+"/blobs/"+o.ID, &rec)
+		if err != nil {
 			return nil, false, err
 		}
 		if rec.Agent != "" {
@@ -650,7 +648,7 @@ func (s *service) loadSet(ctx context.Context, id string) (EvaluationSet, error)
 	return set, err
 }
 
-func (s *service) saveSet(ctx context.Context, set EvaluationSet) error {
+func (s *service) saveSet(ctx context.Context, set *EvaluationSet) (err error) {
 	data, err := json.MarshalIndent(set, "", "  ")
 	if err != nil {
 		return err
@@ -665,15 +663,15 @@ func (s *service) saveSet(ctx context.Context, set EvaluationSet) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("saving evaluation set: %s", resp.Status)
 	}
 	return nil
 }
 
-func (s *service) getJSON(ctx context.Context, url string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (s *service) getJSON(ctx context.Context, url string, out any) (err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -681,7 +679,7 @@ func (s *service) getJSON(ctx context.Context, url string, out any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == 404 {
 		return errNotFound
 	}

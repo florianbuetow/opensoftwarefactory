@@ -23,28 +23,40 @@ var (
 	workflowNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
 )
 
+// IntakeBinding starts a pinned workflow version when a source workflow finishes with one of
+// the named outcomes.
 type IntakeBinding struct {
 	ID              string   `json:"id"`
 	Revision        string   `json:"revision"`
 	Name            string   `json:"name"`
-	Enabled         bool     `json:"enabled"`
 	Source          string   `json:"source"`
 	SourceWorkflows []string `json:"source_workflows"`
-	Outcomes        []string `json:"outcomes"`
 	Workflow        string   `json:"workflow"`
-	WorkflowVersion int      `json:"workflow_version"`
 	Description     string   `json:"description,omitempty"`
+	Outcomes        []string `json:"outcomes"`
+	WorkflowVersion int      `json:"workflow_version"`
+	Enabled         bool     `json:"enabled"`
 }
 
 type bindingStatus struct {
-	Pending      uint64    `json:"pending"`
-	LastError    string    `json:"last_error,omitempty"`
 	LastAccepted time.Time `json:"last_accepted,omitempty"`
+	LastError    string    `json:"last_error,omitempty"`
+	Pending      uint64    `json:"pending"`
 }
 
 func bindingObject(id string) string { return bindingPrefix + "/" + id + ".json" }
 
-func validateBinding(b IntakeBinding) error {
+// pendingEvents counts the events a consumer still owes its binding: those not delivered yet
+// and those delivered but not acknowledged.
+func pendingEvents(info *jetstream.ConsumerInfo) uint64 {
+	pending := info.NumPending
+	if info.NumAckPending > 0 {
+		pending += uint64(info.NumAckPending)
+	}
+	return pending
+}
+
+func validateBinding(b *IntakeBinding) error {
 	if !intakeIDPattern.MatchString(b.ID) {
 		return errors.New("id must be a safe non-empty identifier")
 	}
@@ -96,16 +108,20 @@ func (s *service) loadBindings(ctx context.Context) ([]IntakeBinding, error) {
 	return out, nil
 }
 
-func createsCycle(bindings []IntakeBinding, candidate IntakeBinding) bool {
+func createsCycle(bindings []IntakeBinding, candidate *IntakeBinding) bool {
 	edges := map[string][]string{}
-	for _, b := range append(bindings, candidate) {
+	add := func(b *IntakeBinding) {
 		if b.ID == candidate.ID && b.ID != "" && b.Revision != candidate.Revision {
-			continue
+			return
 		}
 		for _, source := range b.SourceWorkflows {
 			edges[source] = append(edges[source], b.Workflow)
 		}
 	}
+	for i := range bindings {
+		add(&bindings[i])
+	}
+	add(candidate)
 	for _, source := range candidate.SourceWorkflows {
 		seen := map[string]bool{}
 		var visit func(string) bool
@@ -170,7 +186,7 @@ func (s *service) putIntakeBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.ID = id
-	if err := validateBinding(b); err != nil {
+	if err := validateBinding(&b); err != nil {
 		s.fail(w, 422, err)
 		return
 	}
@@ -188,7 +204,7 @@ func (s *service) putIntakeBinding(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, all[i])
 		}
 	}
-	if createsCycle(filtered, b) {
+	if createsCycle(filtered, &b) {
 		s.fail(w, 422, errors.New("binding creates an automatic workflow trigger cycle"))
 		return
 	}
@@ -254,7 +270,7 @@ func (s *service) intakeBindingStatus(w http.ResponseWriter, r *http.Request) {
 	s.intakeMu.Unlock()
 	if consumer, err := s.js.Consumer(r.Context(), s.eventStream, durableBindingName(id)); err == nil {
 		if info, infoErr := consumer.Info(r.Context()); infoErr == nil {
-			status.Pending = info.NumPending + uint64(info.NumAckPending)
+			status.Pending = pendingEvents(info)
 		}
 	}
 	writeJSON(w, 200, status)
@@ -284,7 +300,8 @@ func (s *service) consumeBindings(ctx context.Context) {
 		s.log.Warn("loading intake bindings failed", "error", err)
 		return
 	}
-	for _, b := range bindings {
+	for i := range bindings {
+		b := &bindings[i]
 		if err := s.provisionBindingConsumer(ctx, b.ID); err != nil {
 			s.setBindingError(b.ID, err)
 			continue
@@ -294,7 +311,7 @@ func (s *service) consumeBindings(ctx context.Context) {
 				if info, infoErr := consumer.Info(ctx); infoErr == nil {
 					s.intakeMu.Lock()
 					st := s.intakeStatus[b.ID]
-					st.Pending = info.NumPending + uint64(info.NumAckPending)
+					st.Pending = pendingEvents(info)
 					s.intakeStatus[b.ID] = st
 					s.intakeMu.Unlock()
 				}
@@ -307,7 +324,7 @@ func (s *service) consumeBindings(ctx context.Context) {
 	}
 }
 
-func (s *service) consumeBinding(ctx context.Context, b IntakeBinding) error {
+func (s *service) consumeBinding(ctx context.Context, b *IntakeBinding) error {
 	consumer, err := s.js.Consumer(ctx, s.eventStream, durableBindingName(b.ID))
 	if err != nil {
 		return err
@@ -322,11 +339,11 @@ func (s *service) consumeBinding(ctx context.Context, b IntakeBinding) error {
 			_ = msg.Term()
 			continue
 		}
-		if !bindingMatches(b, event) {
+		if !bindingMatches(b, &event) {
 			_ = msg.Ack()
 			continue
 		}
-		if err := s.submitBinding(ctx, b, event, msg.Data()); err != nil {
+		if err := s.submitBinding(ctx, b, &event, msg.Data()); err != nil {
 			_ = msg.NakWithDelay(time.Second)
 			return err
 		}
@@ -341,7 +358,7 @@ func (s *service) consumeBinding(ctx context.Context, b IntakeBinding) error {
 	if info, err := consumer.Info(ctx); err == nil {
 		s.intakeMu.Lock()
 		st := s.intakeStatus[b.ID]
-		st.Pending = info.NumPending + uint64(info.NumAckPending)
+		st.Pending = pendingEvents(info)
 		s.intakeStatus[b.ID] = st
 		s.intakeMu.Unlock()
 	}

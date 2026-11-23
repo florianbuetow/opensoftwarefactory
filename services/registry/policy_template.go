@@ -7,8 +7,8 @@ import (
 )
 
 type policyToken struct {
-	start, end int
 	id         string
+	start, end int
 }
 
 var policySegment = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$|^[a-z0-9]$`)
@@ -42,7 +42,7 @@ func validPolicyID(id string) bool {
 		return false
 	}
 	for _, part := range parts {
-		if !policySegment.MatchString(part) || part == "latest" {
+		if !policySegment.MatchString(part) || part == latestVersion {
 			return false
 		}
 		if _, ok := versionNumber(part); ok {

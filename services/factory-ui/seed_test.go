@@ -13,9 +13,9 @@ import (
 )
 
 type seedStore struct {
-	mu      sync.Mutex
 	objects map[string]string
 	puts    map[string]int
+	mu      sync.Mutex
 }
 
 func newSeedStore(t *testing.T, initial map[string]string) (*seedStore, *httptest.Server) {
@@ -57,10 +57,10 @@ func newSeedStore(t *testing.T, initial map[string]string) (*seedStore, *httptes
 func TestSeedDirectoryStoresNestedFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "templates", "tasks", "default.md")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("{{task}}\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{{task}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, server := newSeedStore(t, map[string]string{})
@@ -89,7 +89,7 @@ func TestSeedDirectoryAllowsMissingAndEmptyDirectories(t *testing.T) {
 
 func TestSeedDirectoryDoesNotOverwriteExistingObjects(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "existing.md"), []byte("replacement"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "existing.md"), []byte("replacement"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, server := newSeedStore(t, map[string]string{"existing.md": "original"})

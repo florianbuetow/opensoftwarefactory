@@ -24,9 +24,10 @@ const (
 
 var (
 	skillIdentity = []string{"pod", "agent", "run", "version", "timeout_seconds"}
-	skillVersion  = regexp.MustCompile(`^v[1-9][0-9]*$`)
+	skillVersion  = regexp.MustCompile(`^v[1-9]\d*$`)
 )
 
+// SkillEvidence names one skill version the agent carried and where its text is stored.
 type SkillEvidence struct {
 	Name           string `json:"name"`
 	Version        string `json:"version"`
@@ -89,7 +90,7 @@ func (s *Service) loadSkillNote(ctx context.Context, versions map[string]string)
 	return strings.TrimSuffix(note.String(), "\n"), evidence, nil
 }
 
-func (s *Service) skillDescription(ctx context.Context, name, version string) (string, error) {
+func (s *Service) skillDescription(ctx context.Context, name, version string) (description string, err error) {
 	ref := name + "@" + version
 	if !validName(name) || !skillVersion.MatchString(version) {
 		return "", temporal.NewNonRetryableApplicationError(fmt.Sprintf("Invalid pinned skill %q", ref), "InvalidSkill", nil)
@@ -99,7 +100,7 @@ func (s *Service) skillDescription(ctx context.Context, name, version string) (s
 		parts[i] = url.PathEscape(part)
 	}
 	endpoint := strings.TrimRight(s.SkillRegistryURL, "/") + "/skills/" + strings.Join(parts, "/") + "/" + version
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("skill registry: %w", err)
 	}
@@ -107,7 +108,7 @@ func (s *Service) skillDescription(ctx context.Context, name, version string) (s
 	if err != nil {
 		return "", fmt.Errorf("skill registry: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return "", temporal.NewNonRetryableApplicationError(fmt.Sprintf("Skill %s was not found in the registry", ref), "SkillNotFound", nil)
 	}
@@ -117,7 +118,8 @@ func (s *Service) skillDescription(ctx context.Context, name, version string) (s
 	var entry struct {
 		Files map[string]string `json:"files"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&entry); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&entry)
+	if err != nil {
 		return "", fmt.Errorf("skill registry: decoding %s: %w", ref, err)
 	}
 	root := strings.ReplaceAll(entry.Files["SKILL.md"], "\r\n", "\n")
@@ -144,7 +146,8 @@ func setSkillArguments(ctx context.Context, tool string, args map[string]any) (s
 	pod := devPodOf(ctx)
 	if tool == skillScriptTool && (pod == nil || pod.pod == "") {
 		return "", temporal.NewNonRetryableApplicationError(
-			"The workflow needs a devpod step before this step to run a skill script.", "SkillScriptNeedsDevPod", nil)
+			"The workflow needs a devpod step before this step to run a skill script.", "SkillScriptNeedsDevPod", nil,
+		)
 	}
 	if pod == nil {
 		return "", fmt.Errorf("missing run identity for skill tool %q", tool)

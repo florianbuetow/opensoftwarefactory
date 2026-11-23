@@ -9,7 +9,7 @@ import (
 // podSpec is the dev pod: two containers that share /workspace. Only git-helper sees the
 // repository's credential, and neither container gets a Kubernetes service account token.
 // The two servers get different tokens, so that whatever runs in work cannot call git-helper.
-func (s *service) podSpec(p devPod, repo repository) map[string]any {
+func (s *service) podSpec(p *devPod, repo *repository) map[string]any {
 	token := func(key string) []map[string]any {
 		return []map[string]any{{"name": "POD_TOKEN", "valueFrom": map[string]any{
 			"secretKeyRef": map[string]any{"name": podName(p.ID), "key": key},
@@ -40,7 +40,7 @@ func (s *service) podSpec(p devPod, repo repository) map[string]any {
 	}
 	helperMounts := []map[string]any{workspace}
 	volumes := []map[string]any{{"name": "workspace", "emptyDir": map[string]any{}}}
-	if repo.Credential != "none" {
+	if repo.Credential != credentialNone {
 		helperMounts = append(helperMounts, map[string]any{"name": "credential", "mountPath": "/credential", "readOnly": true})
 		volumes = append(volumes, map[string]any{"name": "credential", "secret": map[string]any{
 			"secretName": credentialSecret(repo.Name), "defaultMode": 0o400,
@@ -91,7 +91,7 @@ func (s *service) podSpec(p devPod, repo repository) map[string]any {
 
 // networkPolicy lets the pod reach DNS and its repository's host only, and be reached by
 // the connector service only. Both containers share the pod's network.
-func (s *service) networkPolicy(id string, repo repository) map[string]any {
+func (s *service) networkPolicy(id string, repo *repository) map[string]any {
 	tcp := func(port int) map[string]any { return map[string]any{"protocol": "TCP", "port": port} }
 	egress := []map[string]any{{"ports": []map[string]any{{"protocol": "UDP", "port": 53}, tcp(53)}}}
 	if rule := s.repositoryEgress(repo); rule != nil {
@@ -121,7 +121,7 @@ func (s *service) networkPolicy(id string, repo repository) map[string]any {
 // repositoryEgress is the rule that opens the way to the repository's host. A service of the
 // cluster (a name without a dot, or name.namespace[.svc...]) is matched by the pods that carry
 // its name as app.kubernetes.io/name; any other host by the addresses it resolves to now.
-func (s *service) repositoryEgress(repo repository) map[string]any {
+func (s *service) repositoryEgress(repo *repository) map[string]any {
 	host, port, err := repositoryHost(repo.URL)
 	if err != nil {
 		return nil

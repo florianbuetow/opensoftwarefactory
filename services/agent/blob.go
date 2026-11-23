@@ -28,12 +28,14 @@ type Store interface {
 	Get(ctx context.Context, id string) ([]byte, error)
 }
 
+// PrefixStore is a Store that can also list and delete objects.
 type PrefixStore interface {
 	Store
 	List(ctx context.Context, prefix string) ([]string, error)
 	Delete(ctx context.Context, id string) error
 }
 
+// TreeStore is a PrefixStore that can list the folders and objects directly under a prefix.
 type TreeStore interface {
 	PrefixStore
 	ListChildren(ctx context.Context, prefix string) (directories, objects []string, err error)
@@ -56,11 +58,11 @@ func validID(id string) bool {
 
 // HTTPStore is the client for the blobstore service's /blobs API.
 type HTTPStore struct {
-	BaseURL string
 	Client  *http.Client
+	BaseURL string
 }
 
-func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta Meta) ([]byte, error) {
+func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta Meta) (data []byte, err error) {
 	if !validID(id) {
 		return nil, fmt.Errorf("invalid object id %q", id)
 	}
@@ -84,8 +86,8 @@ func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	defer func() { err = closeAfter(err, resp.Body) }()
+	data, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -109,31 +111,36 @@ func setInt64Header(req *http.Request, name string, value *int64) {
 	}
 }
 
+// Put stores data as the object id with the given metadata.
 func (s HTTPStore) Put(ctx context.Context, id string, data []byte, meta Meta) error {
 	_, err := s.do(ctx, http.MethodPut, id, data, meta)
 	return err
 }
 
+// Get returns the content of the object id.
 func (s HTTPStore) Get(ctx context.Context, id string) ([]byte, error) {
 	return s.do(ctx, http.MethodGet, id, nil, Meta{})
 }
 
+// Delete removes the object id.
 func (s HTTPStore) Delete(ctx context.Context, id string) error {
 	_, err := s.do(ctx, http.MethodDelete, id, nil, Meta{})
 	return err
 }
 
+// List returns the IDs of the objects directly under prefix.
 func (s HTTPStore) List(ctx context.Context, prefix string) ([]string, error) {
 	_, objects, err := s.ListChildren(ctx, prefix)
 	return objects, err
 }
 
-func (s HTTPStore) ListChildren(ctx context.Context, prefix string) ([]string, []string, error) {
+// ListChildren returns the folders and the objects directly under prefix.
+func (s HTTPStore) ListChildren(ctx context.Context, prefix string) (directories, objects []string, err error) {
 	if !validID(prefix) {
 		return nil, nil, fmt.Errorf("invalid prefix %q", prefix)
 	}
 	root := strings.TrimSuffix(strings.TrimRight(s.BaseURL, "/"), "/blobs")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/list/"+prefix, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/list/"+prefix, http.NoBody)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -141,7 +148,7 @@ func (s HTTPStore) ListChildren(ctx context.Context, prefix string) ([]string, [
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return []string{}, []string{}, nil
 	}
@@ -154,16 +161,17 @@ func (s HTTPStore) ListChildren(ctx context.Context, prefix string) ([]string, [
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&listing); err != nil {
+	err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&listing)
+	if err != nil {
 		return nil, nil, err
 	}
-	ids := make([]string, 0, len(listing.Objects))
+	objects = make([]string, 0, len(listing.Objects))
 	for _, object := range listing.Objects {
-		ids = append(ids, object.ID)
+		objects = append(objects, object.ID)
 	}
-	dirs := make([]string, 0, len(listing.Directories))
+	directories = make([]string, 0, len(listing.Directories))
 	for _, dir := range listing.Directories {
-		dirs = append(dirs, prefix+"/"+dir)
+		directories = append(directories, prefix+"/"+dir)
 	}
-	return dirs, ids, nil
+	return directories, objects, nil
 }

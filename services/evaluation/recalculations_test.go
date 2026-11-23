@@ -21,7 +21,7 @@ func TestRecalculationReportsProjectionPendingThenComplete(t *testing.T) {
 	defer orchestrator.Close()
 	occurred := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	zero := int64(0)
-	usage := Measurement{SchemaVersion: 1, ID: "recalc-u", Kind: "usage", RunID: runA, ExecutionID: "exec", OccurredAt: occurred, Vendor: "v", Model: "m", Effort: "none", Modes: modesPtr(), InputTokens: &zero, CachedInputTokens: &zero, UncachedInputTokens: &zero, OutputTokens: &zero, Status: "reported", Missing: []string{}, RawUsage: json.RawMessage(`{}`)}
+	usage := Measurement{SchemaVersion: 1, ID: "recalc-u", Kind: "usage", RunID: runA, ExecutionID: "exec", OccurredAt: occurred, Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, InputTokens: &zero, CachedInputTokens: &zero, UncachedInputTokens: &zero, OutputTokens: &zero, Status: "reported", Missing: []string{}, RawUsage: json.RawMessage(`{}`)}
 	price := Price{ID: "p", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 1000, InputUncached: "1", InputCached: "1", Output: "1"}
 	f.mu.Lock()
 	f.objects[measurementObject("usage", usage.ID)], _ = json.Marshal(usage)
@@ -44,10 +44,10 @@ func TestRecalculationReportsProjectionPendingThenComplete(t *testing.T) {
 		t.Fatalf("batch %d %s", code, data)
 	}
 	var pending struct {
-		Done              bool   `json:"done"`
-		ProjectionPending bool   `json:"projection_pending"`
 		Status            string `json:"status"`
 		Error             string `json:"error"`
+		Done              bool   `json:"done"`
+		ProjectionPending bool   `json:"projection_pending"`
 	}
 	_ = json.Unmarshal(data, &pending)
 	if pending.Done || !pending.ProjectionPending || pending.Status != "projection_pending" || pending.Error != "" {

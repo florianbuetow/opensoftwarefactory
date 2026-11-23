@@ -89,15 +89,18 @@ const Inputs = (() => {
     const bodies = inputs.map((i) => ({ ...i, body: compose(template, i.text) })).filter((i) => i.body);
     if (!bodies.length) throw new Error("The input is empty");
     const url = `/api/orchestrator/workflows/${encodeURIComponent(workflow)}/runs${version > 0 ? `?version=${version}` : ""}`;
-    let started = 0;
+    let started = 0, last = "";
     for (const i of bodies) {
       const run = await api("POST", url, i.body, creatorHeaders());
+      if (run?.trace_id) last = run.trace_id;
       started++;
     }
     remember(workflow, choice);
     runIndex.refresh().catch(() => {});
     setSaveState(started === 1 ? "Started" : `Started ${started} runs`);
     document.dispatchEvent(new CustomEvent("runsstarted", { detail: { workflow } }));
+    // Whatever is created opens: one run opens on Runs, several open as the workflow's runs.
+    location.hash = started === 1 && last ? `#runs/${encodeURIComponent(last)}` : `#runs?workflow=${encodeURIComponent(workflow)}`;
     return started;
   }
 

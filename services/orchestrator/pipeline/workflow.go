@@ -141,10 +141,7 @@ type Input struct {
 	ExecutionID       string     `json:"execution_id,omitempty"`
 	ParentExecutionID string     `json:"parent_execution_id,omitempty"`
 	Definition        Definition `json:"definition"`
-	Inputs            []Item     `json:"inputs"`
 	Prefix            string     `json:"prefix,omitempty"`
-	// Depth counts the workflow steps and team members above this run; a top-level run has 0.
-	Depth int `json:"depth,omitempty"`
 	// Run changes whenever the step that started this run runs again after a rejection, so
 	// the teams inside can tell that from a retry.
 	Run string `json:"run,omitempty"`
@@ -154,6 +151,9 @@ type Input struct {
 	// Intake is set only for automatically accepted factory events. Manual and legacy
 	// inputs leave it nil and replay the original command path.
 	Intake *IntakeInput `json:"intake,omitempty"`
+	Inputs []Item       `json:"inputs"`
+	// Depth counts the workflow steps and team members above this run; a top-level run has 0.
+	Depth int `json:"depth,omitempty"`
 	// ResolveAgentSettings is set by new parent workflows for nested team workflows. An
 	// absent field preserves histories recorded before skills were supported.
 	ResolveAgentSettings bool `json:"resolve_agent_settings,omitempty"`
@@ -164,9 +164,9 @@ type IntakeInput struct {
 	BindingID       string          `json:"binding_id"`
 	BindingRevision string          `json:"binding_revision"`
 	EventID         string          `json:"event_id"`
+	AcceptanceHash  string          `json:"acceptance_hash"`
 	Event           json.RawMessage `json:"event"`
 	Binding         json.RawMessage `json:"binding"`
-	AcceptanceHash  string          `json:"acceptance_hash"`
 }
 
 // Result maps every step ID to the artifact it produced. Steps of a routed
@@ -179,10 +179,10 @@ type IntakeInput struct {
 type Result struct {
 	TraceID     string            `json:"trace_id"`
 	Artifacts   map[string]string `json:"artifacts"`
-	Final       []Item            `json:"final,omitempty"`
 	Blocked     string            `json:"blocked,omitempty"`
 	BlockedStep string            `json:"blocked_step,omitempty"`
 	Rounds      map[string]int    `json:"rounds,omitempty"`
+	Final       []Item            `json:"final,omitempty"`
 }
 
 // StepRequest is the activity input every service receives. DevPod is the ID of the run's
@@ -194,16 +194,16 @@ type StepRequest struct {
 	Workflow                  string            `json:"workflow"`
 	StepID                    string            `json:"step_id"`
 	Agent                     string            `json:"agent,omitempty"`
-	Inputs                    []Item            `json:"inputs"`
 	OutputArtifact            string            `json:"output_artifact"`
 	DevPod                    string            `json:"dev_pod,omitempty"`
 	Skills                    map[string]string `json:"skills,omitempty"`
-	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 	ProducerRunID             string            `json:"producer_run_id,omitempty"`
 	TargetRunID               string            `json:"target_run_id,omitempty"`
 	TargetExecutionID         string            `json:"target_execution_id,omitempty"`
 	MappingVersion            string            `json:"mapping_version,omitempty"`
 	BindingRevision           string            `json:"binding_revision,omitempty"`
+	Inputs                    []Item            `json:"inputs"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // StepResult is the activity output every service returns: the artifact the step wrote. The
@@ -319,7 +319,7 @@ func SessionPath(prefix, step string) string {
 
 // SessionAgents returns the agents of an interactive step: the main agent first, then the
 // others, without duplicates.
-func (s Step) SessionAgents() []string {
+func (s *Step) SessionAgents() []string {
 	agents := []string{s.Agent}
 	for _, a := range s.Agents {
 		known := false
@@ -335,7 +335,7 @@ func (s Step) SessionAgents() []string {
 
 // StartToClose returns the step's activity timeout: two minutes for an agent step and ten
 // minutes for other services unless the step sets one.
-func (s Step) StartToClose() (time.Duration, error) {
+func (s *Step) StartToClose() (time.Duration, error) {
 	if s.Timeout == "" {
 		if s.Service == "agent" {
 			return 2 * time.Minute, nil
@@ -359,7 +359,7 @@ func (s Step) StartToClose() (time.Duration, error) {
 // a child workflow. Merge and batch steps collect the results of their sources
 // and forward them as one message; the steps after them run once per message.
 // A top-level run records how it ended in its metadata.
-func Pipeline(ctx workflow.Context, in Input) (Result, error) {
+func Pipeline(ctx workflow.Context, in *Input) (Result, error) {
 	version := workflow.GetVersion(ctx, "factory-measurements-v1", workflow.DefaultVersion, 1)
 	if version == 1 {
 		info := workflow.GetInfo(ctx)
@@ -375,7 +375,7 @@ func Pipeline(ctx workflow.Context, in Input) (Result, error) {
 			prefix = RunPrefix(in.TraceID)
 		}
 		lifecycleCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{TaskQueue: TaskQueue, StartToCloseTimeout: time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 0}})
-		if err := workflow.ExecuteActivity(lifecycleCtx, RecordExecutionOpenActivity, ExecutionOpenRecord{WorkflowID: info.WorkflowExecution.ID, ExecutionID: info.WorkflowExecution.RunID, RunID: in.TraceID, Workflow: in.Definition.Name, WorkflowVersion: DefinitionVersion(in.Definition), ArtifactPrefix: prefix, ParentExecutionID: in.ParentExecutionID, AcceptedAt: info.WorkflowStartTime}).Get(lifecycleCtx, nil); err != nil {
+		if err := workflow.ExecuteActivity(lifecycleCtx, RecordExecutionOpenActivity, ExecutionOpenRecord{WorkflowID: info.WorkflowExecution.ID, ExecutionID: info.WorkflowExecution.RunID, RunID: in.TraceID, Workflow: in.Definition.Name, WorkflowVersion: DefinitionVersion(&in.Definition), ArtifactPrefix: prefix, ParentExecutionID: in.ParentExecutionID, AcceptedAt: info.WorkflowStartTime}).Get(lifecycleCtx, nil); err != nil {
 			return Result{}, err
 		}
 	}
@@ -401,7 +401,7 @@ func Pipeline(ctx workflow.Context, in Input) (Result, error) {
 		releasePod(ctx, in, held)
 	}
 	if in.Depth == 0 {
-		finishRun(ctx, in, res, err)
+		finishRun(ctx, in, &res, err)
 	}
 	return res, err
 }
@@ -409,7 +409,7 @@ func Pipeline(ctx workflow.Context, in Input) (Result, error) {
 // releasePod tells the connector service that the run which created the dev pod is over. It
 // uses a disconnected context, so it also runs when the run failed or was cancelled. A
 // failure to release does not change the result of the run.
-func releasePod(ctx workflow.Context, in Input, pod *DevPod) {
+func releasePod(ctx workflow.Context, in *Input, pod *DevPod) {
 	dctx, cancel := workflow.NewDisconnectedContext(ctx)
 	defer cancel()
 	dctx = workflow.WithActivityOptions(dctx, workflow.ActivityOptions{
@@ -426,7 +426,7 @@ func releasePod(ctx workflow.Context, in Input, pod *DevPod) {
 // finishRun records the end of a top-level run in its metadata. It uses a disconnected
 // context, so it also runs when the run was cancelled. A failure to record does not change
 // the result of the run.
-func finishRun(ctx workflow.Context, in Input, res Result, runErr error) {
+func finishRun(ctx workflow.Context, in *Input, res *Result, runErr error) {
 	prefix := in.Prefix
 	if prefix == "" {
 		prefix = RunPrefix(in.TraceID)
@@ -455,13 +455,14 @@ func finishRun(ctx workflow.Context, in Input, res Result, runErr error) {
 
 // runPipeline executes the steps of the definition. It sets held to the dev pod a devpod
 // step of this run created, which the caller releases when the run ends.
-func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) {
-	if err := Validate(in.Definition); err != nil {
+func runPipeline(ctx workflow.Context, in *Input, held **DevPod) (Result, error) {
+	if err := Validate(&in.Definition); err != nil {
 		return Result{}, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidDefinition", nil)
 	}
 	if in.Depth > MaxDepth {
 		return Result{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("workflow %q is nested deeper than %d levels", in.Definition.Name, MaxDepth), "NestingTooDeep", nil)
+			fmt.Sprintf("workflow %q is nested deeper than %d levels", in.Definition.Name, MaxDepth), "NestingTooDeep", nil,
+		)
 	}
 	if in.Prefix == "" {
 		in.Prefix = RunPrefix(in.TraceID)
@@ -473,13 +474,13 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 	outputs := map[string][]Item{}
 	// final is the single final step of the definition; its items are the output of a nested run.
 	final := ""
-	if last := FinalSteps(in.Definition); len(last) == 1 {
+	if last := FinalSteps(&in.Definition); len(last) == 1 {
 		final = last[0]
 	}
 	// nodes are the merge and batch steps. A step after one of them runs once per message the
 	// node forwards: passes counts those runs, and inPass tells a run of the current pass
 	// from the first run of a new one.
-	nodes := newNodes(in.Definition)
+	nodes := newNodes(&in.Definition)
 	passStep := map[string]bool{}
 	for _, n := range nodes {
 		for _, id := range n.segment {
@@ -516,12 +517,13 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 	var pod *DevPod
 	podSteps := map[string]bool{}
 	kinds := map[string]string{}
-	sessionSteps := map[string]Step{}
-	for _, s := range in.Definition.Steps {
+	sessionSteps := map[string]*Step{}
+	for i := range in.Definition.Steps {
+		s := &in.Definition.Steps[i]
 		kinds[s.ID] = s.Service
 		sessionSteps[s.ID] = s
 		if s.Service == DevPodService {
-			podSteps = dependents(in.Definition, s.ID)
+			podSteps = dependents(&in.Definition, s.ID)
 			delete(podSteps, s.ID)
 		}
 	}
@@ -619,8 +621,8 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 			state.Gates = append(state.Gates, g)
 		}
 		sort.Slice(state.Gates, func(i, j int) bool { return state.Gates[i].Step < state.Gates[j].Step })
-		for _, session := range sessions {
-			state.Sessions = append(state.Sessions, session)
+		for step := range sessions {
+			state.Sessions = append(state.Sessions, sessions[step])
 		}
 		sort.Slice(state.Sessions, func(i, j int) bool { return state.Sessions[i].Step < state.Sessions[j].Step })
 		for _, team := range teams {
@@ -655,8 +657,8 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 	// ask opens a decision for a person about the first of the publish requests an agent of
 	// the step made in the dev pod, and delivers the step's output once all are decided. A
 	// rejected request is not published; the run goes on either way.
-	var ask func(s Step, g int, p DevPod, produced []Item, requests []PublishRequest)
-	ask = func(s Step, g int, p DevPod, produced []Item, requests []PublishRequest) {
+	var ask func(s *Step, g int, p DevPod, produced []Item, requests []PublishRequest)
+	ask = func(s *Step, g int, p DevPod, produced []Item, requests []PublishRequest) {
 		if len(requests) == 0 {
 			deliver(s.ID, produced)
 			return
@@ -681,7 +683,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 	// complete ends a run of a step with what it produced. A blocked step ends the run. A
 	// step whose agents worked in a dev pod first has its publish requests decided.
 	blocked := false
-	complete := func(s Step, g int, reason string, produced []Item) {
+	complete := func(s *Step, g int, reason string, produced []Item) {
 		if reason != "" {
 			for _, item := range produced {
 				res.Artifacts[s.ID] = item.Artifact
@@ -800,15 +802,15 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 					// it and the gate run again.
 					var again []string
 					if kinds[target] == TeamService {
-						after := dependents(in.Definition, target)
-						for _, s := range in.Definition.Steps {
-							if after[s.ID] {
-								again = append(again, s.ID)
+						after := dependents(&in.Definition, target)
+						for i := range in.Definition.Steps {
+							if id := in.Definition.Steps[i].ID; after[id] {
+								again = append(again, id)
 							}
 						}
 						rejections[target] = rejection
 					} else {
-						again = append(between(in.Definition, target, gate.Step), gate.Step)
+						again = append(between(&in.Definition, target, gate.Step), gate.Step)
 						if kinds[target] == InteractiveService {
 							rejections[target] = rejection
 						}
@@ -993,7 +995,8 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 		if blocked {
 			return res, nil
 		}
-		for _, s := range in.Definition.Steps {
+		for i := range in.Definition.Steps {
+			s := &in.Definition.Steps[i]
 			if s.IsNode() || started[s.ID] || holds[s.ID] > 0 || !ready(s, outputs) {
 				continue
 			}
@@ -1172,7 +1175,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 			case WorkflowService:
 				stepCtx, cancelStep := workflow.WithCancel(ctx)
 				cancels[s.ID] = cancelStep
-				nested := startNested(stepCtx, ownCtx, nestedRun{
+				nested := startNested(stepCtx, ownCtx, &nestedRun{
 					TraceID: in.TraceID, Name: s.Workflow, Inputs: stepInputs,
 					Prefix: output, Depth: in.Depth + 1, Run: run, DevPod: podOf(s.ID),
 					WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID + "/" + name,
@@ -1204,7 +1207,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				team := PendingTeam{Step: s.ID, Team: TeamPath(in.Prefix, name), Pass: passes[s.ID]}
 				teams[s.ID] = team
 				teamIn := TeamInput{
-					TraceID: in.TraceID, Workflow: in.Definition.Name, Step: s, Inputs: stepInputs, Prefix: in.Prefix,
+					TraceID: in.TraceID, Workflow: in.Definition.Name, Step: *s, Inputs: stepInputs, Prefix: in.Prefix,
 					Artifact: output, Team: team.Team, Depth: in.Depth, Run: run, Rejection: rejections[s.ID], DevPod: podOf(s.ID),
 					Intake: in.Intake, ResolveAgentSettings: in.ResolveAgentSettings,
 				}
@@ -1321,7 +1324,8 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				delete(kept, id)
 				delete(extra, id)
 			}
-			if finish(n.step.ID, items); failure != nil {
+			finish(n.step.ID, items)
+			if failure != nil {
 				break
 			}
 		}
@@ -1373,7 +1377,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 // and runs it as a child workflow under the same trace. The child's steps
 // store their artifacts under "<prefix>/<name>", where name is the route step
 // or its pass. The routed workflow receives the item that named the route.
-func startRoute(ctx, ownCtx workflow.Context, in Input, name string, stepInputs []Item, run string, pod *DevPod) workflow.Future {
+func startRoute(ctx, ownCtx workflow.Context, in *Input, name string, stepInputs []Item, run string, pod *DevPod) workflow.Future {
 	future, setter := workflow.NewFuture(ctx)
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		var routed RouteResult
@@ -1384,7 +1388,7 @@ func startRoute(ctx, ownCtx workflow.Context, in Input, name string, stepInputs 
 		childCtx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 			WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID + "/" + name,
 			TaskQueue:  TaskQueue,
-			Memo:       map[string]any{"workflow": routed.Definition.Name, "workflow_version": DefinitionVersion(routed.Definition), "trace_id": in.TraceID, "artifact_prefix": ArtifactID(in.Prefix, name)},
+			Memo:       map[string]any{"workflow": routed.Definition.Name, "workflow_version": DefinitionVersion(&routed.Definition), "trace_id": in.TraceID, "artifact_prefix": ArtifactID(in.Prefix, name)},
 			// A route that runs again waits until its cancelled earlier run has closed.
 			WaitForCancellation: true,
 		})
@@ -1419,7 +1423,7 @@ func roundsOf(kept map[string]int) map[string]int {
 }
 
 // ready reports whether every dependency of the step has finished its current run.
-func ready(s Step, outputs map[string][]Item) bool {
+func ready(s *Step, outputs map[string][]Item) bool {
 	for _, d := range s.DependsOn {
 		if _, ok := outputs[d]; !ok {
 			return false
@@ -1431,7 +1435,7 @@ func ready(s Step, outputs map[string][]Item) bool {
 // inputs returns the items a step receives: the items of its dependencies in depends_on
 // order, those of a merge or batch added flat, or the run's inputs for a step without
 // dependencies.
-func inputs(s Step, runInputs []Item, outputs map[string][]Item) []Item {
+func inputs(s *Step, runInputs []Item, outputs map[string][]Item) []Item {
 	list := []Item{}
 	if len(s.DependsOn) == 0 {
 		return append(list, runInputs...)

@@ -22,6 +22,10 @@ const (
 	authorEmail = "agent@opensoftwarefactory.local"
 	workPort    = 8080
 	helperPort  = 8081
+
+	phaseUnknown    = "Unknown"       // the phase of a pod the cluster did not tell
+	opPath          = "/op"           // the tool server's operations
+	skillScriptPath = "/skill-script" // the tool server's skill scripts
 )
 
 // rule blocks a tool call of an agent with a message.
@@ -36,8 +40,8 @@ type rule struct {
 type blockedReport struct {
 	Run    string    `json:"run"`
 	Agent  string    `json:"agent"`
-	Reason string    `json:"reason"`
 	Time   time.Time `json:"time"`
+	Reason string    `json:"reason"`
 }
 
 // devPod is everything the connector service knows about a dev pod. It is stored in the blob
@@ -57,12 +61,12 @@ type devPod struct {
 	Users           []string             `json:"users"` // runs that may call tools on the pod
 	Holds           map[string]time.Time `json:"holds"` // runs that keep the pod, with their last renewal
 	LastActivity    time.Time            `json:"last_activity"`
-	IdleSeconds     int                  `json:"idle_seconds"`
 	Author          string               `json:"author"` // agent set as commit author in the pod
-	Pushed          bool                 `json:"pushed"`
+	PullRequest     *pullRequest         `json:"pull_request,omitempty"`
 	Blocked         []blockedReport      `json:"blocked"`
 	PublishRequests []publishRequest     `json:"publish_requests"`
-	PullRequest     *pullRequest         `json:"pull_request,omitempty"`
+	IdleSeconds     int                  `json:"idle_seconds"`
+	Pushed          bool                 `json:"pushed"`
 }
 
 // podConn is how the pod's two servers are reached.
@@ -77,10 +81,10 @@ type podView struct {
 	Name         string    `json:"name"`
 	SourceBranch string    `json:"source_branch"`
 	WorkBranch   string    `json:"work_branch"`
-	Runs         []string  `json:"runs"`
 	LastActivity time.Time `json:"last_activity"`
 	Expires      time.Time `json:"expires"`
 	Phase        string    `json:"phase"`
+	Runs         []string  `json:"runs"`
 }
 
 // podDetail is one pod with everything stored about it.
@@ -92,10 +96,10 @@ type podDetail struct {
 	Protected       []string         `json:"protected"`
 	Rules           []rule           `json:"rules"`
 	Users           []string         `json:"users"`
-	Pushed          bool             `json:"pushed"`
+	PullRequest     *pullRequest     `json:"pull_request,omitempty"`
 	Blocked         []blockedReport  `json:"blocked"`
 	PublishRequests []publishRequest `json:"publish_requests"`
-	PullRequest     *pullRequest     `json:"pull_request,omitempty"`
+	Pushed          bool             `json:"pushed"`
 }
 
 var (
@@ -179,7 +183,7 @@ func (s *service) change(ctx context.Context, id string, fn func(*devPod) error)
 }
 
 // heldBy returns the runs whose hold on the pod is still valid.
-func (s *service) heldBy(p devPod) []string {
+func (s *service) heldBy(p *devPod) []string {
 	runs := []string{}
 	for run, renewed := range p.Holds {
 		if s.cfg.holdTTL <= 0 || s.now().Sub(renewed) <= s.cfg.holdTTL {
@@ -190,21 +194,21 @@ func (s *service) heldBy(p devPod) []string {
 	return runs
 }
 
-func (s *service) idle(p devPod) time.Duration {
+func (s *service) idle(p *devPod) time.Duration {
 	if s.cfg.idleOverride > 0 {
 		return s.cfg.idleOverride
 	}
 	return time.Duration(p.IdleSeconds) * time.Second
 }
 
-func (s *service) view(p devPod, phase string) podView {
+func (s *service) view(p *devPod, phase string) podView {
 	return podView{
 		ID: p.ID, Repository: p.Repository, Name: p.Name, SourceBranch: p.SourceBranch, WorkBranch: p.WorkBranch,
 		Runs: s.heldBy(p), LastActivity: p.LastActivity, Expires: p.LastActivity.Add(s.idle(p)), Phase: phase,
 	}
 }
 
-func phaseOf(p devPod, info podInfo, found bool) string {
+func phaseOf(p *devPod, info podInfo, found bool) string {
 	switch {
 	case !found && p.State == stateNew:
 		return "Creating"
@@ -215,7 +219,7 @@ func phaseOf(p devPod, info podInfo, found bool) string {
 	case p.State == stateNew:
 		return "Creating"
 	case info.Phase == "":
-		return "Unknown"
+		return phaseUnknown
 	}
 	return info.Phase
 }
@@ -234,9 +238,10 @@ func (s *service) listPods(w http.ResponseWriter, r *http.Request) {
 		byName[info.Name] = info
 	}
 	views := []podView{}
-	for _, p := range pods {
+	for i := range pods {
+		p := &pods[i]
 		info, found := byName[podName(p.ID)]
-		phase := "Unknown"
+		phase := phaseUnknown
 		if err == nil {
 			phase = phaseOf(p, info, found)
 		}
@@ -245,8 +250,8 @@ func (s *service) listPods(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, views)
 }
 
-func (s *service) detail(ctx context.Context, p devPod) podDetail {
-	phase := "Unknown"
+func (s *service) detail(ctx context.Context, p *devPod) podDetail {
+	phase := phaseUnknown
 	info, err := s.kube.Pod(ctx, podName(p.ID))
 	if err == nil || errors.Is(err, errNotFound) {
 		phase = phaseOf(p, info, err == nil)
@@ -271,7 +276,7 @@ func (s *service) getPod(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 404, errors.New("this dev pod does not exist"))
 		return
 	}
-	writeJSON(w, 200, s.detail(r.Context(), p))
+	writeJSON(w, 200, s.detail(r.Context(), &p))
 }
 
 type createInput struct {
@@ -288,15 +293,18 @@ type createInput struct {
 // what a devpod step writes into its output document.
 type createResult struct {
 	ID           string `json:"id"`
-	Reused       bool   `json:"reused"`
 	Repository   string `json:"repository"`
 	SourceBranch string `json:"source_branch"`
 	WorkBranch   string `json:"work_branch"`
 	StartCommit  string `json:"start_commit"`
+	Reused       bool   `json:"reused"`
 }
 
-func result(p devPod, reused bool) createResult {
-	return createResult{p.ID, reused, p.Repository, p.SourceBranch, p.WorkBranch, p.StartCommit}
+func result(p *devPod, reused bool) createResult {
+	return createResult{
+		ID: p.ID, Repository: p.Repository, SourceBranch: p.SourceBranch, WorkBranch: p.WorkBranch,
+		StartCommit: p.StartCommit, Reused: reused,
+	}
 }
 
 func (in *createInput) check() error {
@@ -353,7 +361,7 @@ func (s *service) createPod(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 409, fmt.Errorf("the work branch %q is the source branch or the repository's default branch; a dev pod always works on a branch of its own, so choose another work branch", in.WorkBranch))
 		return
 	}
-	res, err := s.create(r.Context(), repo, in)
+	res, err := s.create(r.Context(), &repo, &in)
 	if err != nil {
 		s.fail(w, 502, err)
 		return
@@ -362,7 +370,7 @@ func (s *service) createPod(w http.ResponseWriter, r *http.Request) {
 }
 
 // create returns the live pod of the same repository and name, or builds a new one.
-func (s *service) create(ctx context.Context, repo repository, in createInput) (createResult, error) {
+func (s *service) create(ctx context.Context, repo *repository, in *createInput) (createResult, error) {
 	deadline := s.now().Add(s.cfg.startTimeout + 15*time.Minute)
 	for {
 		s.createMu.Lock()
@@ -383,7 +391,7 @@ func (s *service) create(ctx context.Context, repo repository, in createInput) (
 		if found {
 			if info, err := s.kube.Pod(ctx, podName(existing.ID)); err == nil && !info.Deleting && info.Phase == "Running" {
 				s.createMu.Unlock()
-				return s.reuse(ctx, existing, repo, in)
+				return s.reuse(ctx, &existing, repo, in)
 			} else if err != nil && !errors.Is(err, errNotFound) {
 				s.createMu.Unlock()
 				return createResult{}, err
@@ -410,15 +418,21 @@ func (s *service) create(ctx context.Context, repo repository, in createInput) (
 			err = s.build(ctx, p.ID, repo)
 		}
 		if err != nil {
-			clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancel()
-			if derr := s.destroy(clean, p.ID); derr != nil {
-				s.log.Warn("clearing away a dev pod that failed to start", "pod", p.ID, "error", derr)
-			}
+			s.discard(ctx, p.ID)
 			return createResult{}, fmt.Errorf("the dev pod could not be created: %w", err)
 		}
 		ready, _ := s.pod(p.ID)
-		return result(ready, false), nil
+		return result(&ready, false), nil
+	}
+}
+
+// discard clears away a dev pod that failed to start, also when the request that asked for it
+// was given up.
+func (s *service) discard(ctx context.Context, id string) {
+	clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := s.destroy(clean, id); err != nil {
+		s.log.Warn("clearing away a dev pod that failed to start", "pod", id, "error", err)
 	}
 }
 
@@ -439,7 +453,7 @@ func (s *service) named(repo, name string) (devPod, bool) {
 
 // reuse lets another run continue in a live pod. Rules given with the request replace the
 // pod's rules; protected paths are added, because a protection cannot be taken back.
-func (s *service) reuse(ctx context.Context, existing devPod, repo repository, in createInput) (createResult, error) {
+func (s *service) reuse(ctx context.Context, existing *devPod, repo *repository, in *createInput) (createResult, error) {
 	added := []string{}
 	for _, pattern := range in.Protected {
 		if !contains(existing.Protected, pattern) {
@@ -466,7 +480,7 @@ func (s *service) reuse(ctx context.Context, existing devPod, repo repository, i
 	if err != nil {
 		return createResult{}, err
 	}
-	return result(p, true), nil
+	return result(&p, true), nil
 }
 
 func contains(list []string, v string) bool {
@@ -480,14 +494,14 @@ func contains(list []string, v string) bool {
 
 // build starts the pod and prepares its workspace: clone, setup command, protected paths,
 // and only then the network policy, because the setup command may use the internet.
-func (s *service) build(ctx context.Context, id string, repo repository) error {
+func (s *service) build(ctx context.Context, id string, repo *repository) error {
 	p, _ := s.pod(id)
 	tokens := map[string]string{"work-token": randomHex(24), "helper-token": randomHex(24)}
 	labels := map[string]string{"app": "devpod-token", "devpod-id": id}
 	if err := s.kube.ApplySecret(ctx, podName(id), labels, tokens); err != nil {
 		return err
 	}
-	if err := s.kube.CreatePod(ctx, s.podSpec(p, repo)); err != nil {
+	if err := s.kube.CreatePod(ctx, s.podSpec(&p, repo)); err != nil {
 		return err
 	}
 	if err := s.waitReady(ctx, id); err != nil {
@@ -501,9 +515,9 @@ func (s *service) build(ctx context.Context, id string, repo repository) error {
 		return fmt.Errorf("cloning %s: %w", repo.URL, err)
 	}
 	if strings.TrimSpace(repo.SetupCommand) != "" {
-		out, err := s.runCommand(ctx, id, repo.SetupCommand, 600)
-		if err != nil {
-			return fmt.Errorf("running the setup command: %w", err)
+		out, runErr := s.runCommand(ctx, id, repo.SetupCommand, 600)
+		if runErr != nil {
+			return fmt.Errorf("running the setup command: %w", runErr)
 		}
 		if out.ExitCode != 0 {
 			return fmt.Errorf("the setup command %q ended with exit code %d: %s", repo.SetupCommand, out.ExitCode, tail(out.Stdout+"\n"+out.Stderr, 2000))
@@ -514,7 +528,8 @@ func (s *service) build(ctx context.Context, id string, repo repository) error {
 			return fmt.Errorf("protecting paths: %w", err)
 		}
 	}
-	if err = s.kube.ApplyNetworkPolicy(ctx, podName(id), s.networkPolicy(id, repo)); err != nil {
+	err = s.kube.ApplyNetworkPolicy(ctx, podName(id), s.networkPolicy(id, repo))
+	if err != nil {
 		return err
 	}
 	_, err = s.change(ctx, id, func(p *devPod) error {
@@ -535,7 +550,7 @@ func tail(text string, n int) string {
 // waitReady waits until both servers of the pod answer /healthz.
 func (s *service) waitReady(ctx context.Context, id string) error {
 	deadline := time.Now().Add(s.cfg.startTimeout)
-	last := "the pod has no address yet"
+	var last string
 	for {
 		info, err := s.kube.Pod(ctx, podName(id))
 		switch {
@@ -641,7 +656,7 @@ func (s *service) holdPod(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 502, err)
 		return
 	}
-	writeJSON(w, 200, s.view(p, phaseOf(p, podInfo{Phase: "Running"}, true)))
+	writeJSON(w, 200, s.view(&p, phaseOf(&p, podInfo{Phase: "Running"}, true)))
 }
 
 // releasePod ends a run's hold. Releasing a pod that is gone already is not an error.
@@ -663,7 +678,7 @@ func (s *service) releasePod(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 502, err)
 		return
 	}
-	writeJSON(w, 200, s.view(p, phaseOf(p, podInfo{Phase: "Running"}, true)))
+	writeJSON(w, 200, s.view(&p, phaseOf(&p, podInfo{Phase: "Running"}, true)))
 }
 
 // sweepLoop looks for pods to delete at the configured interval.
@@ -700,7 +715,8 @@ func (s *service) sweep(ctx context.Context) {
 		inCluster[info.Name] = true
 	}
 	known := map[string]bool{}
-	for _, p := range pods {
+	for i := range pods {
+		p := &pods[i]
 		known[podName(p.ID)] = true
 		reason := ""
 		switch {

@@ -19,11 +19,33 @@ import (
 
 var safeQueryID = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,255}$`)
 
+// What the evidence and series endpoints report about their sources.
+const (
+	sourceAvailable   = "available"
+	sourceUnavailable = "unavailable"
+	sourcePartial     = "partial"
+	executionUnknown  = "unknown"
+	pointKnown        = "known"
+	seriesComplete    = "complete"
+	seriesRefreshing  = "refreshing"
+)
+
+// The metrics, groupings and columns a series can be asked for.
+const (
+	metricCost        = "cost"
+	metricDuration    = "duration_ms"
+	groupModel        = "model"
+	groupWorkflow     = "workflow"
+	groupAgent        = "agent"
+	groupRun          = "run"
+	columnNumberValue = "number_value"
+)
+
 type openObserveResult struct {
+	Error   string           `json:"function_error"`
 	Hits    []map[string]any `json:"hits"`
 	Total   int              `json:"total"`
 	Partial bool             `json:"is_partial"`
-	Error   string           `json:"function_error"`
 }
 type openObserveHTTPError struct{ Status int }
 
@@ -31,7 +53,7 @@ func (e openObserveHTTPError) Error() string {
 	return fmt.Sprintf("OpenObserve query returned HTTP %d", e.Status)
 }
 
-func (s *service) openObserveSearch(ctx context.Context, sql string, from, to time.Time, offset, limit int, signal string) (openObserveResult, error) {
+func (s *service) openObserveSearch(ctx context.Context, sql string, from, to time.Time, offset, limit int, signal string) (result openObserveResult, err error) {
 	if s.openobserve == "" || s.openobserveUser == "" || s.openobservePassword == "" {
 		return openObserveResult{}, errors.New("OpenObserve query is not configured")
 	}
@@ -50,12 +72,12 @@ func (s *service) openObserveSearch(ctx context.Context, sql string, from, to ti
 	if err != nil {
 		return openObserveResult{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode != 200 {
 		return openObserveResult{}, openObserveHTTPError{resp.StatusCode}
 	}
-	var result openObserveResult
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&result); err != nil {
+	err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&result)
+	if err != nil {
 		return result, err
 	}
 	if result.Error != "" {
@@ -112,7 +134,7 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 	}
 	scope, scopeErr := s.executionScope(r.Context(), executionID)
 	if scopeErr != nil {
-		writeJSON(w, 200, map[string]any{"spans": []any{}, "artifacts": []any{}, "next_cursor": "", "query_complete": false, "source_status": "unavailable", "execution_status": "unknown"})
+		writeJSON(w, 200, map[string]any{"spans": []any{}, "artifacts": []any{}, "next_cursor": "", "query_complete": false, "source_status": sourceUnavailable, "execution_status": executionUnknown})
 		return
 	}
 	if scope.RunID != runID {
@@ -187,18 +209,18 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 		result, queryErr = s.openObserveSearch(r.Context(), sql, from, to, 0, 5000, "traces")
 	}
 	spans := []map[string]any{}
-	sourceStatus := "available"
+	sourceStatus := sourceAvailable
 	if queryErr != nil {
-		sourceStatus = "unavailable"
+		sourceStatus = sourceUnavailable
 	} else {
 		var scoped bool
 		spans, scoped = executionSubtree(result.Hits, executionID)
 		if !scoped {
-			sourceStatus = "unavailable"
+			sourceStatus = sourceUnavailable
 			spans = []map[string]any{}
 		}
-		if result.Partial && sourceStatus != "unavailable" {
-			sourceStatus = "partial"
+		if result.Partial && sourceStatus != sourceUnavailable {
+			sourceStatus = sourcePartial
 		}
 	}
 	artifacts := []map[string]any{}
@@ -213,8 +235,8 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 				artifacts = append(artifacts, artifact)
 			}
 		}
-	} else if sourceStatus == "available" {
-		sourceStatus = "partial"
+	} else if sourceStatus == sourceAvailable {
+		sourceStatus = sourcePartial
 	}
 	totalScoped := len(spans)
 	if offset > totalScoped {
@@ -228,13 +250,13 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 		spans = spans[offset:end]
 	}
 	next := ""
-	complete := queryErr == nil && sourceStatus != "unavailable" && !result.Partial && result.Total <= 5000 && end >= totalScoped
+	complete := queryErr == nil && sourceStatus != sourceUnavailable && !result.Partial && result.Total <= 5000 && end >= totalScoped
 	if queryErr == nil && end < totalScoped {
 		next = base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(end)))
 	}
 	executionStatus := scope.Status
 	if executionStatus == "" {
-		executionStatus = "unknown"
+		executionStatus = executionUnknown
 	}
 	writeJSON(w, 200, map[string]any{"spans": spans, "artifacts": artifacts, "next_cursor": next, "query_complete": complete, "source_status": sourceStatus, "execution_status": executionStatus})
 }
@@ -250,7 +272,7 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 		pendingSet[hour.UTC().Truncate(time.Hour)] = true
 	}
 	stream := s.projectionStreamName()
-	sql := fmt.Sprintf("SELECT _timestamp, %s AS group_key, amount_numerator, amount_denominator, currency, cost_status FROM \"%s\" WHERE kind = 'usage' ORDER BY _timestamp ASC", groupField, stream)
+	sql := fmt.Sprintf("SELECT _timestamp, %s AS group_key, amount_numerator, amount_denominator, currency, cost_status FROM %q WHERE kind = 'usage' ORDER BY _timestamp ASC", groupField, stream)
 	result, err := s.openObserveSearch(r.Context(), sql, from, to, 0, 10000, "")
 	if err != nil {
 		s.dependencyFailure(w, err)
@@ -258,7 +280,7 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 	}
 	complete := !result.Partial && result.Total <= len(result.Hits)
 	if !complete {
-		writeJSON(w, 200, map[string]any{"series": []seriesLine{}, "coverage": map[string]int{"known": 0, "missing": 0}, "query_complete": false, "projection": map[string]any{"status": "refreshing", "pending_hours": pending}})
+		writeJSON(w, 200, map[string]any{"series": []seriesLine{}, "coverage": map[string]int{"known": 0, "missing": 0}, "query_complete": false, "projection": map[string]any{"status": seriesRefreshing, "pending_hours": pending}})
 		return
 	}
 	conversions, err := s.loadConversions(r.Context())
@@ -274,8 +296,8 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 		}
 	}
 	type bucketKey struct {
-		Group string
 		Hour  time.Time
+		Group string
 	}
 	buckets := map[bucketKey]*big.Rat{}
 	totals := map[string]*big.Rat{}
@@ -296,7 +318,7 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 			missing++
 			continue
 		}
-		if stringValue(row["cost_status"]) != "available" {
+		if stringValue(row["cost_status"]) != costAvailable {
 			missing++
 			continue
 		}
@@ -316,7 +338,7 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 			}
 			amount.Mul(amount, rate)
 		}
-		key := bucketKey{group, hour}
+		key := bucketKey{Hour: hour, Group: group}
 		if buckets[key] == nil {
 			buckets[key] = new(big.Rat)
 		}
@@ -327,12 +349,12 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 		totals[group].Add(totals[group], amount)
 	}
 	if invalidTimestamp {
-		writeJSON(w, 200, map[string]any{"series": []seriesLine{}, "coverage": map[string]int{"known": 0, "missing": 0}, "query_complete": false, "projection": map[string]any{"status": "refreshing", "pending_hours": pending}})
+		writeJSON(w, 200, map[string]any{"series": []seriesLine{}, "coverage": map[string]int{"known": 0, "missing": 0}, "query_complete": false, "projection": map[string]any{"status": seriesRefreshing, "pending_hours": pending}})
 		return
 	}
 	byGroup := map[string][]seriesPoint{}
 	for key, total := range buckets {
-		byGroup[key.Group] = append(byGroup[key.Group], seriesPoint{Time: key.Hour, Value: json.Number(decimalString(total)), Status: "known", Approximate: true})
+		byGroup[key.Group] = append(byGroup[key.Group], seriesPoint{Time: key.Hour, Value: json.Number(decimalString(total)), Status: pointKnown, Approximate: true})
 	}
 	lines := make([]seriesLine, 0, len(byGroup))
 	for group, points := range byGroup {
@@ -345,20 +367,11 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 	for _, line := range lines {
 		known += len(line.Points)
 	}
-	status := "complete"
+	status := seriesComplete
 	if len(pending) > 0 {
-		status = "refreshing"
+		status = seriesRefreshing
 	}
 	writeJSON(w, 200, map[string]any{"series": lines, "coverage": map[string]int{"known": known, "missing": missing}, "query_complete": true, "projection": map[string]any{"status": status, "pending_hours": pending}})
-}
-
-func artifactBelongsToRun(id, runID string) bool {
-	for _, prefix := range []string{"runs/" + runID + "/", "teams/" + runID + "/", "user-sessions/" + runID + "/"} {
-		if strings.HasPrefix(id, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func executionSubtree(rows []map[string]any, executionID string) ([]map[string]any, bool) {
@@ -440,8 +453,8 @@ type seriesPoint struct {
 }
 type seriesLine struct {
 	Key           string            `json:"key"`
-	Points        []seriesPoint     `json:"points"`
 	ExactTotal    *exactSeriesValue `json:"exact_total,omitempty"`
+	Points        []seriesPoint     `json:"points"`
 	ExactComplete bool              `json:"exact_complete,omitempty"`
 }
 type exactSeriesValue struct {
@@ -453,37 +466,37 @@ type exactSeriesValue struct {
 func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	metric, group, currency := q.Get("metric"), q.Get("group_by"), q.Get("currency")
-	allowedMetric := map[string]string{"cost": "converted_amount", "input_tokens": "input_tokens", "output_tokens": "output_tokens", "cached_input_tokens": "cached_input_tokens", "uncached_input_tokens": "uncached_input_tokens", "reasoning_tokens": "reasoning_tokens", "duration_ms": "duration_ms"}
+	allowedMetric := map[string]string{metricCost: "converted_amount", "input_tokens": "input_tokens", "output_tokens": "output_tokens", "cached_input_tokens": "cached_input_tokens", "uncached_input_tokens": "uncached_input_tokens", "reasoning_tokens": "reasoning_tokens", metricDuration: metricDuration}
 	field, ok := allowedMetric[metric]
 	if !ok {
 		if strings.TrimSpace(metric) == "" || len(metric) > 255 {
 			s.fail(w, 422, errors.New("metric is required"))
 			return
 		}
-		field = "number_value"
+		field = columnNumberValue
 	}
-	groups := map[string]string{"model": "model", "workflow": "workflow", "agent": "agent", "run": "run_id"}
+	groups := map[string]string{groupModel: "model", groupWorkflow: "workflow", groupAgent: "agent", groupRun: "run_id"}
 	groupField, ok := groups[group]
 	if !ok {
 		s.fail(w, 422, errors.New("group_by must be model, workflow, agent, or run"))
 		return
 	}
-	if metric == "duration_ms" && (group == "model" || group == "agent") {
+	if metric == metricDuration && (group == groupModel || group == groupAgent) {
 		s.fail(w, 422, errors.New("execution duration has no exact agent or model attribution"))
 		return
 	}
-	if field == "number_value" && (group == "model" || group == "workflow") {
+	if field == columnNumberValue && (group == groupModel || group == groupWorkflow) {
 		s.fail(w, 422, errors.New("judge metrics have no exact target model or workflow attribution"))
 		return
 	}
-	if field == "number_value" && group == "run" {
+	if field == columnNumberValue && group == groupRun {
 		groupField = "target_run_id"
 	}
-	if group == "model" && (metric == "duration_ms" || field == "number_value") {
+	if group == groupModel && (metric == metricDuration || field == columnNumberValue) {
 		s.fail(w, 422, errors.New("this whole-execution metric has no exact model attribution"))
 		return
 	}
-	if metric == "cost" && currency != "EUR" && currency != "USD" {
+	if metric == metricCost && currency != currencyEUR && currency != currencyUSD {
 		s.fail(w, 422, errors.New("currency must be EUR or USD"))
 		return
 	}
@@ -501,24 +514,24 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 422, errors.New("series range must be positive and at most 366 days"))
 		return
 	}
-	if metric == "cost" {
+	if metric == metricCost {
 		s.getCostSeries(w, r, groupField, from, to, currency)
 		return
 	}
 	baseWhere := "kind = 'usage'"
-	if metric == "duration_ms" {
+	if metric == metricDuration {
 		baseWhere = "kind = 'execution'"
 	}
-	if field == "number_value" {
+	if field == columnNumberValue {
 		baseWhere = "kind = 'judge' AND metric_name = " + sqlLiteral(metric)
 	}
 	where := field + " IS NOT NULL AND status IN ('reported','derived','estimated') AND " + baseWhere
-	if metric == "cost" {
+	if metric == metricCost {
 		baseWhere = "kind = 'usage' AND display_currency = " + sqlLiteral(currency)
 		where = "converted_amount IS NOT NULL AND cost_status = 'available' AND " + baseWhere
 	}
 	stream := s.projectionStreamName()
-	sql := fmt.Sprintf("SELECT histogram(_timestamp, '1 hour') AS bucket, %s AS group_key, SUM(CAST(%s AS DOUBLE)) AS value, 'known' AS status FROM \"%s\" WHERE %s GROUP BY bucket, group_key ORDER BY bucket ASC", groupField, field, stream, where)
+	sql := fmt.Sprintf("SELECT histogram(_timestamp, '1 hour') AS bucket, %s AS group_key, SUM(CAST(%s AS DOUBLE)) AS value, 'known' AS status FROM %q WHERE %s GROUP BY bucket, group_key ORDER BY bucket ASC", groupField, field, stream, where)
 	result, queryErr := s.openObserveSearch(r.Context(), sql, from, to, 0, 10000, "")
 	if queryErr != nil {
 		s.dependencyFailure(w, queryErr)
@@ -538,7 +551,7 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		value := row["value"]
-		lines[key] = append(lines[key], seriesPoint{Time: timestamp, Value: value, Status: "known", Approximate: metric == "cost"})
+		lines[key] = append(lines[key], seriesPoint{Time: timestamp, Value: value, Status: pointKnown, Approximate: metric == metricCost})
 		known++
 	}
 	out := make([]seriesLine, 0, len(lines))
@@ -580,8 +593,8 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 		known = 0
 	}
 	exactComplete := true
-	if metric == "cost" && !queryIncomplete {
-		exactSQL := fmt.Sprintf("SELECT _timestamp, %s AS group_key, converted_numerator, converted_denominator FROM \"%s\" WHERE %s ORDER BY _timestamp ASC", groupField, stream, where)
+	if metric == metricCost && !queryIncomplete {
+		exactSQL := fmt.Sprintf("SELECT _timestamp, %s AS group_key, converted_numerator, converted_denominator FROM %q WHERE %s ORDER BY _timestamp ASC", groupField, stream, where)
 		exactResult, e := s.openObserveSearch(r.Context(), exactSQL, from, to, 0, 10000, "")
 		if e != nil {
 			s.dependencyFailure(w, e)
@@ -618,7 +631,7 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	missing := 0
-	missingSQL := fmt.Sprintf("SELECT histogram(_timestamp, '1 hour') AS bucket, COUNT(*) AS missing_count FROM \"%s\" WHERE (%s) AND (%s IS NULL OR status IN ('missing','invalid')) GROUP BY bucket", stream, baseWhere, field)
+	missingSQL := fmt.Sprintf("SELECT histogram(_timestamp, '1 hour') AS bucket, COUNT(*) AS missing_count FROM %q WHERE (%s) AND (%s IS NULL OR status IN ('missing','invalid')) GROUP BY bucket", stream, baseWhere, field)
 	hourLimit := int(to.Sub(from)/time.Hour) + 2
 	if hourLimit > 10000 {
 		hourLimit = 10000
@@ -641,9 +654,9 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	status := "complete"
+	status := seriesComplete
 	if len(pending) > 0 || queryIncomplete || !missingComplete || !exactComplete {
-		status = "refreshing"
+		status = seriesRefreshing
 	}
 	writeJSON(w, 200, map[string]any{"series": out, "coverage": map[string]int{"known": known, "missing": missing}, "query_complete": !queryIncomplete && missingComplete && exactComplete, "projection": map[string]any{"status": status, "pending_hours": pending}})
 }
@@ -684,7 +697,7 @@ func (s *service) pendingProjectionHours(ctx context.Context, from, to time.Time
 			return nil, e
 		}
 		var op mutationOperation
-		if json.Unmarshal(o.Data, &op) != nil || op.Phase == "complete" || op.Phase == "cancelled" {
+		if json.Unmarshal(o.Data, &op) != nil || op.Phase == opComplete || op.Phase == opCancelled {
 			continue
 		}
 		if !op.AffectedHour.Before(from.Truncate(time.Hour)) && !op.AffectedHour.After(to.Truncate(time.Hour)) {

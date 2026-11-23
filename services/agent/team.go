@@ -19,22 +19,22 @@ import (
 
 // TeamTurnRequest is the input of the TeamTurn activity: one turn of one member of a team.
 type TeamTurnRequest struct {
-	TraceID string `json:"trace_id"`
-	StepID  string `json:"step_id"`
-	Team    string `json:"team"`
-	Member  string `json:"member"`
-	Agent   string `json:"agent"`
+	TraceID string            `json:"trace_id"`
+	StepID  string            `json:"step_id"`
+	Team    string            `json:"team"`
+	Member  string            `json:"member"`
+	Agent   string            `json:"agent"`
+	Skills  map[string]string `json:"skills,omitempty"`
 	// DevPod is the run's dev pod; empty when the run has none.
-	DevPod                    string            `json:"dev_pod,omitempty"`
-	Skills                    map[string]string `json:"skills,omitempty"`
-	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+	DevPod                    string `json:"dev_pod,omitempty"`
+	SkillScriptTimeoutSeconds int    `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // TeamTurnResult reports how many model calls the turn made; 0 when nothing was unread.
 type TeamTurnResult struct {
-	ModelCalls int `json:"model_calls"`
 	// Blocked is the reason the member gave with report_blocked in this turn; else empty.
-	Blocked string `json:"blocked,omitempty"`
+	Blocked    string `json:"blocked,omitempty"`
+	ModelCalls int    `json:"model_calls"`
 }
 
 // teamFile is <team>/team.json, written by the orchestrator.
@@ -53,8 +53,8 @@ type teamFile struct {
 // one-way channel; it is empty when both may send.
 type teamChannel struct {
 	ID      string   `json:"id"`
-	Members []string `json:"members"`
 	From    string   `json:"from,omitempty"`
+	Members []string `json:"members"`
 }
 
 // sends reports whether the member may send on the channel.
@@ -69,9 +69,9 @@ type teamQueue struct {
 }
 
 type teamMessage struct {
-	Seq  int    `json:"seq"`
 	Text string `json:"text"`
 	Sent string `json:"sent"`
+	Seq  int    `json:"seq"`
 }
 
 // teamMemberLog is <team>/members/<name>.json: the member's own history and how far it
@@ -226,8 +226,8 @@ func teamNote(team string, t teamFile, member string, channels []teamChannel) st
 type unreadTeamMessage struct {
 	channel string
 	from    string
-	order   int
 	teamMessage
+	order int
 }
 
 // sentBefore orders messages by their `sent` time; unparsable times compare as text.
@@ -254,7 +254,10 @@ func (s *Service) teamGetJSON(ctx context.Context, id string, v any) error {
 // TeamTurn runs one turn of one team member: it appends the member's unread channel
 // messages to the member's stored history, runs the model and tool loop, and stores the
 // grown history together with the advanced read markers.
-func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result TeamTurnResult, retErr error) {
+func (s *Service) TeamTurn(ctx context.Context, req *TeamTurnRequest) (result TeamTurnResult, retErr error) {
+	if req == nil {
+		return result, invalidTeamTurn("team turn request is missing")
+	}
 	if !segmentPattern.MatchString(req.TraceID) {
 		return result, invalidTeamTurn("trace_id is missing or invalid")
 	}
@@ -281,7 +284,7 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 		trace.WithAttributes(attribute.String("factory.run_id", req.TraceID), attribute.String("factory.step", req.StepID),
 			attribute.String("factory.agent", ref), attribute.String("factory.team", req.Team), attribute.String("factory.team_member", req.Member)))
 	defer span.End()
-	ctx = withCorrelation(ctx, StepRequest{TraceID: req.TraceID, StepID: req.StepID, Agent: ref, OutputArtifact: memberID}, ref, attemptOf(ctx))
+	ctx = withCorrelation(ctx, &StepRequest{TraceID: req.TraceID, StepID: req.StepID, Agent: ref, OutputArtifact: memberID}, ref, attemptOf(ctx))
 	log := s.Logger.With("run_id", req.TraceID, "step", req.StepID, "agent", ref, "team", req.Team, "member", req.Member)
 	started := time.Now()
 	delivered := 0
@@ -292,15 +295,15 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 			log.Error("team turn failed", "error", retErr, "delivered", delivered, "model_calls", result.ModelCalls)
 			return
 		}
-		span.SetStatus(codes.Ok, "completed")
+		span.SetStatus(codes.Ok, statusCompleted)
 		log.Info("team turn completed", "delivered", delivered, "model_calls", result.ModelCalls, "processing_time_ms", time.Since(started).Milliseconds())
 	}()
 
 	defer lockChat(memberID)()
 
 	var team teamFile
-	if err := s.teamGetJSON(ctx, req.Team+"/team.json", &team); err != nil {
-		return result, fmt.Errorf("reading team %q: %w", req.Team, err)
+	if teamErr := s.teamGetJSON(ctx, req.Team+"/team.json", &team); teamErr != nil {
+		return result, fmt.Errorf("reading team %q: %w", req.Team, teamErr)
 	}
 	known := false
 	for _, m := range team.Members {
@@ -313,10 +316,10 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 
 	history := teamMemberLog{Member: req.Member, Agent: ref}
 	var missing notFoundError
-	switch err := s.teamGetJSON(ctx, memberID, &history); {
-	case errors.As(err, &missing):
-	case err != nil:
-		return result, fmt.Errorf("reading member history %q: %w", memberID, err)
+	switch historyErr := s.teamGetJSON(ctx, memberID, &history); {
+	case errors.As(historyErr, &missing):
+	case historyErr != nil:
+		return result, fmt.Errorf("reading member history %q: %w", memberID, historyErr)
 	case history.Agent != ref:
 		return result, invalidTeamTurn("member %q of team %q already belongs to agent %s", req.Member, req.Team, history.Agent)
 	}
@@ -330,10 +333,10 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 	for i, c := range channels {
 		other, _ := c.otherSide(req.Member)
 		var queue teamQueue
-		if err := s.teamGetJSON(ctx, req.Team+"/channels/"+c.ID+"/"+other+".json", &queue); errors.As(err, &missing) {
+		if queueErr := s.teamGetJSON(ctx, req.Team+"/channels/"+c.ID+"/"+other+".json", &queue); errors.As(queueErr, &missing) {
 			continue
-		} else if err != nil {
-			return result, fmt.Errorf("reading channel %q: %w", c.ID, err)
+		} else if queueErr != nil {
+			return result, fmt.Errorf("reading channel %q: %w", c.ID, queueErr)
 		}
 		for _, m := range queue.Messages {
 			if m.Seq > history.Read[c.ID] {
@@ -366,13 +369,13 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 		if prompt, _, err = s.compilePrompt(ctx, prompt); err != nil {
 			return result, err
 		}
-		skillNote, _, err := s.loadSkillNote(ctx, req.Skills)
-		if err != nil {
-			return result, err
+		skillNote, _, skillErr := s.loadSkillNote(ctx, req.Skills)
+		if skillErr != nil {
+			return result, skillErr
 		}
 		prompt += skillNote
-		if err := turn.add(map[string]string{"role": "system", "content": prompt + teamNote(req.Team, team, req.Member, channels)}); err != nil {
-			return result, err
+		if addErr := turn.add(map[string]string{"role": roleSystem, "content": prompt + teamNote(req.Team, team, req.Member, channels)}); addErr != nil {
+			return result, addErr
 		}
 	}
 	for i, m := range unread {
@@ -380,8 +383,8 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 		if i == 0 && firstTurn && strings.TrimSpace(req.DevPod) != "" {
 			content += devPodNote(def.Commands)
 		}
-		if err := turn.add(map[string]string{"role": "user", "content": content}); err != nil {
-			return result, err
+		if addErr := turn.add(map[string]string{"role": roleUser, "content": content}); addErr != nil {
+			return result, addErr
 		}
 		history.Read[m.channel] = max(history.Read[m.channel], m.Seq)
 	}
@@ -395,14 +398,14 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 			var m struct {
 				Role string `json:"role"`
 			}
-			if json.Unmarshal(raw, &m) == nil && m.Role != "tool" {
+			if json.Unmarshal(raw, &m) == nil && m.Role != roleTool {
 				result.ModelCalls++
 			}
 		}
-		if err := s.saveTeamMember(ctx, memberID, history, Meta{Creator: "agent:" + ref, TraceID: req.TraceID}); err != nil {
-			log.Error("persisting member history failed", "error", err)
+		if saveErr := s.saveTeamMember(ctx, memberID, &history, Meta{Creator: "agent:" + ref, TraceID: req.TraceID}); saveErr != nil {
+			log.Error("persisting member history failed", "error", saveErr)
 			if retErr == nil {
-				retErr = err
+				retErr = saveErr
 			}
 		}
 	}()
@@ -410,13 +413,13 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 	// The markers are stored before the model runs, so the team tools report the delivered
 	// messages as read during the turn.
 	history.Messages = turn.Messages
-	if err := s.saveTeamMember(ctx, memberID, history, Meta{Creator: "agent:" + ref, TraceID: req.TraceID}); err != nil {
-		return result, err
+	if saveErr := s.saveTeamMember(ctx, memberID, &history, Meta{Creator: "agent:" + ref, TraceID: req.TraceID}); saveErr != nil {
+		return result, saveErr
 	}
 
 	turnCtx := withTeamTurnTools(withDevPod(ctx, req.DevPod, ref, req.TraceID), req.Team, req.Member)
 	turnCtx = withSkills(turnCtx, req.Skills, req.SkillScriptTimeoutSeconds)
-	reply, err := s.chatTurn(turnCtx, ref, def, &turn, log)
+	reply, err := s.chatTurn(turnCtx, ref, &def, &turn, log)
 	if reason, ok := blockedReason(turnCtx); ok {
 		result.Blocked = reason
 	}
@@ -444,14 +447,14 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 				}
 			}
 		}
-		if err := s.sendFinalAnswer(ctx, req, def, answerable, turn.Messages[before:], reply, log); err != nil {
+		if err := s.sendFinalAnswer(ctx, req, &def, answerable, turn.Messages[before:], reply, log); err != nil {
 			return result, err
 		}
 	}
 	return result, nil
 }
 
-func (s *Service) saveTeamMember(ctx context.Context, memberID string, history teamMemberLog, meta Meta) error {
+func (s *Service) saveTeamMember(ctx context.Context, memberID string, history *teamMemberLog, meta Meta) error {
 	data, err := json.MarshalIndent(history, "", "  ")
 	if err != nil {
 		return err
@@ -471,8 +474,8 @@ const teamSendTool = "send_message"
 type turnMessage struct {
 	Role       string     `json:"role"`
 	Content    *string    `json:"content"`
-	ToolCalls  []toolCall `json:"tool_calls"`
 	ToolCallID string     `json:"tool_call_id"`
+	ToolCalls  []toolCall `json:"tool_calls"`
 }
 
 func isSendTool(alias string) bool {
@@ -483,7 +486,7 @@ func isSendTool(alias string) bool {
 func lastAssistantText(messages []json.RawMessage) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		var m turnMessage
-		if json.Unmarshal(messages[i], &m) == nil && m.Role == "assistant" && m.Content != nil && strings.TrimSpace(*m.Content) != "" {
+		if json.Unmarshal(messages[i], &m) == nil && m.Role == roleAssistant && m.Content != nil && strings.TrimSpace(*m.Content) != "" {
 			return *m.Content
 		}
 	}
@@ -503,7 +506,7 @@ func sentMessage(messages []json.RawMessage) bool {
 				sends[tc.ID] = true
 			}
 		}
-		if m.Role == "tool" && sends[m.ToolCallID] && (m.Content == nil || !strings.HasPrefix(*m.Content, "Error:")) {
+		if m.Role == roleTool && sends[m.ToolCallID] && (m.Content == nil || !strings.HasPrefix(*m.Content, "Error:")) {
 			return true
 		}
 	}
@@ -513,7 +516,7 @@ func sentMessage(messages []json.RawMessage) bool {
 // sendFinalAnswer sends a member's final answer as its reply when the member did not send
 // a message itself: on the channel of the most recently delivered message, through the
 // send_message tool of the gateway, as a tool call of the model would.
-func (s *Service) sendFinalAnswer(ctx context.Context, req TeamTurnRequest, def Definition, delivered []unreadTeamMessage, turn []json.RawMessage, answer string, log *slog.Logger) error {
+func (s *Service) sendFinalAnswer(ctx context.Context, req *TeamTurnRequest, def *Definition, delivered []unreadTeamMessage, turn []json.RawMessage, answer string, log *slog.Logger) error {
 	if strings.TrimSpace(answer) == "" || sentMessage(turn) {
 		return nil
 	}
@@ -536,10 +539,10 @@ func (s *Service) sendFinalAnswer(ctx context.Context, req TeamTurnRequest, def 
 	if toolRef == "" {
 		return fmt.Errorf("member %q ended its turn without sending a message, and its final answer cannot be sent as its reply: agent %s has no tool %s", req.Member, req.Agent, teamSendTool)
 	}
-	eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_call", Started: time.Now().UTC()}, "agent.tool_call",
+	eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: kindToolCall, Started: time.Now().UTC()}, "agent.tool_call",
 		attribute.String("gen_ai.tool.name", toolRef), attribute.Bool("factory.team_auto_reply", true))
 	fail := func(err error) error {
-		finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
+		finishEventSpan(&event, eventTrace, statusFailed, categorizedError{categoryMCPGateway, err.Error()})
 		return err
 	}
 	_, routes, err := s.discoverTools(eventCtx, []string{toolRef}, log)
@@ -563,7 +566,7 @@ func (s *Service) sendFinalAnswer(ctx context.Context, req TeamTurnRequest, def 
 			return fail(fmt.Errorf("sending the final answer of member %q as its reply: %s", req.Member, text))
 		}
 	}
-	finishEventSpan(event, eventTrace, "completed", nil)
+	finishEventSpan(&event, eventTrace, statusCompleted, nil)
 	log.Info("final answer sent as the member's reply", "channel", channel)
 	return nil
 }
@@ -579,8 +582,8 @@ const teamRefusedSendsLimit = 2
 
 // teamTurnTools is the harness's control over the tool calls of one team turn.
 type teamTurnTools struct {
-	team, member string
 	sent         map[string]bool // channels the member sent a message on in this turn
+	team, member string
 	refused      int
 }
 
@@ -601,7 +604,7 @@ func teamTurnStopped(ctx context.Context) error {
 // runTurnTool is runTool for a turn. In a team turn the harness, which knows who is
 // running, sets the identity arguments of the team and session file tools whatever the
 // model passed, and forwards at most one send_message per channel.
-func (s *Service) runTurnTool(ctx context.Context, routes map[string]toolRoute, tc toolCall) (string, bool, error) {
+func (s *Service) runTurnTool(ctx context.Context, routes map[string]toolRoute, tc toolCall) (text string, failed bool, err error) {
 	t, ok := ctx.Value(teamTurnToolsKey{}).(*teamTurnTools)
 	route, known := routes[tc.Function.Name]
 	if !ok || !known {
@@ -618,7 +621,7 @@ func (s *Service) runTurnTool(ctx context.Context, routes map[string]toolRoute, 
 	}
 	args := map[string]any{}
 	if strings.TrimSpace(tc.Function.Arguments) != "" {
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
+		if parseErr := json.Unmarshal([]byte(tc.Function.Arguments), &args); parseErr != nil || args == nil {
 			return s.runTool(ctx, routes, tc) // reports the invalid arguments to the model
 		}
 	}
@@ -639,7 +642,7 @@ func (s *Service) runTurnTool(ctx context.Context, routes map[string]toolRoute, 
 	}
 	// The stored tool call stays as the model wrote it; only the forwarded copy changes.
 	tc.Function.Arguments = string(data)
-	text, failed, err := s.runTool(ctx, routes, tc)
+	text, failed, err = s.runTool(ctx, routes, tc)
 	if route.name == teamSendTool && err == nil && !failed {
 		t.sent[channel] = true
 	}

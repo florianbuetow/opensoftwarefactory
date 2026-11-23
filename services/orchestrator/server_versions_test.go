@@ -14,10 +14,21 @@ import (
 	"opensoftwarefactory/orchestrator/pipeline"
 )
 
+const (
+	// firstLeaf is the pinned reference to the first version of the workflow leaf.
+	firstLeaf = "leaf@v1"
+	// sheetMember is the name the rename tests give the workflow leaf, which is also its name
+	// as a team member.
+	sheetMember = "sheet"
+)
+
 // send calls the API as the given person and decodes a JSON answer into out when it is set.
 func send(t *testing.T, method, url, creator, body string, out any) int {
 	t.Helper()
-	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if creator != "" {
 		req.Header.Set("X-Creator", creator)
 	}
@@ -25,7 +36,7 @@ func send(t *testing.T, method, url, creator, body string, out any) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	if out != nil {
 		if err = json.NewDecoder(resp.Body).Decode(out); err != nil {
 			t.Fatalf("%s %s: status %d, body is not JSON: %v", method, url, resp.StatusCode, err)
@@ -50,10 +61,10 @@ func TestSaveStoresTheNextVersionAndKeepsEarlierOnes(t *testing.T) {
 	var v1, v2, got workflowView
 	// The client's name, version, time, and creator are ignored.
 	first := `{"name":"other","version":7,"created":"2001-01-01T00:00:00Z","created_by":"mallory","versions":[9],"description":"one","steps":[{"id":"a","service":"svc"}]}`
-	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/flow/versions", "flo", first, &v1); code != http.StatusCreated {
+	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/flow/versions", testUser, first, &v1); code != http.StatusCreated {
 		t.Fatalf("status %d", code)
 	}
-	if v1.Name != "flow" || v1.Version != 1 || v1.CreatedBy != "flo" || len(v1.Versions) != 1 || v1.Versions[0] != 1 {
+	if v1.Name != "flow" || v1.Version != 1 || v1.CreatedBy != testUser || len(v1.Versions) != 1 || v1.Versions[0] != 1 {
 		t.Fatalf("v1 %+v", v1)
 	}
 	if created, err := time.Parse(time.RFC3339, v1.Created); err != nil || time.Since(created) > time.Minute {
@@ -70,7 +81,7 @@ func TestSaveStoresTheNextVersionAndKeepsEarlierOnes(t *testing.T) {
 	if code := send(t, http.MethodGet, srv.URL+"/api/workflows/flow/versions/1", "", "", &got); code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
-	if got.Version != 1 || got.Description != "one" || len(got.Steps) != 1 || got.CreatedBy != "flo" || got.Created != v1.Created || len(got.Versions) != 2 {
+	if got.Version != 1 || got.Description != "one" || len(got.Steps) != 1 || got.CreatedBy != testUser || got.Created != v1.Created || len(got.Versions) != 2 {
 		t.Fatalf("v1 after v2 %+v", got)
 	}
 	for _, missing := range []string{"/api/workflows/flow/versions/3", "/api/workflows/flow/versions/0", "/api/workflows/flow/versions/x", "/api/workflows/none/versions/1"} {
@@ -85,7 +96,7 @@ func TestSaveStoresTheNextVersionAndKeepsEarlierOnes(t *testing.T) {
 	if code := send(t, http.MethodGet, srv.URL+"/api/workflows", "", "", &list); code != http.StatusOK || len(list.Workflows) != 2 {
 		t.Fatalf("list %d %+v", code, list)
 	}
-	if w := list.Workflows[0]; w.Name != "sample" || w.Version != 1 || len(w.Versions) != 1 {
+	if w := list.Workflows[0]; w.Name != sampleWorkflow || w.Version != 1 || len(w.Versions) != 1 {
 		t.Errorf("sample %+v", w)
 	}
 	if w := list.Workflows[1]; w.Name != "flow" || w.Version != 2 || w.Description != "two" || len(w.Versions) != 2 || w.Versions[1] != 2 {
@@ -104,11 +115,14 @@ func TestSaveStoresTheNextVersionAndKeepsEarlierOnes(t *testing.T) {
 func TestSavePinsBareReferencesAndRefusesUnknownVersions(t *testing.T) {
 	srv, _, _, _ := newTestServer(t)
 	save := func(name, body string, out any) int {
-		return send(t, http.MethodPost, srv.URL+"/api/workflows/"+name+"/versions", "flo", body, out)
+		return send(t, http.MethodPost, srv.URL+"/api/workflows/"+name+"/versions", testUser, body, out)
 	}
 	leaf := `{"steps":[{"id":"a","service":"svc"}]}`
-	if save("leaf", leaf, nil) != http.StatusCreated || save("leaf", leaf, nil) != http.StatusCreated {
-		t.Fatal("saving leaf failed")
+	// Saving twice stores leaf@v1 and leaf@v2.
+	for version := 1; version <= 2; version++ {
+		if save("leaf", leaf, nil) != http.StatusCreated {
+			t.Fatalf("saving leaf@v%d failed", version)
+		}
 	}
 	var outer workflowView
 	body := `{"steps":[{"id":"bare","service":"workflow","workflow":"leaf"},{"id":"old","service":"workflow","workflow":"leaf@v1"},` +
@@ -116,7 +130,7 @@ func TestSavePinsBareReferencesAndRefusesUnknownVersions(t *testing.T) {
 	if code := save("outer", body, &outer); code != http.StatusCreated {
 		t.Fatalf("status %d", code)
 	}
-	if outer.Steps[0].Workflow != "leaf@v2" || outer.Steps[1].Workflow != "leaf@v1" || outer.Steps[2].Workflows[0] != "sample@v1" {
+	if outer.Steps[0].Workflow != "leaf@v2" || outer.Steps[1].Workflow != firstLeaf || outer.Steps[2].Workflows[0] != "sample@v1" {
 		t.Fatalf("references %+v", outer.Steps)
 	}
 	var refused map[string]string
@@ -149,7 +163,7 @@ func TestRunStartsTheRequestedVersion(t *testing.T) {
 	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/sample/runs?version=1", "", "x", &out); code != http.StatusAccepted {
 		t.Fatalf("status %d", code)
 	}
-	if in := runner.started[0]; out.WorkflowVersion != 1 || out.Workflow != "sample" || in.Definition.Version != 1 || len(in.Definition.Steps) != 2 {
+	if in := runner.started[0]; out.WorkflowVersion != 1 || out.Workflow != sampleWorkflow || in.Definition.Version != 1 || len(in.Definition.Steps) != 2 {
 		t.Fatalf("older version: %+v %+v", out, in.Definition)
 	}
 	var record RunRecord
@@ -212,7 +226,7 @@ func TestLoadTreatsUnversionedWorkflowsAsV1AndPinsReferences(t *testing.T) {
 	}
 	top, _ := c.find("top", 0)
 	mid, _ := c.find("mid", 1)
-	if top.Steps[1].Workflow != "mid@v1" || mid.Steps[0].Workflows[0] != "leaf@v1" {
+	if top.Steps[1].Workflow != "mid@v1" || mid.Steps[0].Workflows[0] != firstLeaf {
 		t.Fatalf("references %q %q", top.Steps[1].Workflow, mid.Steps[0].Workflows[0])
 	}
 	// A bare reference names the newest version at the time of loading.
@@ -243,7 +257,7 @@ func TestRenameRenamesEveryVersionAndTheReferences(t *testing.T) {
 	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/leaf/rename", "", `{"name":"sheet"}`, &renamed); code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
-	if renamed.Name != "sheet" || renamed.Version != 2 || len(renamed.Versions) != 2 {
+	if renamed.Name != sheetMember || renamed.Version != 2 || len(renamed.Versions) != 2 {
 		t.Fatalf("renamed %+v", renamed)
 	}
 	c, err := storedConfig(workflows)
@@ -257,7 +271,7 @@ func TestRenameRenamesEveryVersionAndTheReferences(t *testing.T) {
 		t.Errorf("v1 %+v", v1)
 	}
 	team := mustFind(t, c, "mid").Steps[0]
-	if team.Workflows[0] != "sheet@v1" || team.Channels[1][1] != "sheet" || team.Channels[1][2] != pipeline.OneWay || team.Channels[0][1] != "coder" {
+	if team.Workflows[0] != "sheet@v1" || team.Channels[1][1] != sheetMember || team.Channels[1][2] != pipeline.OneWay || team.Channels[0][1] != "coder" {
 		t.Errorf("team %+v", team)
 	}
 	if _, moved := team.MemberPositions["sheet"]; !moved || len(team.MemberPositions) != 1 {
@@ -297,7 +311,10 @@ func TestRenameMovesAWorkflowBetweenGroups(t *testing.T) {
 	if moved.Name != "lib/sheets/sheet" || len(moved.Versions) != 2 {
 		t.Fatalf("moved %+v", moved)
 	}
-	blobs := workflows.blobs.(*memStore)
+	blobs, ok := workflows.blobs.(*memStore)
+	if !ok {
+		t.Fatalf("the workflow store keeps its objects in a %T, not in a memStore", workflows.blobs)
+	}
 	for _, id := range []string{"workflows/lib/sheets/sheet/v1/workflow.json", "workflows/lib/sheets/sheet/v2/workflow.json"} {
 		if _, ok := blobs.data[id]; !ok {
 			t.Errorf("%s is not stored", id)
@@ -313,7 +330,7 @@ func TestRenameMovesAWorkflowBetweenGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	team := mustFind(t, c, "mid").Steps[0]
-	if team.Workflows[0] != "lib/sheets/sheet@v1" || team.Channels[1][1] != "sheet" {
+	if team.Workflows[0] != "lib/sheets/sheet@v1" || team.Channels[1][1] != sheetMember {
 		t.Errorf("team %+v", team)
 	}
 	if _, ok := team.MemberPositions["sheet"]; !ok || len(team.MemberPositions) != 1 {
@@ -377,7 +394,7 @@ func TestDeleteRemovesEveryVersionUnlessTheWorkflowIsUsed(t *testing.T) {
 		t.Error("a version of leaf is left")
 	}
 	// The older version of mid still names the deleted workflow and still loads.
-	if old, ok := c.find("mid", 1); !ok || old.Steps[0].Workflows[0] != "leaf@v1" {
+	if old, ok := c.find("mid", 1); !ok || old.Steps[0].Workflows[0] != firstLeaf {
 		t.Errorf("mid v1 %+v", old)
 	}
 }
@@ -400,26 +417,26 @@ func TestStartRunWritesMetadata(t *testing.T) {
 	var out struct {
 		TraceID string `json:"trace_id"`
 	}
-	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/top/runs", "flo", "task", &out); code != http.StatusAccepted {
+	if code := send(t, http.MethodPost, srv.URL+"/api/workflows/top/runs", testUser, "task", &out); code != http.StatusAccepted {
 		t.Fatalf("status %d", code)
 	}
 	id := "runs/" + out.TraceID + "/metadata.json"
 	var meta struct {
-		SchemaVersion int               `json:"schema_version"`
-		RunID         string            `json:"run_id"`
-		Workflow      WorkflowVersion   `json:"workflow"`
-		Workflows     []WorkflowVersion `json:"workflows"`
-		Started       string            `json:"started"`
-		StartedBy     string            `json:"started_by"`
-		InputArtifact string            `json:"input_artifact"`
+		RunID         string          `json:"run_id"`
+		Workflow      WorkflowVersion `json:"workflow"`
+		Started       string          `json:"started"`
+		StartedBy     string          `json:"started_by"`
+		InputArtifact string          `json:"input_artifact"`
 		Agents        map[string]map[string]any
-		Finished      *string `json:"finished"`
-		Status        *string `json:"status"`
+		Finished      *string           `json:"finished"`
+		Status        *string           `json:"status"`
+		Workflows     []WorkflowVersion `json:"workflows"`
+		SchemaVersion int               `json:"schema_version"`
 	}
 	if err := json.Unmarshal(store.data[id], &meta); err != nil {
 		t.Fatalf("%v: %s", err, store.data[id])
 	}
-	if meta.SchemaVersion != 1 || meta.RunID != out.TraceID || meta.Workflow != (WorkflowVersion{"top", 1}) || meta.StartedBy != "flo" || meta.InputArtifact != "runs/"+out.TraceID+"/input" {
+	if meta.SchemaVersion != 1 || meta.RunID != out.TraceID || meta.Workflow != (WorkflowVersion{"top", 1}) || meta.StartedBy != testUser || meta.InputArtifact != "runs/"+out.TraceID+"/input" {
 		t.Fatalf("metadata %s", store.data[id])
 	}
 	if _, err := time.Parse(time.RFC3339, meta.Started); err != nil || meta.Finished != nil || meta.Status != nil {
@@ -445,7 +462,7 @@ func TestStartRunWritesMetadata(t *testing.T) {
 	if string(unread) != `{"error":"the agent registry does not know this agent"}` {
 		t.Errorf("unreadable agent %s", unread)
 	}
-	if m := store.meta[id]; m.Creator != "flo" || m.TraceID != out.TraceID {
+	if m := store.meta[id]; m.Creator != testUser || m.TraceID != out.TraceID {
 		t.Errorf("blob metadata %+v", m)
 	}
 	if in := runner.started[0]; in.Depth != 0 || in.Prefix != "runs/"+out.TraceID {
@@ -462,10 +479,18 @@ func TestStartRunWritesMetadata(t *testing.T) {
 	if done["status"] != "failed" || done["error"] != `step "ask" failed` || done["started"] != meta.Started || done["run_id"] != out.TraceID {
 		t.Fatalf("finished metadata %s", store.data[id])
 	}
-	if _, err := time.Parse(time.RFC3339, done["finished"].(string)); err != nil {
+	finished, ok := done["finished"].(string)
+	if !ok {
 		t.Fatalf("finished %v", done["finished"])
 	}
-	if agents := done["agents"].(map[string]any); len(agents) != 4 || agents["demo/coder@v1"].(map[string]any)["temperature"] != 0.2 {
+	if _, err := time.Parse(time.RFC3339, finished); err != nil {
+		t.Fatalf("finished %v", done["finished"])
+	}
+	after, ok := done["agents"].(map[string]any)
+	if !ok || len(after) != 4 {
+		t.Fatalf("agents after the end %v", done["agents"])
+	}
+	if coderAfter, ok := after["demo/coder@v1"].(map[string]any); !ok || coderAfter["temperature"] != 0.2 {
 		t.Errorf("agents after the end %v", done["agents"])
 	}
 }

@@ -16,7 +16,7 @@ import (
 type Handler func(ctx context.Context, req StepRequest, inputs [][]byte) ([]byte, error)
 
 // LoadInputs reads every input artifact of a step request, in the order of its items.
-func LoadInputs(ctx context.Context, store Store, req StepRequest) ([][]byte, error) {
+func LoadInputs(ctx context.Context, store Store, req *StepRequest) ([][]byte, error) {
 	in := make([][]byte, 0, len(req.Inputs))
 	for _, item := range req.Inputs {
 		data, err := store.Get(ctx, item.Artifact)
@@ -33,7 +33,7 @@ func LoadInputs(ctx context.Context, store Store, req StepRequest) ([][]byte, er
 // the orchestrator assigned, recording creator as the artifact's creator.
 func StepActivity(store Store, creator string, h Handler) func(context.Context, StepRequest) (StepResult, error) {
 	return func(ctx context.Context, req StepRequest) (StepResult, error) {
-		in, err := LoadInputs(ctx, store, req)
+		in, err := LoadInputs(ctx, store, &req)
 		if err != nil {
 			return StepResult{}, err
 		}

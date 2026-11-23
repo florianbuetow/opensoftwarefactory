@@ -14,11 +14,13 @@ import (
 	"time"
 )
 
+// OutputContract is the part of agent.json that says what the agent's answer must contain.
 type OutputContract struct {
 	Format   string          `json:"format"`
 	Mappings []OutputMapping `json:"mappings"`
 }
 
+// OutputMapping names one value of the answer by its JSON pointer and its type.
 type OutputMapping struct {
 	Path string `json:"path"`
 	Name string `json:"name"`
@@ -52,8 +54,11 @@ func validateOutput(output string, contract OutputContract) string {
 			}
 		}
 	}
-	return "valid"
+	return outputValid
 }
+
+// outputValid is the validation result of an answer that meets its output contract.
+const outputValid = "valid"
 
 func resolveJSONPointer(document any, pointer string) (any, bool) {
 	if pointer == "" {
@@ -97,13 +102,20 @@ type extractionRequest struct {
 
 type extractionIntent struct {
 	ID         string            `json:"id"`
-	Request    extractionRequest `json:"request"`
 	Validation string            `json:"validation"`
 	CreatedAt  time.Time         `json:"created_at"`
 	UpdatedAt  time.Time         `json:"updated_at"`
 	Status     string            `json:"status"`
 	LastError  string            `json:"last_error,omitempty"`
+	Request    extractionRequest `json:"request"`
 }
+
+// The statuses of an extraction intent.
+const (
+	intentPending   = "pending"
+	intentFailed    = "failed"
+	intentDelivered = "delivered"
+)
 
 type extractionPending struct {
 	IntentID string `json:"intent_id"`
@@ -114,7 +126,7 @@ const (
 	extractionPendingPrefix = "judge-extractions-pending"
 )
 
-func makeExtractionIntent(req StepRequest, agentRef string, contract OutputContract, validation string) *extractionIntent {
+func makeExtractionIntent(req *StepRequest, agentRef string, contract OutputContract, validation string) *extractionIntent {
 	if req.TargetRunID == "" || req.TargetExecutionID == "" {
 		return nil
 	}
@@ -130,7 +142,7 @@ func makeExtractionIntent(req StepRequest, agentRef string, contract OutputContr
 	sum := sha256.Sum256(payloadData)
 	id := fmt.Sprintf("%x", sum[:])
 	now := time.Now().UTC()
-	return &extractionIntent{ID: id, Request: payload, Validation: validation, CreatedAt: now, UpdatedAt: now, Status: "pending"}
+	return &extractionIntent{ID: id, Request: payload, Validation: validation, CreatedAt: now, UpdatedAt: now, Status: intentPending}
 }
 
 func (s *Service) deliverExtraction(ctx context.Context, intent *extractionIntent, traceID string, log *slog.Logger) {
@@ -139,34 +151,35 @@ func (s *Service) deliverExtraction(ctx context.Context, intent *extractionInten
 	}
 	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := s.persistExtractionIntent(durableCtx, *intent, traceID, true); err != nil {
+	if err := s.persistExtractionIntent(durableCtx, intent, traceID, true); err != nil {
 		log.Error("judge extraction intent persistence failed", "error", err)
 		return
 	}
-	if err := s.submitExtraction(durableCtx, intent.Request); err != nil {
-		intent.Status = "failed"
+	if err := s.submitExtraction(durableCtx, &intent.Request); err != nil {
+		intent.Status = intentFailed
 		intent.LastError = err.Error()
 		intent.UpdatedAt = time.Now().UTC()
-		_ = s.persistExtractionIntent(durableCtx, *intent, traceID, false)
+		_ = s.persistExtractionIntent(durableCtx, intent, traceID, false)
 		log.Error("judge extraction delivery failed", "artifact", intent.Request.ArtifactID, "error", err)
 		return
 	}
-	intent.Status = "delivered"
+	intent.Status = intentDelivered
 	intent.LastError = ""
 	intent.UpdatedAt = time.Now().UTC()
-	_ = s.persistExtractionIntent(durableCtx, *intent, traceID, false)
+	_ = s.persistExtractionIntent(durableCtx, intent, traceID, false)
 	if store, ok := s.Store.(PrefixStore); ok {
 		_ = store.Delete(durableCtx, extractionPendingPrefix+"/"+intent.ID+".json")
 	}
 	log.Info("judge extraction submitted", "artifact", intent.Request.ArtifactID, "target_run_id", intent.Request.TargetRunID, "validation", intent.Validation)
 }
 
-func (s *Service) persistExtractionIntent(ctx context.Context, intent extractionIntent, traceID string, createPending bool) error {
+func (s *Service) persistExtractionIntent(ctx context.Context, intent *extractionIntent, traceID string, createPending bool) error {
 	data, err := json.Marshal(intent)
 	if err != nil {
 		return err
 	}
-	if err = s.Store.Put(ctx, extractionIntentPrefix+"/"+intent.ID+".json", data, Meta{Creator: "agent:" + intent.Request.AgentRef, TraceID: traceID}); err != nil {
+	err = s.Store.Put(ctx, extractionIntentPrefix+"/"+intent.ID+".json", data, Meta{Creator: "agent:" + intent.Request.AgentRef, TraceID: traceID})
+	if err != nil {
 		return err
 	}
 	if createPending {
@@ -176,7 +189,7 @@ func (s *Service) persistExtractionIntent(ctx context.Context, intent extraction
 	return nil
 }
 
-func (s *Service) submitExtraction(ctx context.Context, payload extractionRequest) error {
+func (s *Service) submitExtraction(ctx context.Context, payload *extractionRequest) (err error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -193,7 +206,7 @@ func (s *Service) submitExtraction(ctx context.Context, payload extractionReques
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("evaluation extraction: %s: %s", resp.Status, strings.TrimSpace(string(body)))
@@ -232,25 +245,25 @@ func (s *Service) replayExtractionIntents(ctx context.Context) error {
 			failures = append(failures, "invalid extraction record "+pending.IntentID)
 			continue
 		}
-		if intent.Status == "delivered" {
+		if intent.Status == intentDelivered {
 			_ = store.Delete(ctx, id)
 			continue
 		}
-		if intent.Status == "delivered" {
+		if intent.Status == intentDelivered {
 			continue
 		}
-		if err := s.submitExtraction(ctx, intent.Request); err != nil {
-			intent.Status = "failed"
+		if err := s.submitExtraction(ctx, &intent.Request); err != nil {
+			intent.Status = intentFailed
 			intent.LastError = err.Error()
 			intent.UpdatedAt = time.Now().UTC()
-			_ = s.persistExtractionIntent(ctx, intent, "", false)
+			_ = s.persistExtractionIntent(ctx, &intent, "", false)
 			failures = append(failures, err.Error())
 			continue
 		}
-		intent.Status = "delivered"
+		intent.Status = intentDelivered
 		intent.LastError = ""
 		intent.UpdatedAt = time.Now().UTC()
-		_ = s.persistExtractionIntent(ctx, intent, "", false)
+		_ = s.persistExtractionIntent(ctx, &intent, "", false)
 		if err := store.Delete(ctx, extractionPendingPrefix+"/"+intent.ID+".json"); err != nil {
 			failures = append(failures, err.Error())
 		}
@@ -288,7 +301,7 @@ func (s *Service) reconcileExtractionIntents(ctx context.Context, limit int) err
 		if json.Unmarshal(data, &intent) != nil {
 			return fmt.Errorf("invalid extraction record %s", id)
 		}
-		if intent.Status == "delivered" {
+		if intent.Status == intentDelivered {
 			continue
 		}
 		marker, _ := json.Marshal(extractionPending{IntentID: id})
@@ -338,12 +351,12 @@ func (s *Service) reconcileCompletedRunObligations(ctx context.Context, limit in
 			continue
 		}
 		var record RunRecord
-		if json.Unmarshal(data, &record) != nil || record.Status != "completed" || record.ExtractionObligation == nil || record.ExtractionObligation.Status == "delivered" {
+		if json.Unmarshal(data, &record) != nil || record.Status != statusCompleted || record.ExtractionObligation == nil || record.ExtractionObligation.Status == intentDelivered {
 			continue
 		}
 		s.deliverExtraction(ctx, record.ExtractionObligation, record.RunID, s.Logger)
 		output := strings.TrimSuffix(id, ".run.json")
-		if err := s.persistRunRecord(record, output, Meta{Creator: "agent:" + record.Agent, TraceID: record.RunID}); err != nil {
+		if err := s.persistRunRecord(&record, output, Meta{Creator: "agent:" + record.Agent, TraceID: record.RunID}); err != nil {
 			failures = append(failures, err.Error())
 		}
 	}

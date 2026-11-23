@@ -20,14 +20,14 @@ type backfillJob struct {
 	ID         string    `json:"id"`
 	Revision   string    `json:"revision,omitempty"`
 	Status     string    `json:"status"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 	RunIDs     []string  `json:"run_ids"`
 	Cursor     int       `json:"cursor"`
 	Processed  int       `json:"processed"`
 	Created    int       `json:"created"`
 	Generation int64     `json:"generation"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
 }
 type backfillStart struct {
 	RunIDs []string `json:"run_ids"`
@@ -76,7 +76,7 @@ func (s *service) startBackfill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	job := backfillJob{ID: uuid.NewString(), Status: "pending", RunIDs: ids, Generation: generation, CreatedAt: now, UpdatedAt: now}
+	job := backfillJob{ID: uuid.NewString(), Status: jobPending, RunIDs: ids, Generation: generation, CreatedAt: now, UpdatedAt: now}
 	rev, err := s.writeObject(r.Context(), backfillPrefix+"/"+job.ID+".json", job, "*")
 	if err != nil {
 		s.dependencyFailure(w, err)
@@ -140,9 +140,9 @@ func (s *service) backfillBatch(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			var gap legacyGapError
 			if errors.As(e, &gap) {
-				job.Status = "failed"
+				job.Status = jobFailed
 			} else {
-				job.Status = "retrying"
+				job.Status = jobRetrying
 			}
 			job.Error = e.Error()
 			job.UpdatedAt = time.Now().UTC()
@@ -160,12 +160,12 @@ func (s *service) backfillBatch(w http.ResponseWriter, r *http.Request) {
 	if end == len(job.RunIDs) {
 		done, _ = s.backfillGenerationComplete(r.Context(), job.Generation)
 		if done {
-			job.Status = "complete"
+			job.Status = jobComplete
 		} else {
-			job.Status = "projection_pending"
+			job.Status = jobProjectionPending
 		}
 	} else {
-		job.Status = "running"
+		job.Status = jobRunning
 	}
 	job.UpdatedAt = time.Now().UTC()
 	rev, err := s.writeObject(r.Context(), backfillPrefix+"/"+job.ID+".json", job, object.Revision)
@@ -178,14 +178,33 @@ func (s *service) backfillBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 type legacyRun struct {
+	Started            time.Time `json:"started"`
 	TraceID            string    `json:"trace_id"`
 	ExecutionID        string    `json:"execution_id"`
 	ParentExecutionID  string    `json:"parent_execution_id"`
 	DistributedTraceID string    `json:"distributed_trace_id"`
 	Workflow           string    `json:"workflow"`
 	WorkflowVersion    int       `json:"workflow_version"`
-	Started            time.Time `json:"started"`
 }
+
+// legacyEvent is one model call in a run record written before usage
+// measurements existed. An aggregate stands in for a record that kept only
+// its total usage.
+type legacyEvent struct {
+	Kind    string          `json:"kind"`
+	Started time.Time       `json:"started"`
+	Model   string          `json:"model"`
+	TraceID string          `json:"trace_id"`
+	SpanID  string          `json:"span_id"`
+	Usage   json.RawMessage `json:"usage"`
+	Turn    int             `json:"turn"`
+}
+
+// The kinds of legacy event that carry usage.
+const (
+	legacyModelCall = "model_call"
+	legacyAggregate = "legacy_aggregate"
+)
 
 func (s *service) backfillRun(ctx context.Context, runID string, generation int64) (int, error) {
 	var run legacyRun
@@ -202,7 +221,7 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 			Status   string `json:"status"`
 		}
 		_ = s.getJSON(ctx, s.blobs+"/blobs/runs/"+runID+"/metadata.json", &metadata)
-		measurement := Measurement{SchemaVersion: 1, ID: hashID("legacy-execution", runID, run.ExecutionID), Kind: "execution", RunID: runID, ExecutionID: run.ExecutionID, ParentExecutionID: run.ParentExecutionID, Workflow: run.Workflow, TraceID: run.DistributedTraceID, OccurredAt: run.Started, Status: "missing", Missing: []string{}}
+		measurement := Measurement{SchemaVersion: 1, ID: hashID("legacy-execution", runID, run.ExecutionID), Kind: kindExecution, RunID: runID, ExecutionID: run.ExecutionID, ParentExecutionID: run.ParentExecutionID, Workflow: run.Workflow, TraceID: run.DistributedTraceID, OccurredAt: run.Started, Status: statusMissing, Missing: []string{}}
 		if run.WorkflowVersion > 0 {
 			measurement.WorkflowVersion = &run.WorkflowVersion
 		}
@@ -210,13 +229,13 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 			duration := finished.Sub(run.Started).Milliseconds()
 			if duration >= 0 {
 				measurement.DurationMS = &duration
-				measurement.Status = "derived"
+				measurement.Status = statusDerived
 			}
 		}
 		if measurement.DurationMS == nil {
 			measurement.Missing = append(measurement.Missing, "duration_ms/legacy finish unavailable")
 		}
-		n, err := s.enqueueBackfillMeasurement(ctx, measurement, generation)
+		n, err := s.enqueueBackfillMeasurement(ctx, &measurement, generation)
 		if err != nil {
 			return created, err
 		}
@@ -244,15 +263,7 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 			Effort  string          `json:"effort"`
 			Started time.Time       `json:"started"`
 			Usage   json.RawMessage `json:"usage"`
-			Events  []struct {
-				Kind    string          `json:"kind"`
-				Started time.Time       `json:"started"`
-				Turn    int             `json:"turn"`
-				Model   string          `json:"model"`
-				TraceID string          `json:"trace_id"`
-				SpanID  string          `json:"span_id"`
-				Usage   json.RawMessage `json:"usage"`
-			} `json:"events"`
+			Events  []legacyEvent   `json:"events"`
 		}
 		decoder := json.NewDecoder(strings.NewReader(string(object.Data)))
 		decoder.UseNumber()
@@ -260,25 +271,18 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 			return created, legacyGapError{fmt.Errorf("legacy record %s is malformed: %w", item.ID, err)}
 		}
 		if len(record.Events) == 0 && len(record.Usage) > 0 {
-			record.Events = append(record.Events, struct {
-				Kind    string          `json:"kind"`
-				Started time.Time       `json:"started"`
-				Turn    int             `json:"turn"`
-				Model   string          `json:"model"`
-				TraceID string          `json:"trace_id"`
-				SpanID  string          `json:"span_id"`
-				Usage   json.RawMessage `json:"usage"`
-			}{Kind: "legacy_aggregate", Started: record.Started, Model: record.Model, Usage: record.Usage})
+			record.Events = append(record.Events, legacyEvent{Kind: legacyAggregate, Started: record.Started, Model: record.Model, Usage: record.Usage})
 		}
-		for index, event := range record.Events {
-			if event.Kind != "model_call" && event.Kind != "legacy_aggregate" {
+		for index := range record.Events {
+			event := &record.Events[index]
+			if event.Kind != legacyModelCall && event.Kind != legacyAggregate {
 				continue
 			}
-			measurement := legacyUsageMeasurement(run, item.ID, record.Agent, record.Effort, event, index)
+			measurement := legacyUsageMeasurement(&run, item.ID, record.Agent, record.Effort, event, index)
 			if measurement.OccurredAt.IsZero() {
 				return created, legacyGapError{fmt.Errorf("legacy record %s event %d has no source timestamp", item.ID, index)}
 			}
-			n, err := s.enqueueBackfillMeasurement(ctx, measurement, generation)
+			n, err := s.enqueueBackfillMeasurement(ctx, &measurement, generation)
 			if err != nil {
 				return created, err
 			}
@@ -288,16 +292,7 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 	return created, nil
 }
 
-func legacyUsageMeasurement(run legacyRun, artifact, agent, effort string, event struct {
-	Kind    string          `json:"kind"`
-	Started time.Time       `json:"started"`
-	Turn    int             `json:"turn"`
-	Model   string          `json:"model"`
-	TraceID string          `json:"trace_id"`
-	SpanID  string          `json:"span_id"`
-	Usage   json.RawMessage `json:"usage"`
-}, index int,
-) Measurement {
+func legacyUsageMeasurement(run *legacyRun, artifact, agent, effort string, event *legacyEvent, index int) Measurement {
 	occurred := event.Started
 	if occurred.IsZero() {
 		occurred = run.Started
@@ -309,11 +304,11 @@ func legacyUsageMeasurement(run legacyRun, artifact, agent, effort string, event
 	if effort == "" {
 		missing = append(missing, "effort/legacy evidence unavailable")
 	}
-	m := Measurement{SchemaVersion: 1, ID: hashID("legacy-usage", artifact, strconv.Itoa(index)), Kind: "usage", RunID: run.TraceID, ExecutionID: run.ExecutionID, ParentExecutionID: run.ParentExecutionID, Agent: agent, OccurredAt: occurred, Model: event.Model, Effort: effort, TraceID: event.TraceID, SpanID: event.SpanID, Status: "missing", Missing: missing, RawUsage: event.Usage}
+	m := Measurement{SchemaVersion: 1, ID: hashID("legacy-usage", artifact, strconv.Itoa(index)), Kind: kindUsage, RunID: run.TraceID, ExecutionID: run.ExecutionID, ParentExecutionID: run.ParentExecutionID, Agent: agent, OccurredAt: occurred, Model: event.Model, Effort: effort, TraceID: event.TraceID, SpanID: event.SpanID, Status: statusMissing, Missing: missing, RawUsage: event.Usage}
 	if m.Model == "" {
 		m.Missing = append(m.Missing, "model/legacy evidence unavailable")
 	}
-	applyLegacyUsage(&m, event.Usage, event.Kind == "legacy_aggregate")
+	applyLegacyUsage(&m, event.Usage, event.Kind == legacyAggregate)
 	return m
 }
 
@@ -352,14 +347,14 @@ func applyLegacyUsage(m *Measurement, raw json.RawMessage, aggregate bool) {
 	m.ReasoningTokens = read("reasoning_tokens")
 	if known {
 		if aggregate {
-			m.Status = "derived"
+			m.Status = statusDerived
 		} else {
-			m.Status = "reported"
+			m.Status = statusReported
 		}
 	}
 }
 
-func (s *service) enqueueBackfillMeasurement(ctx context.Context, m Measurement, generation int64) (int, error) {
+func (s *service) enqueueBackfillMeasurement(ctx context.Context, m *Measurement, generation int64) (int, error) {
 	objectID := measurementObject(m.Kind, m.ID)
 	if existing, err := s.readObject(ctx, objectID); err == nil {
 		raw, _ := json.Marshal(m)
@@ -371,7 +366,7 @@ func (s *service) enqueueBackfillMeasurement(ctx context.Context, m Measurement,
 		return 0, err
 	}
 	raw, _ := json.Marshal(m)
-	op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: objectID, MeasurementID: m.ID, ExpectedRevision: "*", Replacement: raw, AffectedHour: m.OccurredAt.UTC().Truncate(time.Hour), Generation: generation, Phase: "intent", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: objectID, MeasurementID: m.ID, ExpectedRevision: "*", Replacement: raw, AffectedHour: m.OccurredAt.UTC().Truncate(time.Hour), Generation: generation, Phase: opIntent, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	if _, err := s.writeObject(ctx, operationPrefix+"/"+op.ID+".json", op, "*"); err != nil {
 		return 0, err
 	}
@@ -389,7 +384,7 @@ func (s *service) backfillGenerationComplete(ctx context.Context, generation int
 			return false, e
 		}
 		var op mutationOperation
-		if json.Unmarshal(object.Data, &op) == nil && op.Generation == generation && op.Phase != "complete" && op.Phase != "cancelled" {
+		if json.Unmarshal(object.Data, &op) == nil && op.Generation == generation && op.Phase != opComplete && op.Phase != opCancelled {
 			return false, nil
 		}
 	}
@@ -410,7 +405,7 @@ func (s *service) resumeBackfills(ctx context.Context) error {
 			return e
 		}
 		var job backfillJob
-		if json.Unmarshal(object.Data, &job) != nil || job.Status == "complete" || job.Status == "failed" || job.Status == "cancelled" {
+		if json.Unmarshal(object.Data, &job) != nil || job.Status == jobComplete || job.Status == jobFailed || job.Status == jobCancelled {
 			continue
 		}
 		start := job.Cursor
@@ -424,9 +419,9 @@ func (s *service) resumeBackfills(ctx context.Context) error {
 			if runErr != nil {
 				var gap legacyGapError
 				if errors.As(runErr, &gap) {
-					job.Status = "failed"
+					job.Status = jobFailed
 				} else {
-					job.Status = "retrying"
+					job.Status = jobRetrying
 				}
 				job.Error = runErr.Error()
 				job.UpdatedAt = time.Now().UTC()
@@ -440,11 +435,11 @@ func (s *service) resumeBackfills(ctx context.Context) error {
 		job.Created += created
 		job.Error = ""
 		if end < len(job.RunIDs) {
-			job.Status = "running"
+			job.Status = jobRunning
 		} else if complete, _ := s.backfillGenerationComplete(ctx, job.Generation); complete {
-			job.Status = "complete"
+			job.Status = jobComplete
 		} else {
-			job.Status = "projection_pending"
+			job.Status = jobProjectionPending
 		}
 		job.UpdatedAt = time.Now().UTC()
 		_, e = s.writeObject(ctx, id, job, object.Revision)

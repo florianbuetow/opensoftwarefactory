@@ -14,16 +14,24 @@ import (
 )
 
 type entry struct {
-	config   Config
 	upstream upstream
+	config   Config
 }
 type gateway struct {
-	store   blobStore
 	log     *slog.Logger
-	changes sync.Mutex
-	mu      sync.RWMutex
 	entries map[string]*entry
 	invalid map[string]string
+	store   blobStore
+	changes sync.Mutex
+	mu      sync.RWMutex
+}
+
+// closeResponse closes an upstream response body. A handler cannot return the
+// close error, so it is logged.
+func (g *gateway) closeResponse(resp *http.Response, service string) {
+	if err := resp.Body.Close(); err != nil {
+		g.log.Error("closing upstream response failed", "service", service, "error", err)
+	}
 }
 
 func newGateway(store blobStore, log *slog.Logger) *gateway {
@@ -47,11 +55,11 @@ func (g *gateway) load(ctx context.Context) error {
 			g.log.Warn("configuration unavailable", "service", name, "error", err)
 			continue
 		}
-		u, err := newUpstream(c.MCPConfig)
+		u, err := newUpstream(&c.MCPConfig)
 		if err != nil {
 			return err
 		}
-		g.entries[name] = &entry{c, u}
+		g.entries[name] = &entry{config: c, upstream: u}
 	}
 	return nil
 }
@@ -142,7 +150,7 @@ func (g *gateway) save(w http.ResponseWriter, r *http.Request) {
 	}
 	g.changes.Lock()
 	defer g.changes.Unlock()
-	if err = g.store.save(r.Context(), name, c); err != nil {
+	if err = g.store.save(r.Context(), name, &c); err != nil {
 		apiError(w, 502, err)
 		return
 	}
@@ -151,14 +159,14 @@ func (g *gateway) save(w http.ResponseWriter, r *http.Request) {
 	if old != nil && reflect.DeepEqual(old.config.MCPConfig, c.MCPConfig) {
 		u = old.upstream
 	} else {
-		u, err = newUpstream(c.MCPConfig)
+		u, err = newUpstream(&c.MCPConfig)
 		if err != nil {
 			apiError(w, 400, err)
 			return
 		}
 	}
 	g.mu.Lock()
-	g.entries[name] = &entry{c, u}
+	g.entries[name] = &entry{config: c, upstream: u}
 	delete(g.invalid, name)
 	g.mu.Unlock()
 	if old != nil && old.upstream != u {
@@ -191,7 +199,8 @@ func (g *gateway) remove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *gateway) testConnection(w http.ResponseWriter, r *http.Request) {
-	e := g.get(r.PathValue("name"))
+	name := r.PathValue("name")
+	e := g.get(name)
 	if e == nil {
 		apiError(w, 404, errMissing)
 		return
@@ -207,15 +216,15 @@ func (g *gateway) testConnection(w http.ResponseWriter, r *http.Request) {
 		defer stop()
 		resp, err := e.upstream.Delete(cleanup, http.Header{"MCP-Protocol-Version": []string{protocolVersion}, "Mcp-Session-Id": []string{session}})
 		if err == nil && resp != nil {
-			resp.Body.Close()
+			g.closeResponse(resp, name)
 		}
 	}()
-	for _, method := range []string{"initialize", "tools/list"} {
+	for _, method := range []string{methodInitialize, methodToolsList} {
 		payload := initializeRequest("connection-test")
-		if method == "tools/list" {
-			payload, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "connection-test", "method": "tools/list", "params": map[string]any{}})
+		if method == methodToolsList {
+			payload, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "connection-test", "method": methodToolsList, "params": map[string]any{}})
 		}
-		headers := protocolHeaders(method == "initialize")
+		headers := protocolHeaders(method == methodInitialize)
 		if session != "" {
 			headers.Set("Mcp-Session-Id", session)
 		}
@@ -224,12 +233,12 @@ func (g *gateway) testConnection(w http.ResponseWriter, r *http.Request) {
 			apiError(w, 502, err)
 			return
 		}
-		if method == "initialize" {
+		if method == methodInitialize {
 			session = resp.Header.Get("Mcp-Session-Id")
 		}
 		result, err := readRPCResponse(resp, json.RawMessage(`"connection-test"`))
-		resp.Body.Close()
-		if err == nil && method == "initialize" {
+		g.closeResponse(resp, name)
+		if err == nil && method == methodInitialize {
 			err = validateInitialize(result)
 		} else if err == nil {
 			_, err = toolList(result)
@@ -238,7 +247,7 @@ func (g *gateway) testConnection(w http.ResponseWriter, r *http.Request) {
 			apiError(w, 502, err)
 			return
 		}
-		if method == "initialize" {
+		if method == methodInitialize {
 			notification := initializedNotification()
 			headers := protocolHeaders(false)
 			if session != "" {
@@ -249,7 +258,7 @@ func (g *gateway) testConnection(w http.ResponseWriter, r *http.Request) {
 				apiError(w, 502, err)
 				return
 			}
-			initialized.Body.Close()
+			g.closeResponse(initialized, name)
 			if initialized.StatusCode != http.StatusAccepted {
 				apiError(w, 502, fmt.Errorf("upstream did not accept initialized notification"))
 				return

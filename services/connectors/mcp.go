@@ -41,9 +41,9 @@ func (s *service) registerUntilDone(ctx context.Context) {
 // register creates the entry devpod in the MCP gateway when it is missing. An entry that
 // exists is left alone, so a person's changes to it stay. The entry points at the tool
 // gateway, which serves the dev pod tools and forwards them to this service.
-func (s *service) register(ctx context.Context) (bool, error) {
+func (s *service) register(ctx context.Context) (created bool, err error) {
 	endpoint := s.mcpGateway + "/api/services/devpod"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return false, err
 	}
@@ -52,7 +52,10 @@ func (s *service) register(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	err = resp.Body.Close()
+	if err != nil {
+		return false, err
+	}
 	if resp.StatusCode == http.StatusOK {
 		return false, nil
 	}
@@ -76,7 +79,7 @@ func (s *service) register(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		return false, fmt.Errorf("the MCP gateway refused the service devpod: %s %s", resp.Status, data)
@@ -103,9 +106,9 @@ func (s *service) registerSkillsUntilDone(ctx context.Context) {
 	}
 }
 
-func (s *service) registerSkills(ctx context.Context) (bool, error) {
+func (s *service) registerSkills(ctx context.Context) (created bool, err error) {
 	endpoint := s.mcpGateway + "/api/services/skills"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return false, err
 	}
@@ -114,7 +117,10 @@ func (s *service) registerSkills(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	err = resp.Body.Close()
+	if err != nil {
+		return false, err
+	}
 	if resp.StatusCode == http.StatusOK {
 		return false, nil
 	}
@@ -138,7 +144,7 @@ func (s *service) registerSkills(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		return false, fmt.Errorf("the MCP gateway refused the service skills: %s %s", resp.Status, data)
@@ -168,7 +174,7 @@ func (s *service) registerFactoryUntilDone(ctx context.Context) {
 
 func (s *service) registerFactory(ctx context.Context) (bool, error) {
 	endpoint := s.mcpGateway + "/api/services/factory"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return false, err
 	}
@@ -177,7 +183,10 @@ func (s *service) registerFactory(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
+	err = resp.Body.Close()
+	if err != nil {
+		return false, err
+	}
 	if resp.StatusCode == http.StatusOK {
 		var existing struct {
 			MCPConfig struct {
@@ -198,7 +207,7 @@ func (s *service) registerFactory(ctx context.Context) (bool, error) {
 	return s.putFactoryRegistration(ctx, endpoint)
 }
 
-func (s *service) putFactoryRegistration(ctx context.Context, endpoint string) (bool, error) {
+func (s *service) putFactoryRegistration(ctx context.Context, endpoint string) (created bool, err error) {
 	body, err := json.Marshal(map[string]any{"mcpconfig": map[string]any{"transport": "streamable-http", "url": s.cfg.mcpURL}, "allowlist": factoryTools, "denylist": factoryDeniedTools})
 	if err != nil {
 		return false, err
@@ -212,7 +221,7 @@ func (s *service) putFactoryRegistration(ctx context.Context, endpoint string) (
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
 		return false, fmt.Errorf("the MCP gateway refused the service factory: %s %s", resp.Status, data)

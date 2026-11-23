@@ -45,7 +45,7 @@ func TestHTTPSpansContinueIncomingTraceAndPropagateToBlobstore(t *testing.T) {
 	server := httptest.NewServer(otelhttp.NewHandler(reg.routes(), "registry"))
 	t.Cleanup(server.Close)
 
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/agents", nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/agents", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,9 @@ func TestHTTPSpansContinueIncomingTraceAndPropagateToBlobstore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /agents: status %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -76,6 +78,8 @@ func TestHTTPSpansContinueIncomingTraceAndPropagateToBlobstore(t *testing.T) {
 			serverSpan = span
 		case trace.SpanKindClient:
 			clientSpan = span
+		case trace.SpanKindUnspecified, trace.SpanKindInternal, trace.SpanKindProducer, trace.SpanKindConsumer:
+			// Only the server span and the client span are asserted on.
 		}
 	}
 	if serverSpan == nil || clientSpan == nil {

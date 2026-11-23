@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 
 func writeSeedTestFile(t *testing.T, path, contents string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -19,7 +20,7 @@ func writeSeedTestFile(t *testing.T, path, contents string) {
 func seedDirectory(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "seed")
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -72,7 +73,7 @@ func TestSeedWorkflowsPreservesExistingNamesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("second seed added %d versions: %v", added, err)
 	}
 	after, _ := workflowObjects(store)
-	if string(after) != string(before) {
+	if !bytes.Equal(after, before) {
 		t.Fatal("idempotent seed rewrote the stored workflows")
 	}
 }
@@ -114,7 +115,7 @@ func TestSeedWorkflowsRejectsInvalidSeedWithoutWriting(t *testing.T) {
 	if _, err := seedWorkflows(context.Background(), store, seedDir); err == nil || !strings.Contains(err.Error(), "bad.yaml") {
 		t.Fatalf("error: %v", err)
 	}
-	if after, _ := workflowObjects(store); string(after) != string(before) {
+	if after, _ := workflowObjects(store); !bytes.Equal(after, before) {
 		t.Fatal("invalid seed changed the stored workflows")
 	}
 }

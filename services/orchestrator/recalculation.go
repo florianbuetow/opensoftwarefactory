@@ -15,7 +15,7 @@ import (
 )
 
 type recalculationStarter interface {
-	StartRecalculation(context.Context, pipeline.RecalculationInput) (string, error)
+	StartRecalculation(context.Context, *pipeline.RecalculationInput) (string, error)
 }
 
 func (s *server) startMeasurementRecalculation(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +38,7 @@ func (s *server) startMeasurementRecalculation(w http.ResponseWriter, r *http.Re
 		s.fail(w, 503, errors.New("recalculation workflow is unavailable"))
 		return
 	}
-	workflowID, err := starter.StartRecalculation(r.Context(), in)
+	workflowID, err := starter.StartRecalculation(r.Context(), &in)
 	if err != nil {
 		s.fail(w, 503, err)
 		return
@@ -58,7 +58,7 @@ func intakeIDToken(id string) bool {
 	return true
 }
 
-func (r temporalRunner) StartRecalculation(ctx context.Context, in pipeline.RecalculationInput) (string, error) {
+func (r temporalRunner) StartRecalculation(ctx context.Context, in *pipeline.RecalculationInput) (string, error) {
 	id := "measurement-recalculation/" + in.ID
 	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{ID: id, TaskQueue: pipeline.TaskQueue, WorkflowExecutionTimeout: 30 * 24 * time.Hour}, pipeline.RecalculationWorkflowName, in)
 	var already *serviceerror.WorkflowExecutionAlreadyStarted

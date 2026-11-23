@@ -42,7 +42,7 @@ func TestHTTPSpansContinueIncomingTraceOnSuccessAndError(t *testing.T) {
 		{path: "/healthz", want: http.StatusOK},
 		{path: "/blobs/missing", want: http.StatusNotFound},
 	} {
-		req, err := http.NewRequest(http.MethodGet, server.URL+tc.path, nil)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+tc.path, http.NoBody)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,9 @@ func TestHTTPSpansContinueIncomingTraceOnSuccessAndError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		if err = resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if resp.StatusCode != tc.want {
 			t.Fatalf("GET %s: status %d, want %d", tc.path, resp.StatusCode, tc.want)
 		}

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -42,12 +43,12 @@ var webFiles embed.FS
 
 // backends names the proxy targets.
 type backends struct {
+	cluster                                                      *clusterProxy
+	observability                                                *observabilityClient
 	orchestrator, agents, policies, blobs, llm, mcp, evaluations string
 	skills                                                       string
 	connectors                                                   string // the connector service: repositories and dev pods
 	gitHost                                                      string // the demo Git server
-	cluster                                                      *clusterProxy
-	observability                                                *observabilityClient
 }
 
 func main() {
@@ -61,7 +62,7 @@ func run() error {
 	addr := flag.String("addr", ":8080", "listen address")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	handler, err := newHandler(backends{
+	handler, err := newHandler(&backends{
 		orchestrator: env("ORCHESTRATOR_URL", "http://orchestrator:8080"),
 		agents:       env("AGENT_REGISTRY_URL", "http://agent-registry:8080"),
 		policies:     env("POLICY_REGISTRY_URL", "http://policy-registry:8080"),
@@ -104,7 +105,7 @@ func run() error {
 	return nil
 }
 
-func newHandler(b backends, logger *slog.Logger) (http.Handler, error) {
+func newHandler(b *backends, logger *slog.Logger) (http.Handler, error) {
 	web, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		return nil, err
@@ -292,6 +293,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }
 
 func env(key, fallback string) string {

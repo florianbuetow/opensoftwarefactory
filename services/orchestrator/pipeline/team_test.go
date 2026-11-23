@@ -17,8 +17,8 @@ import (
 
 // syncStore is an in-memory Store that parallel team turns can share and that can delete.
 type syncStore struct {
-	mu sync.Mutex
 	m  map[string][]byte
+	mu sync.Mutex
 }
 
 func newSyncStore() *syncStore { return &syncStore{m: map[string][]byte{}} }
@@ -57,14 +57,14 @@ func (s *syncStore) has(id string) bool {
 // writes finished.json.
 type fakeMembers struct {
 	a     *Activities
-	mu    sync.Mutex
 	turns map[string]int
+	mu    sync.Mutex
 }
 
 // delivered is a message as a member receives it: with the sender, which the queue names.
 type delivered struct {
-	TeamMessage
 	From string
+	TeamMessage
 }
 
 func (f *fakeMembers) take(ctx context.Context, team, member string) []delivered {
@@ -112,7 +112,7 @@ func (f *fakeMembers) count(member string) int {
 
 // teamEnv registers the pipeline, the team loop, the orchestrator's activities, an "echo"
 // step service, and turn as the agent service's TeamTurn activity.
-func teamEnv(t *testing.T, definitions []Definition, turn func(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error) (*testsuite.TestWorkflowEnvironment, *syncStore, *fakeMembers) {
+func teamEnv(t *testing.T, definitions []Definition, turn func(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error) (*testsuite.TestWorkflowEnvironment, *syncStore, *fakeMembers) {
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
@@ -129,18 +129,18 @@ func teamEnv(t *testing.T, definitions []Definition, turn func(ctx context.Conte
 		return []byte("echoed: " + string(in[0])), nil
 	}), activity.RegisterOptions{Name: DefaultActivity})
 	env.RegisterActivityWithOptions(func(ctx context.Context, req TeamTurnRequest) (map[string]int, error) {
-		return map[string]int{"model_calls": 1}, turn(ctx, f, req)
+		return map[string]int{"model_calls": 1}, turn(ctx, f, &req)
 	}, activity.RegisterOptions{Name: TeamTurnActivity})
 	return env, store, f
 }
 
 // cooperative is a team whose lead instructs the coder and the echo workflow, finishes once
 // both have replied, and finishes again after a rejection.
-func cooperative(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error {
+func cooperative(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 	f.count(req.Member)
 	messages := f.take(ctx, req.Team, req.Member)
 	switch req.Member {
-	case "lead":
+	case leadMember:
 		for _, m := range messages {
 			switch {
 			case m.From == WorkflowSender && strings.HasPrefix(m.Text, "Review round"):
@@ -150,11 +150,15 @@ func cooperative(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error
 				f.send(ctx, req.Team, "lead", "echo", "ping")
 			}
 		}
-		coder, echo := f.queue(ctx, req.Team, "coder--lead", "coder"), f.queue(ctx, req.Team, "echo--lead", "echo")
-		if len(coder.Messages) > 0 && len(echo.Messages) > 0 && !f.a.Store.(*syncStore).has(req.Team+"/finished.json") {
+		store, ok := f.a.Store.(*syncStore)
+		if !ok {
+			return fmt.Errorf("the team keeps its blobs in a %T, not in a syncStore", f.a.Store)
+		}
+		coder, echo := f.queue(ctx, req.Team, coderLeadChannel, coderMember), f.queue(ctx, req.Team, "echo--lead", echoMember)
+		if len(coder.Messages) > 0 && len(echo.Messages) > 0 && !store.has(req.Team+"/finished.json") {
 			f.finish(ctx, req.Team, "done", "code.py", "test_code.py")
 		}
-	case "coder":
+	case coderMember:
 		for range messages {
 			f.send(ctx, req.Team, "coder", "lead", "code is ready")
 		}
@@ -179,7 +183,7 @@ func TestTeamRunsAgentAndWorkflowMembersUntilTheLeadFinishes(t *testing.T) {
 		}
 	}, time.Second)
 	def := Definition{Name: "solo", Steps: []Step{teamStep()}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t1", Definition: def, Inputs: runInput("runs/t1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t1", Definition: def, Inputs: runInput("runs/t1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +201,7 @@ func TestTeamRunsAgentAndWorkflowMembersUntilTheLeadFinishes(t *testing.T) {
 	}
 	var manifest TeamManifest
 	_, _ = f.a.getJSON(ctx, "teams/t1/build/team.json", &manifest)
-	if manifest.Lead != "lead" || manifest.TraceID != "t1" || manifest.StepID != "build" || len(manifest.Members) != 3 || len(manifest.Channels) != 3 {
+	if manifest.Lead != leadMember || manifest.TraceID != "t1" || manifest.StepID != buildStep || len(manifest.Members) != 3 || len(manifest.Channels) != 3 {
 		t.Fatalf("manifest %+v", manifest)
 	}
 	if m := manifest.Members[0]; m != (TeamMember{Name: "lead", Kind: AgentMember, Ref: "demo/lead@v1", Description: "about demo/lead@v1"}) {
@@ -207,7 +211,7 @@ func TestTeamRunsAgentAndWorkflowMembersUntilTheLeadFinishes(t *testing.T) {
 		t.Errorf("workflow member %+v", m)
 	}
 	task := f.queue(ctx, "teams/t1/build", "lead--workflow", WorkflowSender)
-	if len(task.Messages) != 1 || task.Messages[0].Seq != 1 || task.Channel != "lead--workflow" || task.From != WorkflowSender || task.To != "lead" || !strings.Contains(task.Messages[0].Text, "Build a parser.") {
+	if len(task.Messages) != 1 || task.Messages[0].Seq != 1 || task.Channel != "lead--workflow" || task.From != WorkflowSender || task.To != leadMember || !strings.Contains(task.Messages[0].Text, "Build a parser.") {
 		t.Fatalf("task channel %+v", task)
 	}
 	if string(store.m["teams/t1/build/files/input-input.md"]) != "Build a parser." {
@@ -216,7 +220,7 @@ func TestTeamRunsAgentAndWorkflowMembersUntilTheLeadFinishes(t *testing.T) {
 	// The workflow member ran as a child run on the lead's message and replied with its output.
 	// Each side of the channel has its own queue, counted from 1.
 	echo := f.queue(ctx, "teams/t1/build", "echo--lead", "echo")
-	if len(echo.Messages) != 1 || echo.From != "echo" || echo.To != "lead" || echo.Messages[0].Text != "echoed: ping" || echo.Messages[0].Seq != 1 {
+	if len(echo.Messages) != 1 || echo.From != echoMember || echo.To != leadMember || echo.Messages[0].Text != "echoed: ping" || echo.Messages[0].Seq != 1 {
 		t.Fatalf("echo queue %+v", echo)
 	}
 	if asked := f.queue(ctx, "teams/t1/build", "echo--lead", "lead"); len(asked.Messages) != 1 || asked.Messages[0].Text != "ping" || asked.Messages[0].Seq != 1 {
@@ -230,7 +234,7 @@ func TestTeamRunsAgentAndWorkflowMembersUntilTheLeadFinishes(t *testing.T) {
 	}
 	var member teamMemberFile
 	_, _ = f.a.getJSON(ctx, "teams/t1/build/members/echo.json", &member)
-	if member.Member != "echo" || member.Read["echo--lead"] != 1 {
+	if member.Member != echoMember || member.Read["echo--lead"] != 1 {
 		t.Fatalf("workflow member file %+v", member)
 	}
 	if f.turns["coder"] != 1 {
@@ -239,13 +243,13 @@ func TestTeamRunsAgentAndWorkflowMembersUntilTheLeadFinishes(t *testing.T) {
 }
 
 func TestTeamFailsWhenItStalls(t *testing.T) {
-	env, store, _ := teamEnv(t, nil, func(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error {
+	env, store, _ := teamEnv(t, nil, func(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 		f.take(ctx, req.Team, req.Member) // reads the task, sends nothing, never finishes
 		return nil
 	})
 	_ = store.Put(context.Background(), "runs/t2/input", []byte("task"), Meta{})
 	def := Definition{Name: "solo", Steps: []Step{{ID: "build", Service: TeamService, Agent: "lead@v1", Agents: []string{"coder@v1"}}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t2", Definition: def, Inputs: runInput("runs/t2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t2", Definition: def, Inputs: runInput("runs/t2/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `team "build" stalled`) || !strings.Contains(err.Error(), `lead agent "lead" has not finished`) {
 		t.Fatalf("error %v", err)
@@ -253,13 +257,13 @@ func TestTeamFailsWhenItStalls(t *testing.T) {
 }
 
 func TestTeamFailsWhenItExceedsItsTurnBudget(t *testing.T) {
-	env, store, f := teamEnv(t, nil, func(_ context.Context, f *fakeMembers, req TeamTurnRequest) error {
+	env, store, f := teamEnv(t, nil, func(_ context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 		f.count(req.Member) // never reads its messages
 		return nil
 	})
 	_ = store.Put(context.Background(), "runs/t3/input", []byte("task"), Meta{})
 	def := Definition{Name: "solo", Steps: []Step{{ID: "build", Service: TeamService, Agent: "lead@v1", MaxTurns: 3}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t3", Definition: def, Inputs: runInput("runs/t3/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t3", Definition: def, Inputs: runInput("runs/t3/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `team "build" used its budget of 3 turns`) {
 		t.Fatalf("error %v", err)
@@ -270,12 +274,12 @@ func TestTeamFailsWhenItExceedsItsTurnBudget(t *testing.T) {
 }
 
 func TestTeamFailsWithTheErrorOfAFailedTurn(t *testing.T) {
-	env, store, _ := teamEnv(t, nil, func(context.Context, *fakeMembers, TeamTurnRequest) error {
+	env, store, _ := teamEnv(t, nil, func(context.Context, *fakeMembers, *TeamTurnRequest) error {
 		return fmt.Errorf("model unavailable")
 	})
 	_ = store.Put(context.Background(), "runs/t4/input", []byte("task"), Meta{})
 	def := Definition{Name: "solo", Steps: []Step{{ID: "build", Service: TeamService, Agent: "lead@v1"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t4", Definition: def, Inputs: runInput("runs/t4/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t4", Definition: def, Inputs: runInput("runs/t4/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `turn of team member "lead" failed`) || !strings.Contains(err.Error(), "model unavailable") {
 		t.Fatalf("error %v", err)
@@ -295,21 +299,21 @@ func TestGateOnRejectSendsTheReasonBackToTheTeamAndReopens(t *testing.T) {
 	_ = store.Put(ctx, "runs/t5/input", []byte("Build a parser."), Meta{})
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
-		if len(state.Gates) != 1 || state.Gates[0].OnReject != "build" || state.Gates[0].Round != 1 || len(state.Teams) != 0 {
+		if len(state.Gates) != 1 || state.Gates[0].OnReject != buildStep || state.Gates[0].Round != 1 || len(state.Teams) != 0 {
 			t.Errorf("first round %+v", state)
 		}
 		// A rejection without a reason is ignored; the gate keeps waiting.
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: " ", DecidedBy: "flo"})
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "handle empty input", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: " ", DecidedBy: testUser})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "handle empty input", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
 		if len(state.Gates) != 1 || state.Gates[0].Round != 2 || show(state.Gates[0].Inputs) != "build=runs/t5/build#1" {
 			t.Errorf("second round %+v", state)
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
 	}, 2*time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t5", Definition: reviewed(), Inputs: runInput("runs/t5/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t5", Definition: reviewed(), Inputs: runInput("runs/t5/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +326,7 @@ func TestGateOnRejectSendsTheReasonBackToTheTeamAndReopens(t *testing.T) {
 	if err := json.Unmarshal(store.m["runs/t5/review.1"], &first); err != nil {
 		t.Fatal(err)
 	}
-	if first.Decision != Rejected || first.Comment != "handle empty input" || first.Round != 1 || first.OnReject != "build" {
+	if first.Decision != Rejected || first.Comment != "handle empty input" || first.Round != 1 || first.OnReject != buildStep {
 		t.Fatalf("first record %+v", first)
 	}
 	_ = json.Unmarshal(store.m["runs/t5/review"], &last)
@@ -347,10 +351,10 @@ func TestGateOnRejectFailsTheRunWithTheRejectionBeyondItsLimit(t *testing.T) {
 	_ = store.Put(context.Background(), "runs/t6/input", []byte("task"), Meta{})
 	for round := 1; round <= DefaultMaxRejections+1; round++ {
 		env.RegisterDelayedCallback(func() {
-			env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: fmt.Sprintf("no %d", round), DecidedBy: "flo"})
+			env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: fmt.Sprintf("no %d", round), DecidedBy: testUser})
 		}, time.Duration(round)*time.Second)
 	}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t6", Definition: reviewed(), Inputs: runInput("runs/t6/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t6", Definition: reviewed(), Inputs: runInput("runs/t6/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `step "review" rejected 6 times, last by flo: no 6`) {
 		t.Fatalf("error %v", err)
@@ -383,9 +387,11 @@ func TestWorkflowStepRunsTheNamedWorkflowAndHandsOnItsFinalOutput(t *testing.T) 
 	})
 	env.RegisterDelayedCallback(func() {
 		// The gate inside the nested run is decided through the child workflow's own ID.
-		env.SignalWorkflowByID("default-test-workflow-id/nested", DecisionSignal, Decision{Step: "ask", Decision: Approved, DecidedBy: "flo"})
+		if err := env.SignalWorkflowByID("default-test-workflow-id/nested", DecisionSignal, Decision{Step: "ask", Decision: Approved, DecidedBy: testUser}); err != nil {
+			t.Error(err)
+		}
 	}, time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t7", Definition: outer, Inputs: runInput("runs/t7/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t7", Definition: outer, Inputs: runInput("runs/t7/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +411,7 @@ func TestWorkflowStepRunsTheNamedWorkflowAndHandsOnItsFinalOutput(t *testing.T) 
 func TestNestingDeeperThanEightLevelsFailsTheRun(t *testing.T) {
 	env, _, _ := teamEnv(t, nil, cooperative)
 	def := Definition{Name: "deep", Steps: []Step{{ID: "say", Service: "echo"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t8", Definition: def, Inputs: runInput("runs/t8/input"), Depth: MaxDepth + 1})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t8", Definition: def, Inputs: runInput("runs/t8/input"), Depth: MaxDepth + 1})
 	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), "nested deeper than 8 levels") {
 		t.Fatalf("error %v", err)
 	}
@@ -415,17 +421,17 @@ func TestWorkflowStepFailsForAnUnknownWorkflow(t *testing.T) {
 	env, store, _ := teamEnv(t, nil, cooperative)
 	_ = store.Put(context.Background(), "runs/t9/input", []byte("hello"), Meta{})
 	def := Definition{Name: "outer", Steps: []Step{{ID: "nested", Service: WorkflowService, Workflow: "gone"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t9", Definition: def, Inputs: runInput("runs/t9/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t9", Definition: def, Inputs: runInput("runs/t9/input")})
 	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), `workflow "gone" is not a configured workflow`) {
 		t.Fatalf("error %v", err)
 	}
 }
 
 func TestMemberNamesAndChannels(t *testing.T) {
-	if got := MemberName("demo/lead@v1"); got != "lead" {
+	if got := MemberName("demo/lead@v1"); got != leadMember {
 		t.Errorf("member name %q", got)
 	}
-	if got := ChannelID("lead", "coder"); got != "coder--lead" {
+	if got := ChannelID("lead", "coder"); got != coderLeadChannel {
 		t.Errorf("channel id %q", got)
 	}
 	if a, b := titleCase("final-review"), titleCase("API-review"); a != "Final Review" || b != "API Review" {
@@ -435,11 +441,11 @@ func TestMemberNamesAndChannels(t *testing.T) {
 		t.Errorf("team path %q", got)
 	}
 	s := Step{Agent: "demo/lead@v1", Agents: []string{"demo/coder@v1", "demo/reviewer@v1"}}
-	if got := s.TeamChannels(); len(got) != 2 || got[0].ID != "coder--lead" || got[1].ID != "lead--reviewer" {
+	if got := s.TeamChannels(); len(got) != 2 || got[0].ID != coderLeadChannel || got[1].ID != "lead--reviewer" {
 		t.Errorf("default channels %+v", got)
 	}
 	s.Channels = [][]string{{"reviewer", "coder"}}
-	if got := s.TeamChannels(); len(got) != 1 || got[0].ID != "coder--reviewer" || got[0].Members[0] != "coder" {
+	if got := s.TeamChannels(); len(got) != 1 || got[0].ID != "coder--reviewer" || got[0].Members[0] != coderMember {
 		t.Errorf("configured channels %+v", got)
 	}
 }
@@ -451,16 +457,16 @@ func TestValidateTeamAndWorkflowSteps(t *testing.T) {
 	}
 	gate := Step{ID: "review", Service: GateService, DependsOn: []string{"team"}, OnReject: "team"}
 	node := Step{ID: "nested", Service: WorkflowService, Workflow: "inner", DependsOn: []string{"review"}}
-	if err := Validate(Definition{Name: "ok", Steps: []Step{team, gate, node}}); err != nil {
+	if err := Validate(&Definition{Name: "ok", Steps: []Step{team, gate, node}}); err != nil {
 		t.Fatal(err)
 	}
-	change := func(edit func(team, gate, node *Step)) Definition {
+	change := func(edit func(team, gate, node *Step)) *Definition {
 		a, b, c := team, gate, node
 		edit(&a, &b, &c)
-		return Definition{Name: "bad", Steps: []Step{a, b, c, {ID: "other", Service: "x"}}}
+		return &Definition{Name: "bad", Steps: []Step{a, b, c, {ID: "other", Service: "x"}}}
 	}
 	for name, tc := range map[string]struct {
-		def  Definition
+		def  *Definition
 		want string
 	}{
 		"no lead":             {change(func(a, _, _ *Step) { a.Agent = "" }), "needs a lead agent"},
@@ -517,7 +523,7 @@ func TestValidateSetRefusesCyclesUnknownAndAmbiguousNestedWorkflows(t *testing.T
 
 func TestTeamNudgesALeadThatNeitherActsNorFinishes(t *testing.T) {
 	// The lead ignores the task and the first nudge, and finishes on the second nudge.
-	env, store, f := teamEnv(t, nil, func(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error {
+	env, store, f := teamEnv(t, nil, func(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 		f.take(ctx, req.Team, req.Member)
 		if f.count(req.Member) == 3 {
 			f.finish(ctx, req.Team, "done", "code.py")
@@ -527,7 +533,7 @@ func TestTeamNudgesALeadThatNeitherActsNorFinishes(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Put(ctx, "runs/t10/input", []byte("task"), Meta{})
 	def := Definition{Name: "solo", Steps: []Step{{ID: "build", Service: TeamService, Agent: "lead@v1"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t10", Definition: def, Inputs: runInput("runs/t10/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t10", Definition: def, Inputs: runInput("runs/t10/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +545,7 @@ func TestTeamNudgesALeadThatNeitherActsNorFinishes(t *testing.T) {
 }
 
 func TestTeamStallsAfterThreeNudges(t *testing.T) {
-	env, store, f := teamEnv(t, nil, func(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error {
+	env, store, f := teamEnv(t, nil, func(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 		f.count(req.Member)
 		f.take(ctx, req.Team, req.Member)
 		return nil
@@ -547,7 +553,7 @@ func TestTeamStallsAfterThreeNudges(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Put(ctx, "runs/t11/input", []byte("task"), Meta{})
 	def := Definition{Name: "solo", Steps: []Step{{ID: "build", Service: TeamService, Agent: "lead@v1"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t11", Definition: def, Inputs: runInput("runs/t11/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t11", Definition: def, Inputs: runInput("runs/t11/input")})
 	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), `team "build" stalled`) {
 		t.Fatalf("error %v", err)
 	}
@@ -559,7 +565,7 @@ func TestTeamStallsAfterThreeNudges(t *testing.T) {
 
 // versioned is a team whose lead finishes on every message from the workflow, with the
 // summary "v<n>" for its n-th finish.
-func versioned(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error {
+func versioned(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 	for _, m := range f.take(ctx, req.Team, req.Member) {
 		if m.From == WorkflowSender {
 			f.finish(ctx, req.Team, fmt.Sprintf("v%d", f.count(req.Team)), "code.py")
@@ -593,12 +599,12 @@ func TestRejectionMakesDependentTeamsWorkAgain(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Put(ctx, "runs/t12/input", []byte("task"), Meta{})
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
 	}, 2*time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t12", Definition: def, Inputs: runInput("runs/t12/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t12", Definition: def, Inputs: runInput("runs/t12/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -630,17 +636,17 @@ func TestOpenTeamTellsARerunFromARetry(t *testing.T) {
 	_ = store.Put(ctx, "runs/t/input", []byte("task"), Meta{})
 	req := OpenTeamRequest{TraceID: "t", Team: "teams/t/build", Step: Step{ID: "build", Agent: "lead@v1"}, Inputs: runInput("runs/t/input"), Run: "/0"}
 	for i := 0; i < 2; i++ {
-		if res, err := a.OpenTeam(ctx, req); err != nil || res.Round != 1 {
+		if res, err := a.OpenTeam(ctx, &req); err != nil || res.Round != 1 {
 			t.Fatalf("open %d: %+v %v", i, res, err)
 		}
 	}
 	_ = store.Put(ctx, "teams/t/build/finished.json", []byte(`{"summary":"s","files":[]}`), Meta{})
-	if res, err := a.OpenTeam(ctx, req); err != nil || res.Round != 1 || !store.has("teams/t/build/finished.json") {
+	if res, err := a.OpenTeam(ctx, &req); err != nil || res.Round != 1 || !store.has("teams/t/build/finished.json") {
 		t.Fatalf("a retry must leave the finished team alone: %+v %v", res, err)
 	}
 	req.Run = "/1"
 	for i := 0; i < 2; i++ {
-		if res, err := a.OpenTeam(ctx, req); err != nil || res.Round != 2 || store.has("teams/t/build/finished.json") {
+		if res, err := a.OpenTeam(ctx, &req); err != nil || res.Round != 2 || store.has("teams/t/build/finished.json") {
 			t.Fatalf("rerun %d: %+v %v", i, res, err)
 		}
 	}
@@ -673,7 +679,7 @@ func TestRejectionRerunsDependentsThatAreStillInFlight(t *testing.T) {
 		first := len(saw) == 1
 		mu.Unlock()
 		if first {
-			env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: "flo"})
+			env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: testUser})
 			time.Sleep(200 * time.Millisecond)
 		}
 		_ = store.Put(ctx, req.OutputArtifact, []byte("saw "+summary), Meta{})
@@ -695,11 +701,13 @@ func TestRejectionRerunsDependentsThatAreStillInFlight(t *testing.T) {
 		if got := string(store.m["user-sessions/t13/talk/files/input-build.json"]); !strings.Contains(got, `"summary": "v2"`) {
 			t.Errorf("the session was not reopened with the new input: %s", got)
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "input-build.json", CompletedBy: "flo"})
-		env.SignalWorkflowByID("default-test-workflow-id/sub", DecisionSignal, Decision{Step: "ask", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "input-build.json", CompletedBy: testUser})
+		if err := env.SignalWorkflowByID("default-test-workflow-id/sub", DecisionSignal, Decision{Step: "ask", Decision: Approved, DecidedBy: testUser}); err != nil {
+			t.Error(err)
+		}
 	}, time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t13", Definition: def, Inputs: runInput("runs/t13/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t13", Definition: def, Inputs: runInput("runs/t13/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +732,7 @@ func TestOpenSessionReopensACompletedSession(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Put(ctx, "runs/t/draft", []byte("text"), Meta{})
 	_ = store.Put(ctx, "user-sessions/t/talk/completed.json", []byte(`{}`), Meta{})
-	if _, err := a.OpenSession(ctx, OpenSessionRequest{TraceID: "t", Session: "user-sessions/t/talk", Inputs: []Item{{Source: "draft", Artifact: "runs/t/draft", Round: 1}}}); err != nil {
+	if _, err := a.OpenSession(ctx, &OpenSessionRequest{TraceID: "t", Session: "user-sessions/t/talk", Inputs: []Item{{Source: "draft", Artifact: "runs/t/draft", Round: 1}}}); err != nil {
 		t.Fatal(err)
 	}
 	if store.has("user-sessions/t/talk/completed.json") || !store.has("user-sessions/t/talk/files/input-draft.md") {
@@ -734,7 +742,7 @@ func TestOpenSessionReopensACompletedSession(t *testing.T) {
 
 func TestWorkflowMemberRunsOfALaterRoundKeepThoseOfAnEarlierOne(t *testing.T) {
 	// The lead asks the echo workflow on every message from the workflow and finishes on its reply.
-	env, store, f := teamEnv(t, []Definition{echoWorkflow}, func(ctx context.Context, f *fakeMembers, req TeamTurnRequest) error {
+	env, store, f := teamEnv(t, []Definition{echoWorkflow}, func(ctx context.Context, f *fakeMembers, req *TeamTurnRequest) error {
 		for _, m := range f.take(ctx, req.Team, req.Member) {
 			if m.From == WorkflowSender {
 				f.send(ctx, req.Team, "lead", "echo", fmt.Sprintf("ping %d", f.count("ping")))
@@ -747,16 +755,16 @@ func TestWorkflowMemberRunsOfALaterRoundKeepThoseOfAnEarlierOne(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Put(ctx, "runs/t14/input", []byte("task"), Meta{})
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
 	}, 2*time.Second)
 	def := Definition{Name: "reviewed", Steps: []Step{
 		{ID: "build", Service: TeamService, Agent: "lead@v1", Workflows: []string{"echo"}},
 		{ID: "review", Service: GateService, DependsOn: []string{"build"}, OnReject: "build"},
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t14", Definition: def, Inputs: runInput("runs/t14/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t14", Definition: def, Inputs: runInput("runs/t14/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -787,7 +795,7 @@ func TestRouteChildCountsTowardTheNestingDepth(t *testing.T) {
 		{ID: "triage", Service: "triage"},
 		{ID: "route", Service: RouteService, DependsOn: []string{"triage"}},
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t15", Definition: def, Inputs: runInput("runs/t15/input"), Depth: MaxDepth})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t15", Definition: def, Inputs: runInput("runs/t15/input"), Depth: MaxDepth})
 	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), `workflow "small-fix" is nested deeper than 8 levels`) {
 		t.Fatalf("error %v", err)
 	}
@@ -810,7 +818,7 @@ func TestPostTeamMessageWritesOnlyTheSendersOwnQueue(t *testing.T) {
 		req := PostTeamMessageRequest{Team: team, Channel: channel.ID, From: "echo", Artifacts: []string{"runs/t/out"}, Member: "echo", Ref: "echo", Read: read}
 		// The activity runs twice, as after a retry.
 		for i := 0; i < 2; i++ {
-			if err := a.PostTeamMessage(ctx, req); err != nil {
+			if err := a.PostTeamMessage(ctx, &req); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -824,17 +832,17 @@ func TestPostTeamMessageWritesOnlyTheSendersOwnQueue(t *testing.T) {
 	reply(2)
 	// The same answer to a later message is a new reply; the retries added nothing.
 	echo := f.queue(ctx, team, channel.ID, "echo")
-	if len(echo.Messages) != 2 || echo.Messages[1].Seq != 2 || echo.Messages[1].Text != "same answer" || echo.To != "lead" {
+	if len(echo.Messages) != 2 || echo.Messages[1].Seq != 2 || echo.Messages[1].Text != "same answer" || echo.To != leadMember {
 		t.Fatalf("echo queue %+v", echo)
 	}
 	if got := string(store.m[queueID(team, channel.ID, "lead")]); got != lead || before == lead {
 		t.Error("a reply must not touch the other side's queue")
 	}
-	if state, err := a.TeamState(ctx, TeamStateRequest{Team: team}); err != nil || len(state.Unread) != 1 || state.Unread[0] != "lead" {
+	if state, err := a.TeamState(ctx, TeamStateRequest{Team: team}); err != nil || len(state.Unread) != 1 || state.Unread[0] != leadMember {
 		t.Errorf("unread %v %v", state.Unread, err)
 	}
 	// The queue of an agent member belongs to the tool-gateway.
-	err := a.PostTeamMessage(ctx, PostTeamMessageRequest{Team: team, Channel: channel.ID, From: "lead", Text: "hi"})
+	err := a.PostTeamMessage(ctx, &PostTeamMessageRequest{Team: team, Channel: channel.ID, From: "lead", Text: "hi"})
 	if err == nil || !strings.Contains(err.Error(), `does not write the queue of "lead"`) {
 		t.Fatalf("error %v", err)
 	}
@@ -845,19 +853,19 @@ func TestOneWayChannel(t *testing.T) {
 		ID: "team", Service: TeamService, Agent: "demo/lead@v1", Agents: []string{"demo/coder@v1"},
 		Channels: [][]string{{"lead", "coder", OneWay}},
 	}
-	if err := Validate(Definition{Name: "ok", Steps: []Step{team}}); err != nil {
+	if err := Validate(&Definition{Name: "ok", Steps: []Step{team}}); err != nil {
 		t.Fatal(err)
 	}
 	got := team.TeamChannels()
-	if len(got) != 1 || got[0].ID != "coder--lead" || got[0].From != "lead" || !got[0].sends("lead") || got[0].sends("coder") {
+	if len(got) != 1 || got[0].ID != coderLeadChannel || got[0].From != leadMember || !got[0].sends("lead") || got[0].sends("coder") {
 		t.Errorf("one-way channel %+v", got)
 	}
 	team.Channels = [][]string{{"coder", "lead", OneWay}}
-	if got := team.TeamChannels(); got[0].From != "coder" {
+	if got := team.TeamChannels(); got[0].From != coderMember {
 		t.Errorf("the first member sends, got %+v", got)
 	}
 	team.Channels = [][]string{{"lead", "coder", "both"}}
-	if err := Validate(Definition{Name: "bad", Steps: []Step{team}}); err == nil || !strings.Contains(err.Error(), "third entry") {
+	if err := Validate(&Definition{Name: "bad", Steps: []Step{team}}); err == nil || !strings.Contains(err.Error(), "third entry") {
 		t.Errorf("want a refused third entry, got %v", err)
 	}
 	if two := (TeamChannel{ID: "a--b", Members: []string{"a", "b"}}); !two.sends("a") || !two.sends("b") {

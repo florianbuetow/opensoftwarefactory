@@ -24,7 +24,7 @@ func TestHTTPUpstreamForwardsHeadersAndStream(t *testing.T) {
 		_, _ = io.WriteString(w, "data: {\\\"jsonrpc\\\":\\\"2.0\\\"}\\n\\n")
 	}))
 	defer server.Close()
-	u, err := newUpstream(Connection{Transport: "streamable-http", URL: server.URL})
+	u, err := newUpstream(&Connection{Transport: "streamable-http", URL: server.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestHTTPUpstreamForwardsHeadersAndStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer closeResponse(t, response)
 	if response.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("content type %q", response.Header.Get("Content-Type"))
 	}
@@ -47,7 +47,7 @@ func TestHTTPUpstreamDoesNotFollowRedirects(t *testing.T) {
 		http.Redirect(w, r, "/other", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	u, err := newUpstream(Connection{Transport: "streamable-http", URL: server.URL})
+	u, err := newUpstream(&Connection{Transport: "streamable-http", URL: server.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestHTTPUpstreamDoesNotFollowRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer closeResponse(t, response)
 	if response.StatusCode != http.StatusTemporaryRedirect {
 		t.Fatalf("status %d", response.StatusCode)
 	}
@@ -63,7 +63,7 @@ func TestHTTPUpstreamDoesNotFollowRedirects(t *testing.T) {
 
 func TestStdioUpstreamConcurrentRequestsAndIDRestore(t *testing.T) {
 	u := helperUpstream(t, "echo")
-	defer u.Close()
+	defer closeUpstream(t, u)
 	const calls = 24
 	var wg sync.WaitGroup
 	errs := make(chan error, calls)
@@ -77,10 +77,10 @@ func TestStdioUpstreamConcurrentRequestsAndIDRestore(t *testing.T) {
 				errs <- err
 				return
 			}
-			defer response.Body.Close()
+			defer closeResponse(t, response)
 			var message struct {
-				ID     int            `json:"id"`
 				Result map[string]any `json:"result"`
+				ID     int            `json:"id"`
 			}
 			if err := json.NewDecoder(response.Body).Decode(&message); err != nil || message.ID != i%10 || message.Result["echo"] == nil {
 				errs <- err
@@ -98,13 +98,13 @@ func TestStdioUpstreamConcurrentRequestsAndIDRestore(t *testing.T) {
 
 func TestStdioUpstreamForwardsRequestScopedProgressAsSSE(t *testing.T) {
 	u := helperUpstream(t, "progress")
-	defer u.Close()
+	defer closeUpstream(t, u)
 	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"echo","_meta":{"progressToken":"job-7"}}}`)
 	response, err := u.RoundTrip(context.Background(), body, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer closeResponse(t, response)
 	if response.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("content type %q", response.Header.Get("Content-Type"))
 	}
@@ -122,7 +122,8 @@ func TestStdioUpstreamSendsCancellationAndCleansUp(t *testing.T) {
 	u := helperUpstream(t, "wait")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := u.RoundTrip(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait"}}`), nil)
+	cancelled, err := u.RoundTrip(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait"}}`), nil)
+	closeResponse(t, cancelled)
 	if err == nil {
 		t.Fatal("expected cancellation")
 	}
@@ -130,7 +131,7 @@ func TestStdioUpstreamSendsCancellationAndCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer closeResponse(t, response)
 	var message struct {
 		Result struct {
 			Cancelled bool `json:"cancelled"`
@@ -149,17 +150,19 @@ func TestStdioUpstreamSendsCancellationAndCleansUp(t *testing.T) {
 
 func TestStdioUpstreamMapsExternalCancellation(t *testing.T) {
 	u := helperUpstream(t, "wait")
-	defer u.Close()
+	defer closeUpstream(t, u)
 	done := make(chan error, 1)
 	go func() {
-		_, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"wait"}}`), nil)
+		response, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"wait"}}`), nil)
+		closeResponse(t, response)
 		done <- err
 	}()
 	time.Sleep(100 * time.Millisecond)
-	_, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}`), nil)
+	accepted, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	closeResponse(t, accepted)
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
@@ -172,21 +175,23 @@ func TestStdioUpstreamMapsExternalCancellation(t *testing.T) {
 
 func TestStdioUpstreamIgnoresAmbiguousExternalCancellation(t *testing.T) {
 	u := helperUpstream(t, "wait")
-	defer u.Close()
+	defer closeUpstream(t, u)
 	results := make(chan error, 2)
 	for range 2 {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 			defer cancel()
-			_, err := u.RoundTrip(ctx, []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"wait"}}`), nil)
+			response, err := u.RoundTrip(ctx, []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"wait"}}`), nil)
+			closeResponse(t, response)
 			results <- err
 		}()
 	}
 	time.Sleep(100 * time.Millisecond)
-	_, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}`), nil)
+	accepted, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	closeResponse(t, accepted)
 	for range 2 {
 		if err := <-results; !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("got %v, want deadline exceeded", err)
@@ -201,7 +206,8 @@ func TestStdioUpstreamCancelsBlockedWrite(t *testing.T) {
 	large := strings.Repeat("x", 1<<20)
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"payload":"` + large + `"}}}`)
 	started := time.Now()
-	_, err := u.RoundTrip(ctx, body, nil)
+	response, err := u.RoundTrip(ctx, body, nil)
+	closeResponse(t, response)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v, want deadline exceeded", err)
 	}
@@ -212,8 +218,9 @@ func TestStdioUpstreamCancelsBlockedWrite(t *testing.T) {
 
 func TestStdioUpstreamRestartsAfterExit(t *testing.T) {
 	u := helperUpstream(t, "echo")
-	defer u.Close()
-	_, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exit"}}`), nil)
+	defer closeUpstream(t, u)
+	exited, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exit"}}`), nil)
+	closeResponse(t, exited)
 	if err == nil {
 		t.Fatal("expected process exit")
 	}
@@ -221,7 +228,7 @@ func TestStdioUpstreamRestartsAfterExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	closeResponse(t, response)
 }
 
 func TestStdioUpstreamClosePreventsRespawn(t *testing.T) {
@@ -229,7 +236,8 @@ func TestStdioUpstreamClosePreventsRespawn(t *testing.T) {
 	if err := u.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`), nil)
+	response, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`), nil)
+	closeResponse(t, response)
 	if err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("got %v, want closed error", err)
 	}
@@ -237,8 +245,9 @@ func TestStdioUpstreamClosePreventsRespawn(t *testing.T) {
 
 func TestStdioUpstreamRejectsWrongInitializationVersion(t *testing.T) {
 	u := helperUpstream(t, "legacy")
-	defer u.Close()
-	_, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`), nil)
+	defer closeUpstream(t, u)
+	response, err := u.RoundTrip(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}`), nil)
+	closeResponse(t, response)
 	if err == nil || !strings.Contains(err.Error(), "negotiate") {
 		t.Fatalf("got %v, want initialization error", err)
 	}
@@ -246,14 +255,18 @@ func TestStdioUpstreamRejectsWrongInitializationVersion(t *testing.T) {
 
 func helperUpstream(t *testing.T, mode string) *stdioUpstream {
 	t.Helper()
-	u, err := newUpstream(Connection{Transport: "stdio", Command: os.Args[0], Args: []string{"-test.run=TestStdioHelperProcess", "--"}, Env: map[string]string{"GO_WANT_MCP_HELPER": "1", "MCP_HELPER_MODE": mode}})
+	u, err := newUpstream(&Connection{Transport: "stdio", Command: os.Args[0], Args: []string{"-test.run=TestStdioHelperProcess", "--"}, Env: map[string]string{"GO_WANT_MCP_HELPER": "1", "MCP_HELPER_MODE": mode}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return u.(*stdioUpstream)
+	stdio, ok := u.(*stdioUpstream)
+	if !ok {
+		t.Fatalf("stdio transport built %T", u)
+	}
+	return stdio
 }
 
-func TestStdioHelperProcess(t *testing.T) {
+func TestStdioHelperProcess(*testing.T) {
 	if os.Getenv("GO_WANT_MCP_HELPER") != "1" {
 		return
 	}
@@ -304,7 +317,7 @@ func TestStdioHelperProcess(t *testing.T) {
 			_ = json.Unmarshal(message["params"], &meta)
 			var requestMeta map[string]json.RawMessage
 			_ = json.Unmarshal(meta["_meta"], &requestMeta)
-			progress, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress", "params": map[string]any{"progressToken": json.RawMessage(requestMeta["progressToken"]), "progress": 1}})
+			progress, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress", "params": map[string]any{"progressToken": requestMeta["progressToken"], "progress": 1}})
 			_, _ = os.Stdout.Write(append(progress, '\n'))
 		}
 		var id any

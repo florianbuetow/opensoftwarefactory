@@ -333,7 +333,7 @@ const RunsLogic = (() => {
   }
 
   function renderFilters() {
-    const names = [...new Set(runIndex.list().map((r) => r.workflow).filter(Boolean))].sort();
+    const names = [...new Set(runIndex.list().map((r) => runIndex.workflowOf(r)).filter(Boolean))].sort(); // one entry per workflow, also for runs from before its group
     $("runs-workflows").replaceChildren(...[["", "All workflows"], ...names.map((n) => [n, titleCase(n)])].map(([value, label]) => {
       const li = h("li", { role: "option", tabIndex: 0, "aria-selected": String(state.workflow === value) }, h("div", { className: "row-title" }, label));
       const pick = () => { state.workflow = value; state.selected = ""; location.hash = hashFor(""); };
@@ -1114,7 +1114,7 @@ const RunsLogic = (() => {
   // asked again on every call (about every 3 seconds while the page is open).
   async function refresh(full = false) {
     try {
-      if (full || !runIndex.records.size) await runIndex.refresh();
+      if (full || !runIndex.records.size) await Promise.all([runIndex.refresh(), runIndex.loadWorkflowNames()]); // names: runs from before a workflow's group list with it
       state.error = "";
     } catch (e) {
       state.error = `Cannot list runs: ${e.message}`;

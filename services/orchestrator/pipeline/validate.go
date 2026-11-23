@@ -19,7 +19,7 @@ const workflowNameExpr = nameSegmentExpr + `(/` + nameSegmentExpr + `){0,3}`
 var workflowNamePattern = regexp.MustCompile(`^` + workflowNameExpr + `$`)
 
 // versionSegment is a path segment the blobstore uses for a version, as in workflows/<name>/v2.
-var versionSegment = regexp.MustCompile(`^v[0-9]+$`)
+var versionSegment = regexp.MustCompile(`^v\d+$`)
 
 // ValidWorkflowName reports whether name is a valid workflow name. No segment may look like
 // a version, since the blobstore keeps the versions of a workflow under workflows/<name>/v<N>.
@@ -43,16 +43,17 @@ var agentRefPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(/[
 // an acyclic graph, and the fields each kind of step requires. Any step may
 // depend on an interactive step, as on a gate: its output artifact is the
 // session file the person chose.
-func Validate(d Definition) error {
+func Validate(d *Definition) error {
 	if !ValidWorkflowName(d.Name) {
 		return fmt.Errorf("workflow name %q must be letters, digits, and dashes, in up to three groups separated by /", d.Name)
 	}
 	if len(d.Steps) == 0 {
 		return fmt.Errorf("workflow %q needs at least one step", d.Name)
 	}
-	steps := map[string]Step{}
+	steps := map[string]*Step{}
 	seen := map[string]bool{}
-	for _, s := range d.Steps {
+	for i := range d.Steps {
+		s := &d.Steps[i]
 		if !namePattern.MatchString(s.ID) || strings.EqualFold(s.ID, InputSource) {
 			return fmt.Errorf("workflow %q: step id %q must be letters, digits, and dashes and not %q", d.Name, s.ID, InputSource)
 		}
@@ -136,7 +137,8 @@ func Validate(d Definition) error {
 		steps[s.ID] = s
 		seen[strings.ToLower(s.ID)] = true
 	}
-	for _, s := range d.Steps {
+	for i := range d.Steps {
+		s := &d.Steps[i]
 		for _, dep := range s.DependsOn {
 			target, ok := steps[dep]
 			if !ok {
@@ -172,14 +174,15 @@ func Validate(d Definition) error {
 		state[id] = visited
 		return nil
 	}
-	for _, s := range d.Steps {
-		if err := visit(s.ID); err != nil {
+	for i := range d.Steps {
+		if err := visit(d.Steps[i].ID); err != nil {
 			return err
 		}
 	}
 	// A workflow has at most one dev pod. The steps that depend on the devpod step work in it.
 	pod := ""
-	for _, s := range d.Steps {
+	for i := range d.Steps {
+		s := &d.Steps[i]
 		if s.Service != DevPodService {
 			continue
 		}
@@ -192,18 +195,21 @@ func Validate(d Definition) error {
 	if pod != "" {
 		inPod = dependents(d, pod)
 		// A step after a merge or batch runs once per message, which would create the pod again.
-		for _, other := range d.Steps {
+		for i := range d.Steps {
+			other := &d.Steps[i]
 			if other.IsNode() && dependents(d, other.ID)[pod] {
 				return fmt.Errorf("workflow %q: devpod step %q cannot come after the %s step %q", d.Name, pod, other.Service, other.ID)
 			}
 		}
 	}
-	for _, s := range d.Steps {
+	for i := range d.Steps {
+		s := &d.Steps[i]
 		if (s.Service == DevPodStopService || s.Service == CommandService) && !inPod[s.ID] {
 			return fmt.Errorf("workflow %q: %s step %q must depend on the devpod step of the workflow, directly or through other steps", d.Name, s.Service, s.ID)
 		}
 	}
-	for _, s := range d.Steps {
+	for i := range d.Steps {
+		s := &d.Steps[i]
 		if s.OnReject == "" {
 			continue
 		}
@@ -221,7 +227,8 @@ func Validate(d Definition) error {
 		// receive their results a second time.
 		if target.Service == TeamService {
 			after := dependents(d, s.OnReject)
-			for _, other := range d.Steps {
+			for j := range d.Steps {
+				other := &d.Steps[j]
 				if after[other.ID] && other.IsNode() {
 					return fmt.Errorf("workflow %q: gate %q on_reject names team %q, which has the %s step %q after it; the gate and its team must both come after it or before it",
 						d.Name, s.ID, s.OnReject, other.Service, other.ID)
@@ -235,7 +242,8 @@ func Validate(d Definition) error {
 		for _, id := range between(d, s.OnReject, s.ID) {
 			again[id] = true
 		}
-		for _, other := range d.Steps {
+		for j := range d.Steps {
+			other := &d.Steps[j]
 			if !other.IsNode() {
 				continue
 			}
@@ -253,7 +261,7 @@ func Validate(d Definition) error {
 }
 
 // takesRejections reports whether a gate may send its rejections back to the step.
-func (s Step) takesRejections() bool {
+func (s *Step) takesRejections() bool {
 	switch s.Service {
 	case AgentService, InteractiveService, TeamService, WorkflowService:
 		return true
@@ -263,12 +271,13 @@ func (s Step) takesRejections() bool {
 
 // between returns the target of a back edge and every step on a path from it to the gate,
 // without the gate, in definition order. These steps run again after a rejection.
-func between(d Definition, target, gate string) []string {
+func between(d *Definition, target, gate string) []string {
 	after := dependents(d, target)
 	before := map[string]bool{gate: true}
 	for changed := true; changed; {
 		changed = false
-		for _, s := range d.Steps {
+		for i := range d.Steps {
+			s := &d.Steps[i]
 			if !before[s.ID] {
 				continue
 			}
@@ -280,9 +289,9 @@ func between(d Definition, target, gate string) []string {
 		}
 	}
 	var steps []string
-	for _, s := range d.Steps {
-		if s.ID != gate && after[s.ID] && before[s.ID] {
-			steps = append(steps, s.ID)
+	for i := range d.Steps {
+		if id := d.Steps[i].ID; id != gate && after[id] && before[id] {
+			steps = append(steps, id)
 		}
 	}
 	return steps
@@ -295,7 +304,7 @@ var (
 
 // validateDevPod checks a devpod step: a repository, a source branch, a work branch that
 // differs from it, and well-formed protected paths and rules.
-func validateDevPod(workflow string, s Step) error {
+func validateDevPod(workflow string, s *Step) error {
 	if !repositoryPattern.MatchString(s.Repository) {
 		return fmt.Errorf("workflow %q: devpod step %q needs the repository it clones, such as claims-build", workflow, s.ID)
 	}
@@ -337,7 +346,7 @@ func validateDevPod(workflow string, s Step) error {
 
 // validateNode checks a merge or batch step: at least one source, positive numbers, size on
 // a batch only, capacity on a merge only, and none of the fields of other kinds of step.
-func validateNode(workflow string, s Step) error {
+func validateNode(workflow string, s *Step) error {
 	if len(s.DependsOn) == 0 {
 		return fmt.Errorf("workflow %q: %s step %q needs at least one source in depends_on", workflow, s.Service, s.ID)
 	}
@@ -369,7 +378,7 @@ func validateNode(workflow string, s Step) error {
 // validateTeam checks a team step: a lead agent, members with unique names that are not the
 // reserved "workflow", and useful channels between two different members. Workflow members
 // reply to the channel that invoked them; neither can initiate a workflow-to-workflow channel.
-func validateTeam(workflow string, s Step) error {
+func validateTeam(workflow string, s *Step) error {
 	if !agentRefPattern.MatchString(s.Agent) {
 		return fmt.Errorf("workflow %q: team step %q needs a lead agent such as lead@v1", workflow, s.ID)
 	}
@@ -432,9 +441,10 @@ func validateTeam(workflow string, s Step) error {
 
 // nestedWorkflows returns the workflow references a definition runs through workflow steps
 // and team workflow members, each with the step that names it.
-func nestedWorkflows(d Definition) [][2]string {
+func nestedWorkflows(d *Definition) [][2]string {
 	var refs [][2]string
-	for _, s := range d.Steps {
+	for i := range d.Steps {
+		s := &d.Steps[i]
 		switch s.Service {
 		case WorkflowService:
 			refs = append(refs, [2]string{s.ID, s.Workflow})
@@ -458,8 +468,8 @@ func ValidateSet(definitions []Definition) error {
 	)
 	state := map[string]int{}
 	var path []string
-	var visit func(d Definition) error
-	visit = func(d Definition) error {
+	var visit func(d *Definition) error
+	visit = func(d *Definition) error {
 		key := WorkflowRef(d.Name, DefinitionVersion(d))
 		switch state[key] {
 		case visiting:
@@ -481,11 +491,11 @@ func ValidateSet(definitions []Definition) error {
 			if !ok {
 				return fmt.Errorf("workflow %q: step %q names unknown workflow %q", d.Name, ref[0], ref[1])
 			}
-			if final := FinalSteps(nested); len(final) != 1 {
+			if final := FinalSteps(&nested); len(final) != 1 {
 				return fmt.Errorf("workflow %q runs inside workflow %q (step %q) and needs exactly one final step, but has %d (%s)",
 					nested.Name, d.Name, ref[0], len(final), strings.Join(final, ", "))
 			}
-			if err := visit(nested); err != nil {
+			if err := visit(&nested); err != nil {
 				return err
 			}
 		}
@@ -493,8 +503,9 @@ func ValidateSet(definitions []Definition) error {
 		state[key] = visited
 		return nil
 	}
-	for _, d := range Newest(definitions) {
-		if err := visit(d); err != nil {
+	newest := Newest(definitions)
+	for i := range newest {
+		if err := visit(&newest[i]); err != nil {
 			return err
 		}
 	}

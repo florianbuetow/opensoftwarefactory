@@ -28,20 +28,20 @@ import (
 
 // StepRequest is the activity input every service receives.
 type StepRequest struct {
-	TraceID           string      `json:"trace_id"`
-	Workflow          string      `json:"workflow"`
-	StepID            string      `json:"step_id"`
-	Agent             string      `json:"agent,omitempty"`
-	Inputs            []InputItem `json:"inputs"`
-	OutputArtifact    string      `json:"output_artifact"`
-	ProducerRunID     string      `json:"producer_run_id,omitempty"`
-	TargetRunID       string      `json:"target_run_id,omitempty"`
-	TargetExecutionID string      `json:"target_execution_id,omitempty"`
-	ExecutionID       string      `json:"execution_id,omitempty"`
-	ParentExecutionID string      `json:"parent_execution_id,omitempty"`
+	TraceID           string `json:"trace_id"`
+	Workflow          string `json:"workflow"`
+	StepID            string `json:"step_id"`
+	Agent             string `json:"agent,omitempty"`
+	OutputArtifact    string `json:"output_artifact"`
+	ProducerRunID     string `json:"producer_run_id,omitempty"`
+	TargetRunID       string `json:"target_run_id,omitempty"`
+	TargetExecutionID string `json:"target_execution_id,omitempty"`
+	ExecutionID       string `json:"execution_id,omitempty"`
+	ParentExecutionID string `json:"parent_execution_id,omitempty"`
 	// DevPod is the run's dev pod; empty when the run has none.
 	DevPod                    string            `json:"dev_pod,omitempty"`
 	Skills                    map[string]string `json:"skills,omitempty"`
+	Inputs                    []InputItem       `json:"inputs"`
 	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
@@ -50,12 +50,19 @@ type StepRequest struct {
 type InputItem struct {
 	Source   string `json:"source"`
 	Artifact string `json:"artifact"`
-	Round    int    `json:"round"`
 	// Kind marks the items a rejected gate sends back: "rejection" (the gate's decision
 	// record), "previous" (the step's own earlier output) or "reviewed" (a document the person
 	// was shown). A normal input has none.
-	Kind string `json:"kind,omitempty"`
+	Kind  string `json:"kind,omitempty"`
+	Round int    `json:"round"`
 }
+
+// The kinds of the input items a rejected gate sends back.
+const (
+	inputKindRejection = "rejection"
+	inputKindPrevious  = "previous"
+	inputKindReviewed  = "reviewed"
+)
 
 // StepResult is the activity output every service returns.
 type StepResult struct {
@@ -66,23 +73,31 @@ type StepResult struct {
 
 // Definition is the agent.json of a pinned agent version.
 type Definition struct {
-	SchemaVersion int      `json:"schema_version"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description"`
-	Models        []string `json:"models"`
-	Effort        string   `json:"effort"`
-	Tools         []string `json:"tools"`
-	MaxRetries    int      `json:"max_retries"` // model calls after the first one, such as after a tool call; 0 by default
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Models      []string `json:"models"`
+	Effort      string   `json:"effort"`
+	Tools       []string `json:"tools"`
 	// Temperature is an optional model setting. It is sent only when set.
 	Temperature *float64 `json:"temperature,omitempty"`
 	// UnpackInputs is required. With true the first user message holds the content of every
 	// input; with false it lists only the references. It is nil when agent.json lacks it.
-	UnpackInputs *bool `json:"unpack_inputs"`
+	UnpackInputs   *bool           `json:"unpack_inputs"`
+	OutputContract *OutputContract `json:"output_contract,omitempty"`
 	// Commands lists the command patterns the agent may run in a dev pod. The connector service
 	// enforces them; here they are only named in the dev pod note.
-	Commands       []string        `json:"commands,omitempty"`
-	OutputContract *OutputContract `json:"output_contract,omitempty"`
+	Commands      []string `json:"commands,omitempty"`
+	SchemaVersion int      `json:"schema_version"`
+	MaxRetries    int      `json:"max_retries"` // model calls after the first one, such as after a tool call; 0 by default
 }
+
+// The roles of the messages in a conversation with a model.
+const (
+	roleSystem    = "system"
+	roleUser      = "user"
+	roleAssistant = "assistant"
+	roleTool      = "tool"
+)
 
 // noThinking is the assistant turn that tells a thinking model its thinking is already over.
 // The local models take no setting for this, so the request ends with this empty thinking block
@@ -96,13 +111,13 @@ const maxAnswerTokens = 6000
 // chatRequest builds the model request of this agent for the given conversation. With the
 // effort "none" the model is asked not to think first: no reasoning_effort is sent and the
 // conversation ends with an empty thinking block.
-func (d Definition) chatRequest(messages, tools []any) chatRequest {
+func (d *Definition) chatRequest(messages, tools []any) chatRequest {
 	var responseFormat map[string]string
 	if d.OutputContract != nil {
 		responseFormat = map[string]string{"type": "json_object"}
 	}
 	if d.Effort == "none" {
-		ended := append(append(make([]any, 0, len(messages)+1), messages...), map[string]string{"role": "assistant", "content": noThinking})
+		ended := append(append(make([]any, 0, len(messages)+1), messages...), map[string]string{"role": roleAssistant, "content": noThinking})
 		return chatRequest{Model: d.Models[0], Messages: ended, Tools: tools, Temperature: d.Temperature, ResponseFormat: responseFormat, MaxTokens: maxAnswerTokens}
 	}
 	return chatRequest{Model: d.Models[0], Messages: messages, Tools: tools, ReasoningEffort: d.Effort, Temperature: d.Temperature, ResponseFormat: responseFormat, MaxTokens: maxAnswerTokens}
@@ -116,7 +131,6 @@ type RunRecord struct {
 	Temperature           *float64          `json:"temperature,omitempty"`
 	Started               time.Time         `json:"started"`
 	Finished              time.Time         `json:"finished"`
-	ModelCalls            int               `json:"model_calls"`
 	Messages              []any             `json:"messages"`
 	Usage                 *usage            `json:"usage,omitempty"`
 	EstimatedInputTokens  *int64            `json:"estimated_input_tokens,omitempty"`
@@ -125,19 +139,29 @@ type RunRecord struct {
 	EstimationMethod      string            `json:"estimation_method,omitempty"`
 	Status                string            `json:"status,omitempty"`
 	Error                 string            `json:"error,omitempty"`
-	Attempt               int32             `json:"attempt,omitempty"`
-	Events                []RunEvent        `json:"events,omitempty"`
 	TraceID               string            `json:"trace_id,omitempty"`
 	SpanID                string            `json:"span_id,omitempty"`
 	RunID                 string            `json:"run_id,omitempty"`
 	ExecutionID           string            `json:"execution_id,omitempty"`
 	ParentExecutionID     string            `json:"parent_execution_id,omitempty"`
 	ActivityID            string            `json:"activity_id,omitempty"`
-	ActivityAttempt       int32             `json:"activity_attempt,omitempty"`
 	PromptEvidence        *PromptEvidence   `json:"prompt_evidence,omitempty"`
 	OutputValidation      string            `json:"output_validation,omitempty"`
 	ExtractionObligation  *extractionIntent `json:"extraction_obligation,omitempty"`
+	Events                []RunEvent        `json:"events,omitempty"`
+	ModelCalls            int               `json:"model_calls"`
+	Attempt               int32             `json:"attempt,omitempty"`
+	ActivityAttempt       int32             `json:"activity_attempt,omitempty"`
 }
+
+// The statuses of a run record and of the events in it.
+const (
+	statusRunning   = "running"
+	statusCompleted = "completed"
+	statusFailed    = "failed"
+	statusCanceled  = "canceled"
+	statusBlocked   = "blocked"
+)
 
 // PromptEvidence links the exact registry sources and immutable run snapshots used to build
 // this attempt's effective system prompt.
@@ -149,6 +173,7 @@ type PromptEvidence struct {
 	Skills                  []SkillEvidence  `json:"skills,omitempty"`
 }
 
+// PolicyEvidence links one policy version to the copy of it kept in the run folder.
 type PolicyEvidence struct {
 	ID               string `json:"id"`
 	Version          string `json:"version"`
@@ -163,7 +188,6 @@ type RunEvent struct {
 	Status                string    `json:"status"`
 	Started               time.Time `json:"started"`
 	Finished              time.Time `json:"finished"`
-	DurationMS            int64     `json:"duration_ms"`
 	ProcessingTimeMS      *int64    `json:"processing_time_ms,omitempty"`
 	Usage                 *usage    `json:"usage,omitempty"` // token counts of a model call, when the model reports them
 	EstimatedInputTokens  *int64    `json:"estimated_input_tokens,omitempty"`
@@ -175,14 +199,28 @@ type RunEvent struct {
 	ToolCallID            string    `json:"tool_call_id,omitempty"`
 	Model                 string    `json:"model,omitempty"`
 	Service               string    `json:"service,omitempty"`
-	Turn                  int       `json:"turn,omitempty"`
 	TraceID               string    `json:"trace_id,omitempty"`
 	SpanID                string    `json:"span_id,omitempty"`
 	Inputs                []string  `json:"input_artifacts,omitempty"`
 	Output                string    `json:"output_artifact,omitempty"`
-	Policies              []string  `json:"policies,omitempty"`
 	MeasurementID         string    `json:"measurement_id,omitempty"`
+	Policies              []string  `json:"policies,omitempty"`
+	DurationMS            int64     `json:"duration_ms"`
+	Turn                  int       `json:"turn,omitempty"`
 }
+
+// The kinds of the model and tool call events.
+const (
+	kindModelCall = "model_call"
+	kindToolCall  = "tool_call"
+)
+
+// The error categories the agent itself assigns.
+const (
+	categoryCanceled   = "canceled"
+	categoryMCPGateway = "mcp_gateway"
+	categoryTool       = "tool"
+)
 
 type correlation struct {
 	traceID, stepID, agentRef, traceparent     string
@@ -197,7 +235,7 @@ type categorizedError struct{ category, message string }
 func (e categorizedError) Error() string         { return e.message }
 func (e categorizedError) ErrorCategory() string { return e.category }
 
-func withCorrelation(ctx context.Context, req StepRequest, ref string, attempt int32) context.Context {
+func withCorrelation(ctx context.Context, req *StepRequest, ref string, attempt int32) context.Context {
 	sum := sha256.Sum256([]byte(req.TraceID + "\x00" + req.OutputArtifact + "\x00" + req.StepID + "\x00" + ref + "\x00" + strconv.Itoa(int(attempt))))
 	trace := sha256.Sum256([]byte(req.TraceID))
 	c := correlation{
@@ -248,7 +286,8 @@ func setCorrelationHeaders(req *http.Request) {
 	otel.GetTextMapPropagator().Inject(req.Context(), propagation.HeaderCarrier(req.Header))
 }
 
-func eventSpan(ctx context.Context, event RunEvent, spanName string, attrs ...attribute.KeyValue) (context.Context, RunEvent, trace.Span) {
+// eventSpan starts the span of an event and returns a copy of the event with the span's IDs.
+func eventSpan(ctx context.Context, event *RunEvent, spanName string, attrs ...attribute.KeyValue) (context.Context, RunEvent, trace.Span) {
 	if c, ok := ctx.Value(correlationKey{}).(correlation); ok {
 		attrs = append(attrs, attribute.String("factory.run_id", c.traceID))
 		if c.executionID != "" {
@@ -259,14 +298,16 @@ func eventSpan(ctx context.Context, event RunEvent, spanName string, attrs ...at
 		}
 	}
 	ctx, span := otel.Tracer("opensoftwarefactory/agent").Start(ctx, spanName, trace.WithAttributes(attrs...))
+	started := *event
 	sc := span.SpanContext()
 	if sc.IsValid() {
-		event.TraceID, event.SpanID = sc.TraceID().String(), sc.SpanID().String()
+		started.TraceID, started.SpanID = sc.TraceID().String(), sc.SpanID().String()
 	}
-	return ctx, event, span
+	return ctx, started, span
 }
 
-func finishEventSpan(event RunEvent, span trace.Span, status string, err error) RunEvent {
+// finishEventSpan ends the span and returns a finished copy of the event.
+func finishEventSpan(event *RunEvent, span trace.Span, status string, err error) RunEvent {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, errorCategory(err))
@@ -278,7 +319,7 @@ func finishEventSpan(event RunEvent, span trace.Span, status string, err error) 
 }
 
 // inputArtifacts lists the object IDs of the step's inputs in list order.
-func inputArtifacts(req StepRequest) []string {
+func inputArtifacts(req *StepRequest) []string {
 	ids := make([]string, 0, len(req.Inputs))
 	for _, item := range req.Inputs {
 		ids = append(ids, item.Artifact)
@@ -307,7 +348,7 @@ func errorCategory(err error) string {
 	case err == nil:
 		return ""
 	case errors.Is(err, context.Canceled):
-		return "canceled"
+		return categoryCanceled
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case temporal.IsApplicationError(err):
@@ -319,15 +360,17 @@ func errorCategory(err error) string {
 	}
 }
 
-func finishEvent(event RunEvent, status string, err error) RunEvent {
-	event.Finished = time.Now().UTC()
-	event.DurationMS = max(0, event.Finished.Sub(event.Started).Milliseconds())
-	event.ProcessingTimeMS = int64Ptr(event.DurationMS)
-	event.Status = status
+// finishEvent returns a copy of the event with its end time, duration, status and error set.
+func finishEvent(event *RunEvent, status string, err error) RunEvent {
+	finished := *event
+	finished.Finished = time.Now().UTC()
+	finished.DurationMS = max(0, finished.Finished.Sub(finished.Started).Milliseconds())
+	finished.ProcessingTimeMS = int64Ptr(finished.DurationMS)
+	finished.Status = status
 	if err != nil {
-		event.Error, event.Category = err.Error(), errorCategory(err)
+		finished.Error, finished.Category = err.Error(), errorCategory(err)
 	}
-	return event
+	return finished
 }
 
 func int64Ptr(value int64) *int64 { return &value }
@@ -373,9 +416,9 @@ func addUsage(total **usage, current *usage) {
 
 // finalModelInputEstimate describes only the initial serialized request represented by the handoff.
 func finalModelInputEstimate(events []RunEvent) *int64 {
-	for _, event := range events {
-		if event.Kind == "model_call" && event.EstimatedInputTokens != nil {
-			return event.EstimatedInputTokens
+	for i := range events {
+		if events[i].Kind == kindModelCall && events[i].EstimatedInputTokens != nil {
+			return events[i].EstimatedInputTokens
 		}
 	}
 	return nil
@@ -392,8 +435,8 @@ type Service struct {
 	MCPGatewayURL         string
 	HTTP                  *http.Client
 	Logger                *slog.Logger
-	reconcileMu           sync.Mutex
 	reconcileDirs         []string
+	reconcileMu           sync.Mutex
 	intentReconcileOffset int
 }
 
@@ -424,7 +467,10 @@ func validName(name string) bool {
 }
 
 // Process runs the step's agent and stores its final answer and run record.
-func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResult, retErr error) {
+func (s *Service) Process(ctx context.Context, req *StepRequest) (result StepResult, retErr error) {
+	if req == nil {
+		return StepResult{}, temporal.NewNonRetryableApplicationError("step request is missing", "InvalidStepRequest", nil)
+	}
 	executionID := req.ExecutionID
 	if activity.IsActivity(ctx) {
 		executionID = activity.GetInfo(ctx).WorkflowExecution.RunID
@@ -434,7 +480,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	defer processSpan.End()
 	started := time.Now().UTC()
 	attempt := attemptOf(ctx)
-	record := RunRecord{Agent: req.Agent, Started: started, Attempt: attempt, Status: "running", Messages: []any{}, RunID: req.TraceID}
+	record := RunRecord{Agent: req.Agent, Started: started, Attempt: attempt, Status: statusRunning, Messages: []any{}, RunID: req.TraceID}
 	record.ExecutionID, record.ParentExecutionID, record.ActivityAttempt = executionID, req.ParentExecutionID, attempt
 	if activity.IsActivity(ctx) {
 		record.ActivityID = activity.GetInfo(ctx).ActivityID
@@ -449,30 +495,31 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	if previous, ok := s.resumeCompletedExtraction(ctx, req, log); ok {
 		return previous, nil
 	}
-	if err := s.persistRunRecord(record, req.OutputArtifact, meta); err != nil {
+	if err := s.persistRunRecord(&record, req.OutputArtifact, meta); err != nil {
 		return StepResult{}, fmt.Errorf("persisting agent start checkpoint: %w", err)
 	}
 	defer func() {
 		record.Finished = time.Now().UTC()
 		record.ProcessingTimeMS = int64Ptr(max(int64(0), record.Finished.Sub(started).Milliseconds()))
-		if retErr != nil {
-			record.Status = "failed"
+		switch {
+		case retErr != nil:
+			record.Status = statusFailed
 			record.Error = retErr.Error()
 			if errors.Is(retErr, context.Canceled) {
-				record.Status = "canceled"
+				record.Status = statusCanceled
 			}
-		} else if result.Blocked != "" {
-			record.Status = "blocked"
+		case result.Blocked != "":
+			record.Status = statusBlocked
 			record.Error = result.Blocked
-		} else {
-			record.Status = "completed"
+		default:
+			record.Status = statusCompleted
 		}
-		if err := s.persistRunRecord(record, req.OutputArtifact, meta); err != nil {
+		if err := s.persistRunRecord(&record, req.OutputArtifact, meta); err != nil {
 			log.Error("persisting agent run record failed", "error", err)
 			if retErr == nil {
 				retErr = fmt.Errorf("writing run record: %w", err)
 				result = StepResult{}
-				record.Status = "failed"
+				record.Status = statusFailed
 				record.Error = retErr.Error()
 			}
 		}
@@ -509,24 +556,24 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		AgentSourceArtifact:  "agents/" + name + "/" + version + "/systemprompt.md",
 		SourcePromptArtifact: evidencePrefix + "/systemprompt.source.md",
 	}
-	if err := s.Store.Put(ctx, record.PromptEvidence.SourcePromptArtifact, []byte(prompt), meta); err != nil {
-		return StepResult{}, fmt.Errorf("writing source system prompt evidence: %w", err)
+	if putErr := s.Store.Put(ctx, record.PromptEvidence.SourcePromptArtifact, []byte(prompt), meta); putErr != nil {
+		return StepResult{}, fmt.Errorf("writing source system prompt evidence: %w", putErr)
 	}
-	if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
-		return StepResult{}, err
+	if checkpointErr := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); checkpointErr != nil {
+		return StepResult{}, checkpointErr
 	}
 	policyTokens, policyParseErr := parsePolicyTokens(prompt)
 	if policyParseErr != nil || len(policyTokens) > 0 {
-		compileCtx, compileEvent, compileSpan := eventSpan(ctx, RunEvent{Kind: "policy_compilation", Name: "compile policies", Status: "running", Started: time.Now().UTC()}, "agent.policy_compilation")
+		compileCtx, compileEvent, compileSpan := eventSpan(ctx, &RunEvent{Kind: "policy_compilation", Name: "compile policies", Status: statusRunning, Started: time.Now().UTC()}, "agent.policy_compilation")
 		record.Events = append(record.Events, compileEvent)
-		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
-			return StepResult{}, err
+		if checkpointErr := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); checkpointErr != nil {
+			return StepResult{}, checkpointErr
 		}
 		var policies []resolvedPolicy
 		prompt, policies, err = s.compilePrompt(compileCtx, prompt)
 		if err != nil {
-			record.Events[len(record.Events)-1] = finishEventSpan(compileEvent, compileSpan, "failed", categorizedError{"policy_registry", err.Error()})
-			_ = s.checkpointRunRecord(record, req.OutputArtifact, meta, log)
+			record.Events[len(record.Events)-1] = finishEventSpan(&compileEvent, compileSpan, statusFailed, categorizedError{"policy_registry", err.Error()})
+			_ = s.checkpointRunRecord(&record, req.OutputArtifact, meta, log)
 			log.Error("policy compilation failed", "error", err)
 			var required requiredPolicyError
 			if errors.As(err, &required) {
@@ -537,10 +584,10 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		provenance := make([]string, 0, len(policies))
 		for _, policy := range policies {
 			snapshot := evidencePrefix + "/policies/" + policy.ID + "/" + policy.Version + "/policy.md"
-			if err := s.Store.Put(compileCtx, snapshot, []byte(policy.Content), meta); err != nil {
-				evidenceErr := fmt.Errorf("writing policy evidence %q: %w", policy.ID, err)
-				record.Events[len(record.Events)-1] = finishEventSpan(compileEvent, compileSpan, "failed", evidenceErr)
-				_ = s.checkpointRunRecord(record, req.OutputArtifact, meta, log)
+			if putErr := s.Store.Put(compileCtx, snapshot, []byte(policy.Content), meta); putErr != nil {
+				evidenceErr := fmt.Errorf("writing policy evidence %q: %w", policy.ID, putErr)
+				record.Events[len(record.Events)-1] = finishEventSpan(&compileEvent, compileSpan, statusFailed, evidenceErr)
+				_ = s.checkpointRunRecord(&record, req.OutputArtifact, meta, log)
 				return StepResult{}, evidenceErr
 			}
 			record.PromptEvidence.Policies = append(record.PromptEvidence.Policies, PolicyEvidence{
@@ -551,10 +598,10 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 			provenance = append(provenance, policy.ID+"@"+policy.Version)
 		}
 		compileEvent.Policies = provenance
-		record.Events[len(record.Events)-1] = finishEventSpan(compileEvent, compileSpan, "completed", nil)
+		record.Events[len(record.Events)-1] = finishEventSpan(&compileEvent, compileSpan, statusCompleted, nil)
 		record.Events[len(record.Events)-1].Policies = provenance
-		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
-			return StepResult{}, err
+		if checkpointErr := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); checkpointErr != nil {
+			return StepResult{}, checkpointErr
 		}
 		log.Info("policy compilation completed", "policies", provenance)
 	}
@@ -565,11 +612,11 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	prompt += skillNote
 	record.PromptEvidence.Skills = skillEvidence
 	record.PromptEvidence.EffectivePromptArtifact = evidencePrefix + "/systemprompt.effective.md"
-	if err := s.Store.Put(ctx, record.PromptEvidence.EffectivePromptArtifact, []byte(prompt), meta); err != nil {
-		return StepResult{}, fmt.Errorf("writing effective system prompt evidence: %w", err)
+	if putErr := s.Store.Put(ctx, record.PromptEvidence.EffectivePromptArtifact, []byte(prompt), meta); putErr != nil {
+		return StepResult{}, fmt.Errorf("writing effective system prompt evidence: %w", putErr)
 	}
-	if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
-		return StepResult{}, err
+	if checkpointErr := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); checkpointErr != nil {
+		return StepResult{}, checkpointErr
 	}
 	// One model call, plus max_retries more (each tool round needs one).
 	maxCalls := 1 + max(def.MaxRetries, 0)
@@ -585,26 +632,26 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	var tools []any
 	routes := map[string]toolRoute{}
 	if selected := skillTools(ctx, def.Tools); len(selected) > 0 {
-		eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_discovery", Name: "discover tools", Status: "running", Started: time.Now().UTC(), Inputs: inputArtifacts(req)}, "agent.tool_discovery")
+		eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: "tool_discovery", Name: "discover tools", Status: statusRunning, Started: time.Now().UTC(), Inputs: inputArtifacts(req)}, "agent.tool_discovery")
 		record.Events = append(record.Events, event)
-		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
-			return StepResult{}, err
+		if checkpointErr := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); checkpointErr != nil {
+			return StepResult{}, checkpointErr
 		}
 		if tools, routes, err = s.discoverTools(eventCtx, selected, log); err != nil {
-			record.Events[len(record.Events)-1] = finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
-			_ = s.checkpointRunRecord(record, req.OutputArtifact, meta, log)
+			record.Events[len(record.Events)-1] = finishEventSpan(&event, eventTrace, statusFailed, categorizedError{categoryMCPGateway, err.Error()})
+			_ = s.checkpointRunRecord(&record, req.OutputArtifact, meta, log)
 			return StepResult{}, err
 		}
-		record.Events[len(record.Events)-1] = finishEventSpan(event, eventTrace, "completed", nil)
-		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
+		record.Events[len(record.Events)-1] = finishEventSpan(&event, eventTrace, statusCompleted, nil)
+		if err := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); err != nil {
 			return StepResult{}, err
 		}
 		defer closeToolRoutes(routes, log)
 	}
 
 	messages := []any{
-		map[string]string{"role": "system", "content": prompt},
-		map[string]string{"role": "user", "content": user},
+		map[string]string{"role": roleSystem, "content": prompt},
+		map[string]string{"role": roleUser, "content": user},
 	}
 	record.Messages = messages
 	var total *usage
@@ -619,23 +666,23 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		record.Messages = messages
 		modelRequest := def.chatRequest(messages, tools)
 		inputEstimate := estimateJSONTokens(modelRequest)
-		eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "model_call", Name: "chat completion", Model: def.Models[0], Turn: calls, Status: "running", Started: time.Now().UTC(), Inputs: inputArtifacts(req), EstimatedInputTokens: &inputEstimate, EstimationMethod: tokenEstimationMethod}, "agent.model_call", attribute.String("gen_ai.request.model", def.Models[0]), attribute.Int("factory.turn", calls))
+		eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: kindModelCall, Name: "chat completion", Model: def.Models[0], Turn: calls, Status: statusRunning, Started: time.Now().UTC(), Inputs: inputArtifacts(req), EstimatedInputTokens: &inputEstimate, EstimationMethod: estimationMethod}, "agent.model_call", attribute.String("gen_ai.request.model", def.Models[0]), attribute.Int("factory.turn", calls))
 		record.Events = append(record.Events, event)
-		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
+		if err := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); err != nil {
 			return StepResult{}, err
 		}
-		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, modelRequest)
+		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, &modelRequest)
 		addEstimate(&record.EstimatedInputTokens, inputEstimate)
-		record.EstimationMethod = tokenEstimationMethod
+		record.EstimationMethod = estimationMethod
 		if err != nil {
-			record.Events[len(record.Events)-1] = finishEventSpan(event, eventTrace, "failed", err)
-			log.Warn("model call completed", "model", def.Models[0], "turn", calls, "status", "failed",
-				"estimated_input_tokens", inputEstimate, "estimation_method", tokenEstimationMethod,
+			record.Events[len(record.Events)-1] = finishEventSpan(&event, eventTrace, statusFailed, err)
+			log.Warn("model call completed", "model", def.Models[0], "turn", calls, "status", statusFailed,
+				"estimated_input_tokens", inputEstimate, "estimation_method", estimationMethod,
 				"processing_time_ms", record.Events[len(record.Events)-1].DurationMS, "error_category", errorCategory(err))
-			_ = s.checkpointRunRecord(record, req.OutputArtifact, meta, log)
+			_ = s.checkpointRunRecord(&record, req.OutputArtifact, meta, log)
 			return StepResult{}, err
 		}
-		record.Events[len(record.Events)-1] = finishEventSpan(event, eventTrace, "completed", nil)
+		record.Events[len(record.Events)-1] = finishEventSpan(&event, eventTrace, statusCompleted, nil)
 		record.Events[len(record.Events)-1].MeasurementID = c.MeasurementID
 		addUsage(&total, c.Usage)
 		if c.Usage != nil {
@@ -646,18 +693,18 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		processingMS := record.Events[len(record.Events)-1].DurationMS
 		record.Events[len(record.Events)-1].EstimatedOutputTokens = &outputEstimate
 		record.Events[len(record.Events)-1].ProcessingTimeMS = &processingMS
-		record.Events[len(record.Events)-1].EstimationMethod = tokenEstimationMethod
+		record.Events[len(record.Events)-1].EstimationMethod = estimationMethod
 		addEstimate(&record.EstimatedOutputTokens, outputEstimate)
 		log.Info("model call completed", "model", def.Models[0], "turn", calls,
 			"status", record.Events[len(record.Events)-1].Status,
 			"estimated_input_tokens", inputEstimate, "estimated_output_tokens", outputEstimate,
-			"estimation_method", tokenEstimationMethod, "processing_time_ms", processingMS)
+			"estimation_method", estimationMethod, "processing_time_ms", processingMS)
 		messages = append(messages, c.Message)
 		record.Messages, record.ModelCalls = messages, calls
 		if anyReportedUsage {
 			record.Usage = total
 		}
-		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
+		if err := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); err != nil {
 			return StepResult{}, err
 		}
 		if len(c.ToolCalls) == 0 {
@@ -668,53 +715,51 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		for _, tc := range c.ToolCalls {
 			service := strings.SplitN(tc.Function.Name, "__", 2)[0]
 			toolInputEstimate := estimateJSONTokens(map[string]string{"name": tc.Function.Name, "arguments": tc.Function.Arguments})
-			eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_call", Name: tc.Function.Name, ToolCallID: tc.ID, Service: service, Turn: calls, Status: "running", Started: time.Now().UTC(), Inputs: inputArtifacts(req), EstimatedInputTokens: &toolInputEstimate, EstimationMethod: tokenEstimationMethod}, "agent.tool_call", attribute.String("gen_ai.tool.name", tc.Function.Name), attribute.String("factory.mcp_service", service), attribute.Int("factory.turn", calls))
+			eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: kindToolCall, Name: tc.Function.Name, ToolCallID: tc.ID, Service: service, Turn: calls, Status: statusRunning, Started: time.Now().UTC(), Inputs: inputArtifacts(req), EstimatedInputTokens: &toolInputEstimate, EstimationMethod: estimationMethod}, "agent.tool_call", attribute.String("gen_ai.tool.name", tc.Function.Name), attribute.String("factory.mcp_service", service), attribute.Int("factory.turn", calls))
 			record.Events = append(record.Events, event)
-			if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
+			if err := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); err != nil {
 				return StepResult{}, err
 			}
 			text, toolFailed, err := s.runTool(eventCtx, routes, tc)
 			if err != nil {
-				finished := finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
+				finished := finishEventSpan(&event, eventTrace, statusFailed, categorizedError{categoryMCPGateway, err.Error()})
 				record.Events[len(record.Events)-1] = finished
-				log.Warn("tool output completed", "tool", tc.Function.Name, "turn", calls, "status", "failed",
-					"estimated_input_tokens", toolInputEstimate, "estimation_method", tokenEstimationMethod,
+				log.Warn("tool output completed", "tool", tc.Function.Name, "turn", calls, "status", statusFailed,
+					"estimated_input_tokens", toolInputEstimate, "estimation_method", estimationMethod,
 					"processing_time_ms", finished.DurationMS, "error_category", finished.Category)
-				_ = s.checkpointRunRecord(record, req.OutputArtifact, meta, log)
-				log.Warn("tool call completed", "tool", tc.Function.Name, "turn", calls, "outcome", "failed",
+				_ = s.checkpointRunRecord(&record, req.OutputArtifact, meta, log)
+				log.Warn("tool call completed", "tool", tc.Function.Name, "turn", calls, "outcome", statusFailed,
 					"duration_ms", finished.DurationMS, "error_category", finished.Category)
 				return StepResult{}, err
 			}
-			status := "completed"
+			status := statusCompleted
 			var toolErr error
 			if toolFailed {
-				status = "failed"
-				toolErr = categorizedError{"tool", text}
+				status = statusFailed
+				toolErr = categorizedError{categoryTool, text}
 			}
-			finished := finishEventSpan(event, eventTrace, status, toolErr)
+			finished := finishEventSpan(&event, eventTrace, status, toolErr)
 			finished.Warning = skillWarning(routes[tc.Function.Name], text)
 			finished.EstimatedInputTokens = &toolInputEstimate
-			finished.EstimationMethod = tokenEstimationMethod
-			if err == nil {
-				toolOutputEstimate := estimateTokens(text)
-				finished.EstimatedOutputTokens = &toolOutputEstimate
-			}
+			finished.EstimationMethod = estimationMethod
+			toolOutputEstimate := estimateTokens(text)
+			finished.EstimatedOutputTokens = &toolOutputEstimate
 			finished.ProcessingTimeMS = int64Ptr(finished.DurationMS)
 			record.Events[len(record.Events)-1] = finished
 			log.Info("tool output completed", "tool", tc.Function.Name, "turn", calls,
 				"status", finished.Status, "estimated_input_tokens", toolInputEstimate,
 				"estimated_output_tokens", finished.EstimatedOutputTokens,
-				"estimation_method", tokenEstimationMethod, "processing_time_ms", finished.DurationMS)
+				"estimation_method", estimationMethod, "processing_time_ms", finished.DurationMS)
 			if toolFailed {
-				log.Warn("tool call completed", "tool", tc.Function.Name, "turn", calls, "outcome", "failed",
+				log.Warn("tool call completed", "tool", tc.Function.Name, "turn", calls, "outcome", statusFailed,
 					"duration_ms", finished.DurationMS, "error_category", finished.Category)
 			} else {
 				log.Info("tool call completed", "tool", tc.Function.Name, "turn", calls, "outcome", "success",
 					"duration_ms", finished.DurationMS)
 			}
-			messages = append(messages, map[string]string{"role": "tool", "tool_call_id": tc.ID, "content": text})
+			messages = append(messages, map[string]string{"role": roleTool, "tool_call_id": tc.ID, "content": text})
 			record.Messages = messages
-			if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
+			if err := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); err != nil {
 				return StepResult{}, err
 			}
 			// A successful report_blocked ends the work at once: the reason is the output.
@@ -735,7 +780,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		meta.EstimatedOutputTokens = &finalOutputEstimate
 		attemptMS := max(int64(0), time.Since(started).Milliseconds())
 		meta.ProcessingTimeMS = &attemptMS
-		meta.EstimationMethod = tokenEstimationMethod
+		meta.EstimationMethod = estimationMethod
 	}
 	attemptMS := max(int64(0), time.Since(started).Milliseconds())
 	record.ProcessingTimeMS = &attemptMS
@@ -748,7 +793,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		if record.ExtractionObligation == nil {
 			log.Warn("judge extraction not submitted", "reason", "target identity missing")
 		} else {
-			if err := s.persistRunRecord(record, req.OutputArtifact, meta); err != nil {
+			if err := s.persistRunRecord(&record, req.OutputArtifact, meta); err != nil {
 				log.Error("persisting extraction obligation in run record failed", "error", err)
 			}
 			s.deliverExtraction(ctx, record.ExtractionObligation, req.TraceID, log)
@@ -760,31 +805,31 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	return StepResult{Artifact: req.OutputArtifact, Blocked: blocked}, nil
 }
 
-func (s *Service) resumeCompletedExtraction(ctx context.Context, req StepRequest, log *slog.Logger) (StepResult, bool) {
+func (s *Service) resumeCompletedExtraction(ctx context.Context, req *StepRequest, log *slog.Logger) (StepResult, bool) {
 	data, err := s.Store.Get(ctx, req.OutputArtifact+".run.json")
 	if err != nil {
 		return StepResult{}, false
 	}
 	var previous RunRecord
-	if json.Unmarshal(data, &previous) != nil || previous.Status != "completed" || previous.ExtractionObligation == nil {
+	if json.Unmarshal(data, &previous) != nil || previous.Status != statusCompleted || previous.ExtractionObligation == nil {
 		return StepResult{}, false
 	}
 	if _, err := s.Store.Get(ctx, req.OutputArtifact); err != nil {
 		return StepResult{}, false
 	}
-	if previous.ExtractionObligation.Status == "delivered" {
+	if previous.ExtractionObligation.Status == intentDelivered {
 		return StepResult{Artifact: req.OutputArtifact}, true
 	}
 	log.Info("resuming durable extraction without rerunning agent", "artifact", req.OutputArtifact)
 	s.deliverExtraction(ctx, previous.ExtractionObligation, req.TraceID, log)
-	_ = s.persistRunRecord(previous, req.OutputArtifact, Meta{Creator: "agent:" + previous.Agent, TraceID: req.TraceID})
+	_ = s.persistRunRecord(&previous, req.OutputArtifact, Meta{Creator: "agent:" + previous.Agent, TraceID: req.TraceID})
 	return StepResult{Artifact: req.OutputArtifact}, true
 }
 
 // checkpointRunRecord makes an in-flight operation and the conversation leading to it durable.
 // The agent stops before continuing when durability is unavailable, so no external call can
 // complete without a record of what was in flight.
-func (s *Service) checkpointRunRecord(record RunRecord, output string, meta Meta, log *slog.Logger) error {
+func (s *Service) checkpointRunRecord(record *RunRecord, output string, meta Meta, log *slog.Logger) error {
 	if err := s.persistRunRecord(record, output, meta); err != nil {
 		log.Warn("persisting agent checkpoint failed", "error", err)
 		return fmt.Errorf("persisting agent checkpoint: %w", err)
@@ -792,14 +837,14 @@ func (s *Service) checkpointRunRecord(record RunRecord, output string, meta Meta
 	return nil
 }
 
-func (s *Service) persistRunRecord(record RunRecord, output string, meta Meta) error {
+func (s *Service) persistRunRecord(record *RunRecord, output string, meta Meta) error {
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
 	}
 	parent := context.Background()
-	if traceID, err := trace.TraceIDFromHex(record.TraceID); err == nil {
-		if spanID, err := trace.SpanIDFromHex(record.SpanID); err == nil {
+	if traceID, traceErr := trace.TraceIDFromHex(record.TraceID); traceErr == nil {
+		if spanID, spanErr := trace.SpanIDFromHex(record.SpanID); spanErr == nil {
 			parent = trace.ContextWithRemoteSpanContext(parent, trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled, Remote: true}))
 		}
 	}
@@ -816,14 +861,14 @@ func (s *Service) persistRunRecord(record RunRecord, output string, meta Meta) e
 }
 
 // loadAgent fetches systemprompt.md and agent.json from the registry.
-func (s *Service) loadAgent(ctx context.Context, name, version string) (string, Definition, error) {
+func (s *Service) loadAgent(ctx context.Context, name, version string) (prompt string, def Definition, err error) {
 	// A name may contain folders ("translation/en-2-de"); each segment is escaped on its own.
 	segments := strings.Split(name, "/")
 	for i, seg := range segments {
 		segments[i] = url.PathEscape(seg)
 	}
 	u := strings.TrimRight(s.RegistryURL, "/") + "/agents/" + strings.Join(segments, "/") + "/" + url.PathEscape(version)
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return "", Definition{}, err
 	}
@@ -831,14 +876,15 @@ func (s *Service) loadAgent(ctx context.Context, name, version string) (string, 
 	if err != nil {
 		return "", Definition{}, fmt.Errorf("agent registry: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", Definition{}, fmt.Errorf("agent registry: %w", err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return "", Definition{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("agent %s@%s not found in registry", name, version), "AgentNotFound", nil)
+			fmt.Sprintf("agent %s@%s not found in registry", name, version), "AgentNotFound", nil,
+		)
 	}
 	if resp.StatusCode/100 != 2 {
 		return "", Definition{}, fmt.Errorf("agent registry: GET %s: %s", u, resp.Status)
@@ -849,16 +895,19 @@ func (s *Service) loadAgent(ctx context.Context, name, version string) (string, 
 			Definition Definition `json:"agent.json"`
 		} `json:"files"`
 	}
-	if err := json.Unmarshal(body, &entry); err != nil {
+	err = json.Unmarshal(body, &entry)
+	if err != nil {
 		return "", Definition{}, fmt.Errorf("agent registry: invalid response: %w", err)
 	}
 	if len(entry.Files.Definition.Models) == 0 || entry.Files.Definition.Models[0] == "" {
 		return "", Definition{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("agent %s@%s: agent.json lists no models", name, version), "InvalidAgent", nil)
+			fmt.Sprintf("agent %s@%s: agent.json lists no models", name, version), "InvalidAgent", nil,
+		)
 	}
 	if entry.Files.Definition.UnpackInputs == nil {
 		return "", Definition{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("agent %s@%s: agent.json has no \"unpack_inputs\"; it must be true or false", name, version), "InvalidAgent", nil)
+			fmt.Sprintf("agent %s@%s: agent.json has no \"unpack_inputs\"; it must be true or false", name, version), "InvalidAgent", nil,
+		)
 	}
 	return entry.Files.Prompt, entry.Files.Definition, nil
 }
@@ -868,13 +917,13 @@ const rejectionSentence = "Change your previous result so that the rejection no 
 
 // rejectionKind reports whether an input item is one a rejected gate sent back.
 func rejectionKind(kind string) bool {
-	return kind == "rejection" || kind == "previous" || kind == "reviewed"
+	return kind == inputKindRejection || kind == inputKindPrevious || kind == inputKindReviewed
 }
 
 // firstMessage renders the documented first user message. With unpack it loads every input
 // and writes its content. Without it, it lists only the references. Both keep the list order,
 // with the items a rejected gate sent back after the normal inputs.
-func (s *Service) firstMessage(ctx context.Context, req StepRequest, unpack bool) (string, error) {
+func (s *Service) firstMessage(ctx context.Context, req *StepRequest, unpack bool) (string, error) {
 	parts := []string{fmt.Sprintf("Trace: %s\nWorkflow: %s\nStep: %s\nOutput artifact: %s",
 		req.TraceID, req.Workflow, req.StepID, req.OutputArtifact)}
 	var normal, back []InputItem
@@ -889,7 +938,7 @@ func (s *Service) firstMessage(ctx context.Context, req StepRequest, unpack bool
 		if len(normal) > 0 {
 			lines := []string{"Inputs (read each with get_artifact):"}
 			for _, item := range normal {
-				lines = append(lines, fmt.Sprintf("- \"%s\" round %d: object %s", item.Source, item.Round, item.Artifact))
+				lines = append(lines, fmt.Sprintf("- %q round %d: object %s", item.Source, item.Round, item.Artifact))
 			}
 			parts = append(parts, strings.Join(lines, "\n"))
 		}
@@ -897,12 +946,12 @@ func (s *Service) firstMessage(ctx context.Context, req StepRequest, unpack bool
 			lines := []string{"Rejection (read each with get_artifact):"}
 			for _, item := range back {
 				switch item.Kind {
-				case "rejection":
-					lines = append(lines, fmt.Sprintf("- rejection from \"%s\" round %d: object %s", item.Source, item.Round, item.Artifact))
-				case "previous":
+				case inputKindRejection:
+					lines = append(lines, fmt.Sprintf("- rejection from %q round %d: object %s", item.Source, item.Round, item.Artifact))
+				case inputKindPrevious:
 					lines = append(lines, fmt.Sprintf("- your previous result round %d: object %s", item.Round, item.Artifact))
 				default:
-					lines = append(lines, fmt.Sprintf("- reviewed input \"%s\" round %d: object %s", item.Source, item.Round, item.Artifact))
+					lines = append(lines, fmt.Sprintf("- reviewed input %q round %d: object %s", item.Source, item.Round, item.Artifact))
 				}
 			}
 			parts = append(parts, strings.Join(lines, "\n"), rejectionSentence)
@@ -923,7 +972,7 @@ func (s *Service) firstMessage(ctx context.Context, req StepRequest, unpack bool
 		if perSource[item.Source] > 1 {
 			round = fmt.Sprintf(" round %d", item.Round)
 		}
-		parts = append(parts, fmt.Sprintf("## Input \"%s\"%s (object %s)\n%s", item.Source, round, item.Artifact, data))
+		parts = append(parts, fmt.Sprintf("## Input %q%s (object %s)\n%s", item.Source, round, item.Artifact, data))
 	}
 	for _, item := range back {
 		data, err := s.Store.Get(ctx, item.Artifact)
@@ -931,13 +980,13 @@ func (s *Service) firstMessage(ctx context.Context, req StepRequest, unpack bool
 			return "", fmt.Errorf("reading artifact %q: %w", item.Artifact, err)
 		}
 		switch item.Kind {
-		case "rejection":
+		case inputKindRejection:
 			// The decision record names the gate and holds the person's reason. A record that
 			// cannot be read as such is shown as it is.
 			gate, reason := item.Source, string(data)
 			var decision struct {
-				Step    string  `json:"step"`
 				Comment *string `json:"comment"`
+				Step    string  `json:"step"`
 			}
 			if json.Unmarshal(data, &decision) == nil && decision.Comment != nil {
 				reason = *decision.Comment
@@ -945,11 +994,11 @@ func (s *Service) firstMessage(ctx context.Context, req StepRequest, unpack bool
 					gate = decision.Step
 				}
 			}
-			parts = append(parts, fmt.Sprintf("## Rejection from \"%s\" (round %d)\n%s", gate, item.Round, reason))
-		case "previous":
+			parts = append(parts, fmt.Sprintf("## Rejection from %q (round %d)\n%s", gate, item.Round, reason))
+		case inputKindPrevious:
 			parts = append(parts, fmt.Sprintf("## Your previous result (round %d) (object %s)\n%s", item.Round, item.Artifact, data))
 		default:
-			parts = append(parts, fmt.Sprintf("## Input \"%s\" round %d (object %s)\n%s", item.Source, item.Round, item.Artifact, data))
+			parts = append(parts, fmt.Sprintf("## Input %q round %d (object %s)\n%s", item.Source, item.Round, item.Artifact, data))
 		}
 	}
 	if len(back) > 0 {
@@ -997,13 +1046,13 @@ func modelToolName(ref string, used map[string]string) string {
 }
 
 // discoverTools asks each selected gateway service for its policy-filtered tools.
-func (s *Service) discoverTools(ctx context.Context, selected []string, log *slog.Logger) ([]any, map[string]toolRoute, error) {
+func (s *Service) discoverTools(ctx context.Context, selected []string, log *slog.Logger) (tools []any, routes map[string]toolRoute, err error) {
 	byServer := map[string][]configuredTool{}
 	seenRef := map[string]bool{}
 	for _, ref := range selected {
-		tool, err := parseConfiguredTool(ref)
-		if err != nil {
-			return nil, nil, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidAgent", nil)
+		tool, parseErr := parseConfiguredTool(ref)
+		if parseErr != nil {
+			return nil, nil, temporal.NewNonRetryableApplicationError(parseErr.Error(), "InvalidAgent", nil)
 		}
 		if !seenRef[ref] {
 			seenRef[ref] = true
@@ -1015,8 +1064,7 @@ func (s *Service) discoverTools(ctx context.Context, selected []string, log *slo
 		servers = append(servers, server)
 	}
 	sort.Strings(servers)
-	var tools []any
-	routes := map[string]toolRoute{}
+	routes = map[string]toolRoute{}
 	aliases := map[string]string{}
 	clients := []*mcpClient{}
 	closeClients := func() {
@@ -1028,14 +1076,14 @@ func (s *Service) discoverTools(ctx context.Context, selected []string, log *slo
 	for _, server := range servers {
 		client := &mcpClient{url: base + "/mcp/" + url.PathEscape(server), service: server, http: s.HTTP}
 		clients = append(clients, client)
-		if err := client.connect(ctx); err != nil {
+		if connectErr := client.connect(ctx); connectErr != nil {
 			closeClients()
-			return nil, nil, fmt.Errorf("discovering MCP service %q: %w", server, err)
+			return nil, nil, fmt.Errorf("discovering MCP service %q: %w", server, connectErr)
 		}
-		offered, err := client.listTools(ctx)
-		if err != nil {
+		offered, listErr := client.listTools(ctx)
+		if listErr != nil {
 			closeClients()
-			return nil, nil, fmt.Errorf("listing MCP service %q: %w", server, err)
+			return nil, nil, fmt.Errorf("listing MCP service %q: %w", server, listErr)
 		}
 		available := map[string]mcpTool{}
 		for _, tool := range offered {
@@ -1094,7 +1142,7 @@ func closeToolRoutes(routes map[string]toolRoute, log *slog.Logger) {
 // runTool executes one tool call and returns the text for the tool message.
 // Problems the model can fix (unknown tool, bad arguments, tool errors) become
 // tool output; transport failures fail the activity.
-func (s *Service) runTool(ctx context.Context, routes map[string]toolRoute, tc toolCall) (string, bool, error) {
+func (s *Service) runTool(ctx context.Context, routes map[string]toolRoute, tc toolCall) (text string, failed bool, err error) {
 	alias := tc.Function.Name
 	route, ok := routes[alias]
 	if !ok {
@@ -1105,21 +1153,20 @@ func (s *Service) runTool(ctx context.Context, routes map[string]toolRoute, tc t
 		args = json.RawMessage(`{}`)
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(args, &obj); err != nil {
-		return fmt.Sprintf("Error: invalid arguments for tool %q: %v", alias, err), true, nil
+	if parseErr := json.Unmarshal(args, &obj); parseErr != nil {
+		return fmt.Sprintf("Error: invalid arguments for tool %q: %v", alias, parseErr), true, nil
 	}
 	devPod := route.server == devPodService
 	pod := devPodOf(ctx)
 	if route.server == skillsService {
-		refusal, err := setSkillArguments(ctx, route.name, obj)
-		if refusal != "" || err != nil {
-			return refusal, refusal != "", err
+		refusal, argErr := setSkillArguments(ctx, route.name, obj)
+		if refusal != "" || argErr != nil {
+			return refusal, refusal != "", argErr
 		}
-		data, err := json.Marshal(obj)
+		args, err = json.Marshal(obj)
 		if err != nil {
 			return "", false, err
 		}
-		args = data
 	} else if devPod {
 		// The harness, which knows the run, sets the pod and who is calling, whatever the
 		// model passed. The stored tool call stays as the model wrote it.
@@ -1130,17 +1177,16 @@ func (s *Service) runTool(ctx context.Context, routes map[string]toolRoute, tc t
 			obj = map[string]any{}
 		}
 		obj["pod"], obj["agent"], obj["run"] = pod.pod, pod.agent, pod.run
-		data, err := json.Marshal(obj)
+		args, err = json.Marshal(obj)
 		if err != nil {
 			return "", false, err
 		}
-		args = data
 	}
-	text, isError, err := route.client.callTool(ctx, route.name, args)
+	text, failed, err = route.client.callTool(ctx, route.name, args)
 	if err != nil {
 		return "", false, err
 	}
-	if isError {
+	if failed {
 		text = "Error: " + text
 	} else if devPod && strings.HasSuffix(route.name, blockedTool) {
 		reason, _ := obj["reason"].(string)
@@ -1149,5 +1195,13 @@ func (s *Service) runTool(ctx context.Context, routes map[string]toolRoute, tc t
 		}
 		pod.blocked, pod.reason = true, reason
 	}
-	return text, isError, nil
+	return text, failed, nil
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }

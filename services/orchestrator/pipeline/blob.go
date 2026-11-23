@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,8 +60,8 @@ func ValidID(id string) bool {
 
 // HTTPStore is the client for the blobstore service's /blobs API.
 type HTTPStore struct {
-	BaseURL string
 	Client  *http.Client
+	BaseURL string
 }
 
 // NewHTTPStoreFromEnv uses BLOB_URL, defaulting to the in-cluster blobstore.
@@ -68,7 +69,15 @@ func NewHTTPStoreFromEnv() HTTPStore {
 	return HTTPStore{BaseURL: strings.TrimRight(env("BLOB_URL", "http://blobstore:8080/blobs"), "/"), Client: http.DefaultClient}
 }
 
-func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta Meta) ([]byte, error) {
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
+}
+
+func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta Meta) (data []byte, err error) {
 	if !ValidID(id) {
 		return nil, fmt.Errorf("invalid object id %q", id)
 	}
@@ -86,8 +95,8 @@ func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	defer func() { err = closeAfter(err, resp.Body) }()
+	data, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -100,12 +109,13 @@ func (s HTTPStore) do(ctx context.Context, method, id string, body []byte, meta 
 	return data, nil
 }
 
+// Put stores data as the object id, with the creator and trace ID of meta.
 func (s HTTPStore) Put(ctx context.Context, id string, data []byte, meta Meta) error {
 	_, err := s.do(ctx, http.MethodPut, id, data, meta)
 	return err
 }
 
-func (s HTTPStore) putConditional(ctx context.Context, id string, data []byte, meta Meta, header, value string) (string, error) {
+func (s HTTPStore) putConditional(ctx context.Context, id string, data []byte, meta Meta, header, value string) (revision string, err error) {
 	if !ValidID(id) {
 		return "", fmt.Errorf("invalid object id %q", id)
 	}
@@ -124,7 +134,7 @@ func (s HTTPStore) putConditional(ctx context.Context, id string, data []byte, m
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusPreconditionFailed {
 		return "", ErrPreconditionFailed
 	}
@@ -138,10 +148,14 @@ func (s HTTPStore) putConditional(ctx context.Context, id string, data []byte, m
 	return etag[1 : len(etag)-1], nil
 }
 
+// PutIfAbsent stores data as the object id only when no such object exists, and returns the
+// revision of the stored object.
 func (s HTTPStore) PutIfAbsent(ctx context.Context, id string, data []byte, meta Meta) (string, error) {
 	return s.putConditional(ctx, id, data, meta, "If-None-Match", "*")
 }
 
+// PutIfMatch replaces the object id only when its current revision is revision, and returns
+// the new revision.
 func (s HTTPStore) PutIfMatch(ctx context.Context, id string, data []byte, meta Meta, revision string) (string, error) {
 	if revision == "" || strings.ContainsAny(revision, "\"\r\n") {
 		return "", errors.New("invalid artifact revision")
@@ -149,15 +163,17 @@ func (s HTTPStore) PutIfMatch(ctx context.Context, id string, data []byte, meta 
 	return s.putConditional(ctx, id, data, meta, "If-Match", `"`+revision+`"`)
 }
 
+// Get returns the content of the object id, or ErrNotFound.
 func (s HTTPStore) Get(ctx context.Context, id string) ([]byte, error) {
 	return s.do(ctx, http.MethodGet, id, nil, Meta{})
 }
 
-func (s HTTPStore) GetWithRevision(ctx context.Context, id string) ([]byte, string, error) {
+// GetWithRevision returns the content of the object id and its revision, or ErrNotFound.
+func (s HTTPStore) GetWithRevision(ctx context.Context, id string) (data []byte, revision string, err error) {
 	if !ValidID(id) {
 		return nil, "", fmt.Errorf("invalid object id %q", id)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.BaseURL+"/"+id, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.BaseURL+"/"+id, http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}
@@ -165,10 +181,10 @@ func (s HTTPStore) GetWithRevision(ctx context.Context, id string) ([]byte, stri
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		return nil, "", readErr
+	defer func() { err = closeAfter(err, resp.Body) }()
+	data, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, "", ErrNotFound
@@ -194,12 +210,12 @@ func (s HTTPStore) Delete(ctx context.Context, id string) error {
 
 // List returns the immediate child directories and object IDs of a prefix. A missing prefix
 // has no children.
-func (s HTTPStore) List(ctx context.Context, prefix string) (dirs []string, objects []string, err error) {
+func (s HTTPStore) List(ctx context.Context, prefix string) (dirs, objects []string, err error) {
 	if !ValidID(prefix) {
 		return nil, nil, fmt.Errorf("invalid prefix %q", prefix)
 	}
 	root := strings.TrimSuffix(s.BaseURL, "/blobs")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/list/"+prefix, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/list/"+prefix, http.NoBody)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -207,7 +223,7 @@ func (s HTTPStore) List(ctx context.Context, prefix string) (dirs []string, obje
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil, nil
 	}
@@ -220,7 +236,8 @@ func (s HTTPStore) List(ctx context.Context, prefix string) (dirs []string, obje
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&listing)
+	if err != nil {
 		return nil, nil, err
 	}
 	for _, o := range listing.Objects {
@@ -230,12 +247,12 @@ func (s HTTPStore) List(ctx context.Context, prefix string) (dirs []string, obje
 }
 
 // Creator returns the creator recorded for an object, or "" when none is recorded.
-func (s HTTPStore) Creator(ctx context.Context, id string) (string, error) {
+func (s HTTPStore) Creator(ctx context.Context, id string) (creator string, err error) {
 	if !ValidID(id) {
 		return "", fmt.Errorf("invalid object id %q", id)
 	}
 	root := strings.TrimSuffix(s.BaseURL, "/blobs")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/meta/"+id, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/meta/"+id, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -243,23 +260,24 @@ func (s HTTPStore) Creator(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("GET meta %s: %s", id, resp.Status)
 	}
 	var meta struct {
 		Creator string `json:"creator"`
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&meta)
+	if err != nil {
 		return "", err
 	}
 	return meta.Creator, nil
 }
 
 // TraceObjects lists the IDs of every object stored with the trace ID.
-func (s HTTPStore) TraceObjects(ctx context.Context, traceID string) ([]string, error) {
+func (s HTTPStore) TraceObjects(ctx context.Context, traceID string) (ids []string, err error) {
 	root := strings.TrimSuffix(s.BaseURL, "/blobs")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/trace/"+traceID, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/trace/"+traceID, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +285,7 @@ func (s HTTPStore) TraceObjects(ctx context.Context, traceID string) ([]string, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
 	}
@@ -279,10 +297,11 @@ func (s HTTPStore) TraceObjects(ctx context.Context, traceID string) ([]string, 
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&listing)
+	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(listing.Objects))
+	ids = make([]string, 0, len(listing.Objects))
 	for _, o := range listing.Objects {
 		ids = append(ids, o.ID)
 	}
@@ -290,21 +309,25 @@ func (s HTTPStore) TraceObjects(ctx context.Context, traceID string) ([]string, 
 }
 
 // WriteFileAtomic replaces path with data in one rename.
-func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	// After the rename the temporary name no longer exists, which is the expected outcome.
+	defer func() {
+		if removeErr := os.Remove(tmp.Name()); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			err = errors.Join(err, removeErr)
+		}
+	}()
 	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return closeAfter(err, tmp)
 	}
 	if err = tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
+		return closeAfter(err, tmp)
 	}
-	if err = tmp.Close(); err != nil {
+	err = tmp.Close()
+	if err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)

@@ -40,8 +40,8 @@ func run() error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := shutdownTelemetry(ctx); err != nil {
-			logger.Warn("telemetry shutdown failed", "error", err)
+		if shutdownErr := shutdownTelemetry(ctx); shutdownErr != nil {
+			logger.Warn("telemetry shutdown failed", "error", shutdownErr)
 		}
 	}()
 	tracedHTTP := &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
@@ -59,14 +59,14 @@ func run() error {
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	defer serviceCancel()
 	replayCtx, replayCancel := context.WithTimeout(serviceCtx, 20*time.Second)
-	if err := svc.reconcileExtractionIntents(replayCtx, 100); err != nil {
-		logger.Warn("judge extraction reconciliation incomplete", "error", err)
+	if reconcileErr := svc.reconcileExtractionIntents(replayCtx, 100); reconcileErr != nil {
+		logger.Warn("judge extraction reconciliation incomplete", "error", reconcileErr)
 	}
-	if err := svc.reconcileCompletedRunObligations(replayCtx, 100); err != nil {
-		logger.Warn("completed judge extraction reconciliation incomplete", "error", err)
+	if reconcileErr := svc.reconcileCompletedRunObligations(replayCtx, 100); reconcileErr != nil {
+		logger.Warn("completed judge extraction reconciliation incomplete", "error", reconcileErr)
 	}
-	if err := svc.replayExtractionIntents(replayCtx); err != nil {
-		logger.Warn("judge extraction replay incomplete", "error", err)
+	if replayErr := svc.replayExtractionIntents(replayCtx); replayErr != nil {
+		logger.Warn("judge extraction replay incomplete", "error", replayErr)
 	}
 	replayCancel()
 	go svc.replayExtractionLoop(serviceCtx)
@@ -76,16 +76,16 @@ func run() error {
 	chatFailed := make(chan error, 1)
 	go func() {
 		logger.Info("agent chat listening", "address", chatServer.Addr)
-		if err := chatServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			chatFailed <- err
+		if serveErr := chatServer.ListenAndServe(); !errors.Is(serveErr, http.ErrServerClosed) {
+			chatFailed <- serveErr
 			stop <- nil
 		}
 	}()
 	defer func() {
 		drain, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		if err := chatServer.Shutdown(drain); err != nil {
-			logger.Warn("chat server shutdown failed", "error", err)
+		if shutdownErr := chatServer.Shutdown(drain); shutdownErr != nil {
+			logger.Warn("chat server shutdown failed", "error", shutdownErr)
 		}
 	}()
 	c, err := dial()

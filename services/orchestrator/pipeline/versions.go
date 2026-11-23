@@ -39,7 +39,7 @@ func WorkflowRef(name string, version int) string {
 }
 
 // DefinitionVersion is the version of a definition. A definition without a version is v1.
-func DefinitionVersion(d Definition) int {
+func DefinitionVersion(d *Definition) int {
 	if d.Version < 1 {
 		return 1
 	}
@@ -53,36 +53,40 @@ func FindDefinition(definitions []Definition, ref string) (Definition, bool) {
 	if !ok {
 		return Definition{}, false
 	}
-	var found Definition
-	have := false
-	for _, d := range definitions {
+	var found *Definition
+	for i := range definitions {
+		d := &definitions[i]
 		if d.Name != name {
 			continue
 		}
 		v := DefinitionVersion(d)
 		if version > 0 && v == version {
-			return d, true
+			return *d, true
 		}
-		if version == 0 && (!have || v > DefinitionVersion(found)) {
-			found, have = d, true
+		if version == 0 && (found == nil || v > DefinitionVersion(found)) {
+			found = d
 		}
 	}
-	return found, have
+	if found == nil {
+		return Definition{}, false
+	}
+	return *found, true
 }
 
 // Newest returns the newest version of every workflow, in the order the workflows first appear.
 func Newest(definitions []Definition) []Definition {
 	index := map[string]int{}
 	var newest []Definition
-	for _, d := range definitions {
+	for j := range definitions {
+		d := &definitions[j]
 		i, known := index[d.Name]
 		if !known {
 			index[d.Name] = len(newest)
-			newest = append(newest, d)
+			newest = append(newest, *d)
 			continue
 		}
-		if DefinitionVersion(d) > DefinitionVersion(newest[i]) {
-			newest[i] = d
+		if DefinitionVersion(d) > DefinitionVersion(&newest[i]) {
+			newest[i] = *d
 		}
 	}
 	return newest
@@ -100,7 +104,7 @@ func PinReferences(definitions []Definition) {
 		if !found {
 			return ref
 		}
-		return WorkflowRef(name, DefinitionVersion(newest))
+		return WorkflowRef(name, DefinitionVersion(&newest))
 	}
 	for _, d := range definitions {
 		for i := range d.Steps {
@@ -118,23 +122,23 @@ func PinReferences(definitions []Definition) {
 // NestedDefinitions returns every workflow version the definition reaches through the
 // workflow references of its steps and team members, each once, in the order they are
 // found. A reference that names no stored version is skipped.
-func NestedDefinitions(definitions []Definition, root Definition) []Definition {
+func NestedDefinitions(definitions []Definition, root *Definition) []Definition {
 	seen := map[string]bool{WorkflowRef(root.Name, DefinitionVersion(root)): true}
 	var nested []Definition
-	var visit func(d Definition)
-	visit = func(d Definition) {
+	var visit func(d *Definition)
+	visit = func(d *Definition) {
 		for _, ref := range nestedWorkflows(d) {
 			child, ok := FindDefinition(definitions, ref[1])
 			if !ok {
 				continue
 			}
-			key := WorkflowRef(child.Name, DefinitionVersion(child))
+			key := WorkflowRef(child.Name, DefinitionVersion(&child))
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
 			nested = append(nested, child)
-			visit(child)
+			visit(&child)
 		}
 	}
 	visit(root)
@@ -152,10 +156,11 @@ func AgentRefs(definitions ...Definition) []string {
 			refs = append(refs, ref)
 		}
 	}
-	for _, d := range definitions {
-		for _, s := range d.Steps {
-			add(s.Agent)
-			for _, ref := range s.Agents {
+	for i := range definitions {
+		steps := definitions[i].Steps
+		for j := range steps {
+			add(steps[j].Agent)
+			for _, ref := range steps[j].Agents {
 				add(ref)
 			}
 		}

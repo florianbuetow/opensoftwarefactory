@@ -32,12 +32,12 @@ type config struct {
 	factoryNamespace string        // namespace of the factory services
 	image            string        // image of both containers of a dev pod
 	pullPolicy       string        // image pull policy of a dev pod
+	mcpURL           string        // URL the MCP gateway uses for the service devpod
 	sweep            time.Duration // how often idle pods are looked for
 	idleOverride     time.Duration // when > 0, replaces every repository's idle_minutes
 	holdTTL          time.Duration // when > 0, a hold ends this long after its last renewal
 	startTimeout     time.Duration // how long a new pod may take to answer
 	poll             time.Duration // pause between two looks at a starting pod
-	mcpURL           string        // URL the MCP gateway uses for the service devpod
 	registerRetry    time.Duration // pause between two registration attempts
 	skillTimeout     int           // default limit for a skill script
 	skillOutputLines int           // retained lines per skill script stream
@@ -46,35 +46,34 @@ type config struct {
 }
 
 type service struct {
-	cfg             config
-	blobs           blobClient
 	kube            cluster
-	registry        string
-	skillRegistry   string
-	mcpGateway      string
-	githubAPI       string
+	js              jetstream.JetStream
 	http            *http.Client // calls to factory services and GitHub
 	podHTTP         *http.Client // calls into dev pods; the time limit comes from the context
 	log             *slog.Logger
 	podURL          func(ip string, port int) string
 	resolve         func(host string) ([]string, error)
 	now             func() time.Time
-	js              jetstream.JetStream
+	intakeStatus    map[string]bindingStatus  // guarded by intakeMu
+	viewers         map[string]*viewerSession // guarded by viewerMu
+	pods            map[string]*devPod        // guarded by mu
+	conns           map[string]podConn        // guarded by mu
+	commands        map[string]cachedCommands // guarded by mu
+	registry        string
+	skillRegistry   string
+	mcpGateway      string
+	githubAPI       string
 	eventStream     string
 	orchestratorURL string
+	blobs           blobClient
+	cfg             config
 
-	intakeMu     sync.Mutex
-	bindingMu    sync.Mutex
-	intakeStatus map[string]bindingStatus
-	viewerMu     sync.Mutex
-	viewers      map[string]*viewerSession
-
-	mu       sync.Mutex // guards everything below; held while a pod record is saved
-	loaded   bool
-	pods     map[string]*devPod
-	conns    map[string]podConn
-	commands map[string]cachedCommands
-	createMu sync.Mutex // one creation decides at a time whether a named pod exists
+	intakeMu  sync.Mutex
+	bindingMu sync.Mutex
+	viewerMu  sync.Mutex
+	mu        sync.Mutex // guards loaded, pods, conns and commands; held while a pod record is saved
+	createMu  sync.Mutex // one creation decides at a time whether a named pod exists
+	loaded    bool       // guarded by mu
 }
 
 func main() {
@@ -101,7 +100,7 @@ func run() error {
 		return err
 	}
 	client := &http.Client{Timeout: 30 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)}
-	s := newService(cfg, log, client, kube)
+	s := newService(&cfg, log, client, kube)
 	s.blobs = blobClient{base: strings.TrimRight(env("BLOBSTORE_URL", "http://blobstore:8080"), "/"), http: client}
 	s.registry = strings.TrimRight(env("AGENT_REGISTRY_URL", "http://agent-registry:8080"), "/")
 	s.skillRegistry = strings.TrimRight(env("SKILL_REGISTRY_URL", "http://skill-registry:8080"), "/")
@@ -124,7 +123,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err = waitForEventStream(ctx, s.js, s.eventStream, log); err != nil {
+	err = waitForEventStream(ctx, s.js, s.eventStream, log)
+	if err != nil {
 		return err
 	}
 	seedRepositories, err := readRepositorySeeds(env("CONNECTOR_SEED_FILE", "/seed/repositories.json"))
@@ -165,7 +165,7 @@ func waitForEventStream(ctx context.Context, js jetstream.JetStream, name string
 		if err == nil {
 			info, infoErr := stream.Info(ctx)
 			if infoErr == nil {
-				if !validConnectorEventStream(info.Config) {
+				if !validConnectorEventStream(&info.Config) {
 					return fmt.Errorf("workflow event stream %q does not match the required publisher-owned configuration", name)
 				}
 				return nil
@@ -186,13 +186,13 @@ func waitForEventStream(ctx context.Context, js jetstream.JetStream, name string
 	}
 }
 
-func validConnectorEventStream(cfg jetstream.StreamConfig) bool {
+func validConnectorEventStream(cfg *jetstream.StreamConfig) bool {
 	return cfg.Storage == jetstream.FileStorage && cfg.Retention == jetstream.LimitsPolicy && cfg.Discard == jetstream.DiscardNew && cfg.Replicas == 1 && cfg.MaxConsumers == -1 && cfg.MaxMsgs == -1 && cfg.MaxBytes == -1 && cfg.MaxMsgSize == -1 && slices.Equal(cfg.Subjects, []string{"factory.workflow.started", "factory.workflow.finished"})
 }
 
-func newService(cfg config, log *slog.Logger, client *http.Client, kube cluster) *service {
+func newService(cfg *config, log *slog.Logger, client *http.Client, kube cluster) *service {
 	return &service{
-		cfg: cfg, kube: kube, http: client, log: log,
+		cfg: *cfg, kube: kube, http: client, log: log,
 		podHTTP:      &http.Client{},
 		podURL:       func(ip string, port int) string { return "http://" + net.JoinHostPort(ip, strconv.Itoa(port)) },
 		resolve:      net.LookupHost,
@@ -333,14 +333,14 @@ func (s *service) loadUntilDone(ctx context.Context) {
 
 // httpError is an error that carries the HTTP status to answer with.
 type httpError struct {
-	status int
 	msg    string
+	status int
 }
 
 func (e httpError) Error() string { return e.msg }
 
 func statusError(status int, format string, args ...any) error {
-	return httpError{status, fmt.Sprintf(format, args...)}
+	return httpError{status: status, msg: fmt.Sprintf(format, args...)}
 }
 
 func (s *service) fail(w http.ResponseWriter, status int, err error) {
@@ -363,7 +363,7 @@ func readJSON(w http.ResponseWriter, r *http.Request, out any) error {
 	if err != nil {
 		return statusError(400, "the request body cannot be read: %v", err)
 	}
-	if len(strings.TrimSpace(string(data))) == 0 {
+	if strings.TrimSpace(string(data)) == "" {
 		return nil
 	}
 	if err = json.Unmarshal(data, out); err != nil {

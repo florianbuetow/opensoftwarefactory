@@ -44,7 +44,7 @@ func TestConcurrentCreateIfAbsentHasOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req, err := http.NewRequest(http.MethodPut, srv.URL+"/blobs/receipts/one", strings.NewReader(string(rune('a'+i))))
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, srv.URL+"/blobs/receipts/one", strings.NewReader(string(rune('a'+i))))
 			if err != nil {
 				t.Errorf("request: %v", err)
 				return
@@ -55,7 +55,9 @@ func TestConcurrentCreateIfAbsentHasOneWinner(t *testing.T) {
 				t.Errorf("PUT: %v", err)
 				return
 			}
-			resp.Body.Close()
+			if err = resp.Body.Close(); err != nil {
+				t.Errorf("PUT: %v", err)
+			}
 			statuses <- resp.StatusCode
 		}()
 	}
@@ -123,28 +125,28 @@ func TestStartupRecoversInterruptedPut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := stage.WriteString("recovered"); err != nil {
+			if _, err = stage.WriteString("recovered"); err != nil {
 				t.Fatal(err)
 			}
-			if err := stage.Sync(); err != nil {
+			if err = stage.Sync(); err != nil {
 				t.Fatal(err)
 			}
-			if err := stage.Close(); err != nil {
+			if err = stage.Close(); err != nil {
 				t.Fatal(err)
 			}
 			stagePath := stage.Name()
 			if published {
-				if err := os.Rename(stagePath, object); err != nil {
+				if err = os.Rename(stagePath, object); err != nil {
 					t.Fatal(err)
 				}
 			}
 			transactions := filepath.Join(root, "transactions")
-			if err := os.MkdirAll(transactions, 0o750); err != nil {
+			if err = os.MkdirAll(transactions, 0o750); err != nil {
 				t.Fatal(err)
 			}
 			m := Meta{ID: "receipts/event", Size: int64(len("recovered")), Created: time.Now().UTC(), Revision: "recovered-revision", TraceID: "trace-recovered"}
 			j := transactionJournal{Operation: "put", ID: m.ID, Stage: stagePath, Meta: m}
-			if err := writeJSONAtomic(filepath.Join(transactions, "interrupted.json"), j); err != nil {
+			if err = writeJSONAtomic(filepath.Join(transactions, "interrupted.json"), j); err != nil {
 				t.Fatal(err)
 			}
 			h, err := newHandler(root, slog.New(slog.DiscardHandler))
@@ -175,7 +177,7 @@ func TestStartupRecoversInterruptedDelete(t *testing.T) {
 	}
 	srv.Close()
 	j := transactionJournal{Operation: "delete", ID: "runs/delete-me", PreviousTrace: "delete-trace"}
-	if err := writeJSONAtomic(filepath.Join(root, "transactions", "interrupted-delete.json"), j); err != nil {
+	if err = writeJSONAtomic(filepath.Join(root, "transactions", "interrupted-delete.json"), j); err != nil {
 		t.Fatal(err)
 	}
 	h, err = newHandler(root, slog.New(slog.DiscardHandler))
@@ -214,13 +216,12 @@ func TestStartupAssignsRevisionToLegacyObject(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	get := do(t, http.MethodGet, srv.URL+"/blobs/"+legacy.ID, "", nil)
-	body, _ := io.ReadAll(get.Body)
-	if get.StatusCode != http.StatusOK || string(body) != "legacy bytes" || get.Header.Get("ETag") == "" || get.Header.Get(headerCreator) != legacy.Creator {
-		t.Fatalf("legacy GET: %d body %q ETag %q creator %q", get.StatusCode, body, get.Header.Get("ETag"), get.Header.Get(headerCreator))
+	if get.StatusCode != http.StatusOK || string(get.Body) != "legacy bytes" || get.Header.Get("ETag") == "" || get.Header.Get(headerCreator) != legacy.Creator {
+		t.Fatalf("legacy GET: %d body %q ETag %q creator %q", get.StatusCode, get.Body, get.Header.Get("ETag"), get.Header.Get(headerCreator))
 	}
 	metaResp := do(t, http.MethodGet, srv.URL+"/meta/"+legacy.ID, "", nil)
 	var upgraded Meta
-	if err := json.NewDecoder(metaResp.Body).Decode(&upgraded); err != nil {
+	if err := json.Unmarshal(metaResp.Body, &upgraded); err != nil {
 		t.Fatal(err)
 	}
 	if upgraded.Revision == "" || upgraded.Creator != legacy.Creator || upgraded.TraceID != legacy.TraceID || !upgraded.Created.Equal(legacy.Created) {
@@ -232,13 +233,12 @@ func TestStartupAssignsRevisionToLegacyObject(t *testing.T) {
 func assertObjectAndMetaRevision(t *testing.T, base, id, wantBody, wantETag string) {
 	t.Helper()
 	get := do(t, http.MethodGet, base+"/blobs/"+id, "", nil)
-	body, err := io.ReadAll(get.Body)
-	if err != nil || get.StatusCode != http.StatusOK || string(body) != wantBody || get.Header.Get("ETag") != wantETag {
-		t.Fatalf("GET: %d body %q ETag %q err %v", get.StatusCode, body, get.Header.Get("ETag"), err)
+	if get.StatusCode != http.StatusOK || string(get.Body) != wantBody || get.Header.Get("ETag") != wantETag {
+		t.Fatalf("GET: %d body %q ETag %q", get.StatusCode, get.Body, get.Header.Get("ETag"))
 	}
 	metaResp := do(t, http.MethodGet, base+"/meta/"+id, "", nil)
 	var m Meta
-	if err := json.NewDecoder(metaResp.Body).Decode(&m); err != nil || metaResp.StatusCode != http.StatusOK {
+	if err := json.Unmarshal(metaResp.Body, &m); err != nil || metaResp.StatusCode != http.StatusOK {
 		t.Fatalf("meta: %d %v", metaResp.StatusCode, err)
 	}
 	if quoteETag(m.Revision) != wantETag || m.Size != int64(len(wantBody)) {
@@ -254,17 +254,25 @@ func TestSlowDownloadDoesNotBlockMutation(t *testing.T) {
 	srv, _ := newTestServer(t)
 	url := srv.URL + "/blobs/large"
 	response := do(t, http.MethodPut, url, strings.Repeat("a", 16<<20), nil)
-	response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatal(response.Status)
 	}
-	download, err := http.Get(url)
+	// The download stays open, with its body unread, while the object is replaced.
+	downloadRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer download.Body.Close()
+	download, err := http.DefaultClient.Do(downloadRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := download.Body.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
 	oldRevision := download.Header.Get("ETag")
-	request, err := http.NewRequest(http.MethodPut, url, strings.NewReader("replacement"))
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPut, url, strings.NewReader("replacement"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,12 +282,14 @@ func TestSlowDownloadDoesNotBlockMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("slow download blocked the writer: %v", err)
 	}
-	changed.Body.Close()
+	if err = changed.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if changed.StatusCode != http.StatusNoContent || changed.Header.Get("ETag") == oldRevision {
 		t.Fatalf("replacement failed: %s", changed.Status)
 	}
 	prefix := make([]byte, 8)
-	if _, err := io.ReadFull(download.Body, prefix); err != nil || string(prefix) != "aaaaaaaa" {
+	if _, err = io.ReadFull(download.Body, prefix); err != nil || string(prefix) != "aaaaaaaa" {
 		t.Fatalf("download lost its original snapshot: %q, %v", prefix, err)
 	}
 }

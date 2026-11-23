@@ -13,38 +13,40 @@ import (
 const (
 	chatAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":[],"max_retries":0}`
 	chatLogID     = "user-sessions/t1/talk/chats/main.json"
+	chatStep      = "talk"
+	chatMessage   = "hello there"
+	nextMessage   = "again"
+	storedSystem  = "stored system"
 )
 
 func chatBody() map[string]string {
 	return map[string]string{
-		"trace_id": "t1", "step_id": "talk", "session": "user-sessions/t1/talk", "tab": "main",
-		"agent": "intake@v1", "message": "hello there", "created_by": "flo",
+		"trace_id": "t1", "step_id": chatStep, "session": "user-sessions/t1/talk", "tab": "main",
+		"agent": intakeRef, "message": chatMessage, "created_by": "flo",
 	}
 }
 
 // postChat sends one request to the chat API and returns the status and the decoded body.
-func postChat(t *testing.T, f *fakes, body any) (int, map[string]any) {
+func postChat(t *testing.T, f *fakes, body any) (status int, out map[string]any) {
 	t.Helper()
 	data, _ := json.Marshal(body)
 	rec := httptest.NewRecorder()
 	f.svc.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/chat", strings.NewReader(string(data))))
-	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("response %d is not JSON: %s", rec.Code, rec.Body.String())
 	}
 	return rec.Code, out
 }
 
-func storedChat(t *testing.T, f *fakes) (chatLog, []map[string]any) {
+func storedChat(t *testing.T, f *fakes) (log chatLog, messages []map[string]any) {
 	t.Helper()
 	f.mu.Lock()
 	data := f.blobs[chatLogID]
 	f.mu.Unlock()
-	var log chatLog
 	if err := json.Unmarshal(data, &log); err != nil {
 		t.Fatalf("stored chat log: %v: %s", err, data)
 	}
-	messages := make([]map[string]any, len(log.Messages))
+	messages = make([]map[string]any, len(log.Messages))
 	for i, m := range log.Messages {
 		if err := json.Unmarshal(m, &messages[i]); err != nil {
 			t.Fatal(err)
@@ -56,7 +58,7 @@ func storedChat(t *testing.T, f *fakes) (chatLog, []map[string]any) {
 func TestChatHealthz(t *testing.T) {
 	f := newFakes(t, chatAgentJSON, respond(finalResponse))
 	rec := httptest.NewRecorder()
-	f.svc.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	f.svc.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("healthz = %d", rec.Code)
 	}
@@ -66,20 +68,20 @@ func TestChatNewTabStoresLogAndReplies(t *testing.T) {
 	f := newFakes(t, chatAgentJSON, respond(finalResponse))
 	f.prompt = "You are intake. {{policy::security/review}}"
 	status, out := postChat(t, f, chatBody())
-	if status != http.StatusOK || out["reply"] != "the plan" || out["chat"] != chatLogID || out["messages"] != float64(3) {
+	if status != http.StatusOK || out["reply"] != planAnswer || out["chat"] != chatLogID || out["messages"] != float64(3) {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	log, messages := storedChat(t, f)
-	if log.Session != "user-sessions/t1/talk" || log.Tab != "main" || log.Agent != "intake@v1" || log.TraceID != "t1" || log.StepID != "talk" {
+	if log.Session != "user-sessions/t1/talk" || log.Tab != "main" || log.Agent != intakeRef || log.TraceID != "t1" || log.StepID != chatStep {
 		t.Fatalf("log header = %+v", log)
 	}
 	if log.Created.IsZero() || log.Updated.Before(log.Created) {
 		t.Fatalf("log times = %v %v", log.Created, log.Updated)
 	}
-	if len(messages) != 3 || messages[0]["role"] != "system" || messages[1]["role"] != "user" || messages[2]["role"] != "assistant" {
+	if len(messages) != 3 || messages[0]["role"] != roleSystem || messages[1]["role"] != roleUser || messages[2]["role"] != roleAssistant {
 		t.Fatalf("messages = %v", messages)
 	}
-	system := messages[0]["content"].(string)
+	system := jsonString(t, messages[0]["content"])
 	if !strings.HasPrefix(system, "You are intake. Follow the security policy.") {
 		t.Fatalf("system prompt was not compiled: %q", system)
 	}
@@ -88,21 +90,21 @@ func TestChatNewTabStoresLogAndReplies(t *testing.T) {
 			t.Fatalf("session note misses %q: %q", want, system)
 		}
 	}
-	if messages[1]["content"] != "hello there" || messages[2]["content"] != "the plan" {
+	if messages[1]["content"] != chatMessage || messages[2]["content"] != planAnswer {
 		t.Fatalf("messages = %v", messages)
 	}
 	if want := [2]string{"agent:intake@v1", "t1"}; f.putMeta[chatLogID] != want {
 		t.Fatalf("put metadata = %v", f.putMeta[chatLogID])
 	}
-	if len(f.llmReqs) != 1 || f.llmReqs[0]["model"] != "m1" || f.llmReqs[0]["reasoning_effort"] != "high" {
+	if len(f.llmReqs) != 1 || f.llmReqs[0]["model"] != "m1" || f.llmReqs[0]["reasoning_effort"] != effortHigh {
 		t.Fatalf("llm requests = %v", f.llmReqs)
 	}
-	sent := f.llmReqs[0]["messages"].([]any)
-	if len(sent) != 2 || sent[0].(map[string]any)["content"] != system {
+	sent := jsonList(t, f.llmReqs[0]["messages"])
+	if len(sent) != 2 || jsonObject(t, sent[0])["content"] != system {
 		t.Fatalf("sent messages = %v", sent)
 	}
 	head := f.llmHeads[0]
-	if head.Get("X-Trace-Id") != "t1" || head.Get("X-Step-Id") != "talk" || head.Get("X-Agent-Ref") != "intake@v1" || head.Get("Traceparent") == "" {
+	if head.Get("X-Trace-Id") != "t1" || head.Get("X-Step-Id") != chatStep || head.Get("X-Agent-Ref") != intakeRef || head.Get("Traceparent") == "" {
 		t.Fatalf("correlation headers = %v", head)
 	}
 }
@@ -120,18 +122,18 @@ func TestChatContinuedTabReusesStoredMessages(t *testing.T) {
 	if len(f.policyRequests) != 0 {
 		t.Fatalf("an existing tab compiled the prompt again: %v", f.policyRequests)
 	}
-	sent := f.llmReqs[0]["messages"].([]any)
-	if len(sent) != 4 || sent[0].(map[string]any)["content"] != "stored system" || sent[3].(map[string]any)["content"] != "hello there" {
+	sent := jsonList(t, f.llmReqs[0]["messages"])
+	if len(sent) != 4 || jsonObject(t, sent[0])["content"] != storedSystem || jsonObject(t, sent[3])["content"] != chatMessage {
 		t.Fatalf("sent messages = %v", sent)
 	}
-	if kept := sent[2].(map[string]any)["extra"]; kept == nil {
+	if kept := jsonObject(t, sent[2])["extra"]; kept == nil {
 		t.Fatalf("stored assistant message was not reused as is: %v", sent[2])
 	}
 	log, messages := storedChat(t, f)
 	if log.Created.Format("2006-01-02T15:04:05Z") != "2026-01-02T03:04:05Z" || !log.Updated.After(log.Created) {
 		t.Fatalf("log times = %v %v", log.Created, log.Updated)
 	}
-	if len(messages) != 5 || messages[0]["content"] != "stored system" || messages[4]["content"] != "the plan" {
+	if len(messages) != 5 || messages[0]["content"] != storedSystem || messages[4]["content"] != planAnswer {
 		t.Fatalf("messages = %v", messages)
 	}
 }
@@ -140,24 +142,24 @@ func TestChatToolCallRound(t *testing.T) {
 	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`,
 		respond(toolCallResponse), respond(finalResponse))
 	status, out := postChat(t, f, chatBody())
-	if status != http.StatusOK || out["reply"] != "the plan" || out["messages"] != float64(5) {
+	if status != http.StatusOK || out["reply"] != planAnswer || out["messages"] != float64(5) {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	_, messages := storedChat(t, f)
-	if len(messages) != 5 || messages[2]["tool_calls"] == nil || messages[3]["role"] != "tool" || messages[3]["tool_call_id"] != "call_1" || messages[3]["content"] != "found 3 hits" {
+	if len(messages) != 5 || messages[2]["tool_calls"] == nil || messages[3]["role"] != roleTool || messages[3]["tool_call_id"] != firstCallID || messages[3]["content"] != "found 3 hits" {
 		t.Fatalf("messages = %v", messages)
 	}
-	if tools := f.llmReqs[0]["tools"].([]any); len(tools) != 1 {
+	if tools := jsonList(t, f.llmReqs[0]["tools"]); len(tools) != 1 {
 		t.Fatalf("tools = %v", tools)
 	}
-	if sent := f.llmReqs[1]["messages"].([]any); len(sent) != 4 {
+	if sent := jsonList(t, f.llmReqs[1]["messages"]); len(sent) != 4 {
 		t.Fatalf("second call messages = %v", sent)
 	}
 	var called bool
 	for i, c := range f.mcpCalls {
-		if c["method"] == "tools/call" {
+		if c["method"] == mcpToolsCall {
 			called = true
-			if h := f.mcpHeads[i]; h.Get("X-Trace-Id") != "t1" || h.Get("X-Step-Id") != "talk" || h.Get("X-Agent-Ref") != "intake@v1" {
+			if h := f.mcpHeads[i]; h.Get("X-Trace-Id") != "t1" || h.Get("X-Step-Id") != chatStep || h.Get("X-Agent-Ref") != intakeRef {
 				t.Fatalf("mcp correlation headers = %v", h)
 			}
 		}
@@ -171,10 +173,10 @@ func TestChatBudgetExhaustedKeepsMessages(t *testing.T) {
 	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":0}`,
 		respond(toolCallResponse))
 	status, out := postChat(t, f, chatBody())
-	if status != http.StatusBadGateway || !strings.Contains(out["error"].(string), "no final answer within 1 model calls") {
+	if status != http.StatusBadGateway || !strings.Contains(jsonString(t, out["error"]), "no final answer within 1 model calls") {
 		t.Fatalf("response = %d %v", status, out)
 	}
-	if _, messages := storedChat(t, f); len(messages) != 4 || messages[3]["role"] != "tool" {
+	if _, messages := storedChat(t, f); len(messages) != 4 || messages[3]["role"] != roleTool {
 		t.Fatalf("messages = %v", messages)
 	}
 }
@@ -184,7 +186,7 @@ func TestChatAgentMismatchConflicts(t *testing.T) {
 	stored := `{"session":"user-sessions/t1/talk","tab":"main","agent":"other@v2","trace_id":"t1","step_id":"talk","messages":[{"role":"system","content":"s"}]}`
 	f.blobs[chatLogID] = []byte(stored)
 	status, out := postChat(t, f, chatBody())
-	if status != http.StatusConflict || !strings.Contains(out["error"].(string), "other@v2") {
+	if status != http.StatusConflict || !strings.Contains(jsonString(t, out["error"]), "other@v2") {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	if string(f.blobs[chatLogID]) != stored || len(f.llmReqs) != 0 {
@@ -238,20 +240,21 @@ func TestChatValidation(t *testing.T) {
 }
 
 func TestChatModelFailurePersistsUserMessage(t *testing.T) {
-	f := newFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) {
+	f := newFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) error {
 		http.Error(w, `{"error":{"message":"model overloaded"}}`, http.StatusServiceUnavailable)
+		return nil
 	}, respond(finalResponse))
 	status, out := postChat(t, f, chatBody())
-	if status != http.StatusBadGateway || !strings.Contains(out["error"].(string), "model overloaded") {
+	if status != http.StatusBadGateway || !strings.Contains(jsonString(t, out["error"]), "model overloaded") {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	_, messages := storedChat(t, f)
-	if len(messages) != 2 || messages[0]["role"] != "system" || messages[1]["content"] != "hello there" {
+	if len(messages) != 2 || messages[0]["role"] != roleSystem || messages[1]["content"] != chatMessage {
 		t.Fatalf("messages after failure = %v", messages)
 	}
 	// The next message continues the same log.
 	body := chatBody()
-	body["message"] = "again"
+	body["message"] = nextMessage
 	if status, out = postChat(t, f, body); status != http.StatusOK || out["messages"] != float64(4) {
 		t.Fatalf("retry response = %d %v", status, out)
 	}
@@ -273,22 +276,22 @@ func TestChatStoreFailureDoesNotStartNewLog(t *testing.T) {
 func TestChatFailedToolCallLeavesAResendableLog(t *testing.T) {
 	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`,
 		respond(toolCallResponse), respond(finalResponse))
-	f.mcpFailMethod = "tools/call"
+	f.mcpFailMethod = mcpToolsCall
 	if status, out := postChat(t, f, chatBody()); status != http.StatusBadGateway {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	_, messages := storedChat(t, f)
-	if len(messages) != 4 || messages[2]["tool_calls"] == nil || messages[3]["role"] != "tool" || messages[3]["tool_call_id"] != "call_1" {
+	if len(messages) != 4 || messages[2]["tool_calls"] == nil || messages[3]["role"] != roleTool || messages[3]["tool_call_id"] != firstCallID {
 		t.Fatalf("messages after the failed tool call = %v", messages)
 	}
 	f.mcpFailMethod = ""
 	body := chatBody()
-	body["message"] = "again"
+	body["message"] = nextMessage
 	if status, out := postChat(t, f, body); status != http.StatusOK || out["messages"] != float64(6) {
 		t.Fatalf("retry response = %d %v", status, out)
 	}
-	sent := f.llmReqs[1]["messages"].([]any)
-	if len(sent) != 5 || sent[3].(map[string]any)["role"] != "tool" || sent[4].(map[string]any)["content"] != "again" {
+	sent := jsonList(t, f.llmReqs[1]["messages"])
+	if len(sent) != 5 || jsonObject(t, sent[3])["role"] != roleTool || jsonObject(t, sent[4])["content"] != nextMessage {
 		t.Fatalf("messages sent after the failure = %v", sent)
 	}
 }
@@ -319,14 +322,14 @@ func TestChatConcurrentMessagesToOneTabAreAllKept(t *testing.T) {
 	}
 	users := map[any]bool{}
 	for i, m := range messages[1:] {
-		want := "user"
+		want := roleUser
 		if i%2 == 1 {
-			want = "assistant"
+			want = roleAssistant
 		}
 		if m["role"] != want {
 			t.Fatalf("message %d has role %v, want %s", i+1, m["role"], want)
 		}
-		if want == "user" {
+		if want == roleUser {
 			users[m["content"]] = true
 		}
 	}
@@ -345,9 +348,10 @@ func TestChatConcurrentMessagesToOneTabAreAllKept(t *testing.T) {
 func TestChatClientDisconnectKeepsTheMessage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	f := newFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) {
+	f := newFakes(t, chatAgentJSON, func(http.ResponseWriter, map[string]any) error {
 		cancel()
 		time.Sleep(50 * time.Millisecond)
+		return nil
 	})
 	data, _ := json.Marshal(chatBody())
 	rec := httptest.NewRecorder()
@@ -356,7 +360,7 @@ func TestChatClientDisconnectKeepsTheMessage(t *testing.T) {
 		t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
 	}
 	_, messages := storedChat(t, f)
-	if len(messages) != 2 || messages[1]["content"] != "hello there" {
+	if len(messages) != 2 || messages[1]["content"] != chatMessage {
 		t.Fatalf("messages after the disconnect = %v", messages)
 	}
 }

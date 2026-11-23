@@ -24,22 +24,22 @@ type intakeRunRequest struct {
 	BindingID       string          `json:"binding_id"`
 	EventID         string          `json:"event_id"`
 	Workflow        string          `json:"workflow"`
-	WorkflowVersion int             `json:"workflow_version"`
 	Event           json.RawMessage `json:"event"`
 	BindingRevision string          `json:"binding_revision"`
 	Binding         json.RawMessage `json:"binding"`
+	WorkflowVersion int             `json:"workflow_version"`
 }
 
 type intakeRunResult struct {
 	TraceID         string `json:"trace_id"`
 	Workflow        string `json:"workflow"`
-	WorkflowVersion int    `json:"workflow_version"`
 	ExecutionID     string `json:"execution_id"`
+	WorkflowVersion int    `json:"workflow_version"`
 	Reused          bool   `json:"reused"`
 }
 
 type intakeStarter interface {
-	StartIntake(context.Context, pipeline.Input, string) (executionID string, reused bool, err error)
+	StartIntake(context.Context, *pipeline.Input, string) (executionID string, reused bool, err error)
 }
 
 func deterministicIntakeID(bindingID, eventID string) string {
@@ -47,8 +47,8 @@ func deterministicIntakeID(bindingID, eventID string) string {
 	return uuid.NewSHA1(intakeNamespace, b).String()
 }
 
-func canonicalIntakeHash(req intakeRunRequest, def pipeline.Definition) (string, error) {
-	return pipeline.IntakeAcceptanceHash(def, pipeline.IntakeInput{BindingID: req.BindingID, BindingRevision: req.BindingRevision, EventID: req.EventID, Event: req.Event, Binding: req.Binding})
+func canonicalIntakeHash(req *intakeRunRequest, def *pipeline.Definition) (string, error) {
+	return pipeline.IntakeAcceptanceHash(def, &pipeline.IntakeInput{BindingID: req.BindingID, BindingRevision: req.BindingRevision, EventID: req.EventID, Event: req.Event, Binding: req.Binding})
 }
 
 func (s *server) startIntakeRun(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +72,7 @@ func (s *server) startIntakeRun(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusNotFound, errors.New("pinned workflow version not found"))
 		return
 	}
-	hash, err := canonicalIntakeHash(req, def)
+	hash, err := canonicalIntakeHash(&req, &def)
 	if err != nil {
 		s.fail(w, http.StatusUnprocessableEntity, err)
 		return
@@ -83,7 +83,7 @@ func (s *server) startIntakeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traceID := deterministicIntakeID(req.BindingID, req.EventID)
-	in := pipeline.Input{
+	in := &pipeline.Input{
 		TraceID: traceID, Definition: def, Prefix: pipeline.RunPrefix(traceID),
 		Inputs: []pipeline.Item{{Source: pipeline.InputSource, Artifact: pipeline.ArtifactID(pipeline.RunPrefix(traceID), pipeline.InputSource), Round: 1}},
 		Intake: &pipeline.IntakeInput{BindingID: req.BindingID, BindingRevision: req.BindingRevision, EventID: req.EventID, Event: req.Event, Binding: req.Binding, AcceptanceHash: hash},
@@ -98,23 +98,23 @@ func (s *server) startIntakeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.events != nil {
-		if err = s.events.acceptExecution(r.Context(), knownOpenExecution{WorkflowID: traceID, ExecutionID: executionID, RunID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(def), AcceptedAt: time.Now().UTC()}); err != nil {
+		if err = s.events.acceptExecution(r.Context(), &knownOpenExecution{WorkflowID: traceID, ExecutionID: executionID, RunID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(&def), AcceptedAt: time.Now().UTC()}); err != nil {
 			s.fail(w, http.StatusServiceUnavailable, fmt.Errorf("recording accepted intake obligation: %w", err))
 			return
 		}
 	}
-	writeJSON(w, http.StatusAccepted, intakeRunResult{TraceID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(def), ExecutionID: executionID, Reused: reused})
+	writeJSON(w, http.StatusAccepted, intakeRunResult{TraceID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(&def), ExecutionID: executionID, Reused: reused})
 }
 
 var errIntakeConflict = errors.New("deterministic intake identity already accepted a different payload")
 
-func (r temporalRunner) StartIntake(ctx context.Context, in pipeline.Input, hash string) (string, bool, error) {
+func (r temporalRunner) StartIntake(ctx context.Context, in *pipeline.Input, hash string) (executionID string, reused bool, err error) {
 	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID: in.TraceID, TaskQueue: pipeline.TaskQueue,
 		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
 		WorkflowExecutionErrorWhenAlreadyStarted: true,
 		Memo: map[string]any{
-			"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(in.Definition), "trace_id": in.TraceID,
+			"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(&in.Definition), "trace_id": in.TraceID,
 			"artifact_prefix": in.Prefix, "intake_binding_id": in.Intake.BindingID, "intake_event_id": in.Intake.EventID, "intake_hash": hash,
 		},
 	}, pipeline.WorkflowName, in)

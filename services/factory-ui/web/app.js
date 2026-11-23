@@ -469,7 +469,7 @@ setInterval(() => {
 // titleCase shows an identifier such as "small-fix" or "step_1" as "Small Fix" / "Step 1"; a
 // grouped name shows its groups before it ("ecc/ECC-plan" as "ECC / ECC Plan").
 // The factory's acronyms stay in capitals ("ECC Plan", "LLM Gateway"), however the ID was typed.
-const titleCase = (id) => String(id || "").split("/").map((part) => part.split(/[-_\s]+/).filter(Boolean).map((p) => (/^(ai|api|ci|cli|css|ecc|html|http|id|json|llm|mcp|pr|qa|sql|ui|url|uuid|yaml)$/i.test(p) ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1))).join(" ")).filter(Boolean).join(" / ");
+const titleCase = (id) => String(id || "").split("/").map((part) => part.split(/[-_\s]+/).filter(Boolean).map((p) => (/^(ai|api|ci|cli|css|ecc|egm|html|http|id|json|llm|mcp|pr|qa|sql|ui|url|uuid|yaml)$/i.test(p) ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1))).join(" ")).filter(Boolean).join(" / ");
 
 // midTruncate shortens a long id in the middle, keeping its start and end readable.
 function midTruncate(text, max = 40) {
@@ -1005,6 +1005,22 @@ const runIndex = {
   revision: 0, // changes when a local removal makes an in-flight directory listing stale
   loading: null,
 
+  // workflowNames are the stored workflows' names, for workflowOf; the pages that list runs
+  // read them with loadWorkflowNames, and a failure keeps the last ones.
+  workflowNames: [],
+  async loadWorkflowNames() {
+    try { this.workflowNames = ((await api("GET", "/api/orchestrator/workflows")).workflows || []).map((w) => w.name); } catch { /* keep the last */ }
+  },
+  // workflowOf names a run's workflow as it is stored now. A run from before its workflow moved
+  // into a group recorded the bare name ("workflow-1"); the one grouped workflow of that name
+  // (default/workflow-1) stands in, so the run is listed, filtered and named with the others.
+  // run.json itself never changes.
+  workflowOf(r) {
+    const name = r?.workflow || "";
+    if (!name || name.includes("/") || this.workflowNames.includes(name)) return name;
+    return groupedName(this.workflowNames, name) || name;
+  },
+
   // forget removes every cached part of a run and invalidates work that started before it.
   forget(trace) {
     this.generations.set(trace, (this.generations.get(trace) || 0) + 1);
@@ -1055,7 +1071,7 @@ const runIndex = {
   // list returns the known runs, newest first, optionally of one workflow.
   list(workflow) {
     return [...this.records.values()]
-      .filter((r) => !workflow || r.workflow === workflow)
+      .filter((r) => !workflow || this.workflowOf(r) === workflow)
       .sort((a, b) => new Date(b.started) - new Date(a.started));
   },
 
@@ -1187,7 +1203,7 @@ const runIndex = {
   // name is what sidebars and tables call a run: its workflow; a run without one is named
   // by its shortened trace ID.
   name(trace) {
-    return titleCase(this.records.get(trace)?.workflow) || midTruncate(trace, 13);
+    return titleCase(this.workflowOf(this.records.get(trace))) || midTruncate(trace, 13);
   },
   // label adds the start time where a run is picked from a list (the trace field, tooltips).
   label(trace) {

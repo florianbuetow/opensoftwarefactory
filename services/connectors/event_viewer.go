@@ -19,9 +19,9 @@ const (
 )
 
 type viewerSession struct {
-	name, query string
 	consumer    jetstream.Consumer
 	lastUsed    time.Time
+	name, query string
 }
 
 type createViewerRequest struct {

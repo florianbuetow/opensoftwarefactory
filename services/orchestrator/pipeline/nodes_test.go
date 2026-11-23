@@ -16,16 +16,16 @@ import (
 // recorder stands in for the services of plain steps. It keeps every request in the order
 // the steps finished. A step with a delay finishes later than the steps without one.
 type recorder struct {
-	mu     sync.Mutex
-	calls  []StepRequest
 	delays map[string]time.Duration
+	calls  []StepRequest
+	mu     sync.Mutex
 }
 
-func (r *recorder) process(_ context.Context, req StepRequest) (StepResult, error) {
+func (r *recorder) process(_ context.Context, req *StepRequest) (StepResult, error) {
 	time.Sleep(r.delays[req.StepID])
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, req)
+	r.calls = append(r.calls, *req)
 	return StepResult{Artifact: req.OutputArtifact}, nil
 }
 
@@ -33,9 +33,9 @@ func (r *recorder) process(_ context.Context, req StepRequest) (StepResult, erro
 func (r *recorder) inputsOf(artifact string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, req := range r.calls {
-		if req.OutputArtifact == artifact {
-			return show(req.Inputs)
+	for i := range r.calls {
+		if r.calls[i].OutputArtifact == artifact {
+			return show(r.calls[i].Inputs)
 		}
 	}
 	return ""
@@ -46,8 +46,8 @@ func (r *recorder) runs(step string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := 0
-	for _, req := range r.calls {
-		if req.StepID == step {
+	for i := range r.calls {
+		if r.calls[i].StepID == step {
 			n++
 		}
 	}
@@ -56,15 +56,14 @@ func (r *recorder) runs(step string) int {
 
 // nodeEnv registers the pipeline, the orchestrator's activities, and a recorder as the
 // service of every plain step.
-func nodeEnv(delays map[string]time.Duration) (*testsuite.TestWorkflowEnvironment, *recorder, memStore) {
+func nodeEnv(delays map[string]time.Duration) (*testsuite.TestWorkflowEnvironment, *recorder) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	store := memStore{}
 	rec := &recorder{delays: delays}
-	env.RegisterActivity(&Activities{Store: store})
+	env.RegisterActivity(&Activities{Store: memStore{}})
 	env.RegisterWorkflowWithOptions(Pipeline, workflow.RegisterOptions{Name: WorkflowName})
 	env.RegisterActivityWithOptions(rec.process, activity.RegisterOptions{Name: DefaultActivity})
-	return env, rec, store
+	return env, rec
 }
 
 func work(id string, deps ...string) Step {
@@ -87,13 +86,13 @@ func nodeStates(t *testing.T, env *testsuite.TestWorkflowEnvironment) map[string
 
 func TestMergeForwardsItsSourcesInDependsOnOrder(t *testing.T) {
 	// The first source finishes last.
-	env, rec, _ := nodeEnv(map[string]time.Duration{"slow": 100 * time.Millisecond})
+	env, rec := nodeEnv(map[string]time.Duration{"slow": 100 * time.Millisecond})
 	def := Definition{Name: "merge", Steps: []Step{
 		work("slow"), work("fast"),
 		{ID: "collect", Service: MergeService, DependsOn: []string{"slow", "fast"}},
 		work("compare", "collect"),
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m1", Definition: def, Inputs: runInput("runs/m1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m1", Definition: def, Inputs: runInput("runs/m1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +119,7 @@ func TestMergeForwardsItsSourcesInDependsOnOrder(t *testing.T) {
 func TestMergeKeepsARepeatedSourceInTheNextEntryAndTimesOut(t *testing.T) {
 	// "part" delivers twice before "whole" delivers once. Its second result waits in the
 	// second entry, which stays incomplete.
-	env, rec, _ := nodeEnv(map[string]time.Duration{"whole": 200 * time.Millisecond})
+	env, rec := nodeEnv(map[string]time.Duration{"whole": 200 * time.Millisecond})
 	def := Definition{Name: "repeat", Steps: []Step{
 		work("one"), work("two"),
 		{ID: "each", Service: BatchService, DependsOn: []string{"one", "two"}, Size: 1},
@@ -129,7 +128,7 @@ func TestMergeKeepsARepeatedSourceInTheNextEntryAndTimesOut(t *testing.T) {
 		{ID: "collect", Service: MergeService, DependsOn: []string{"part", "whole"}, InputTimeout: 5},
 		work("compare", "collect"),
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m2", Definition: def, Inputs: runInput("runs/m2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m2", Definition: def, Inputs: runInput("runs/m2/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `merge "collect" timed out: no result from "whole"`) {
 		t.Fatalf("error %v", err)
@@ -153,7 +152,7 @@ func TestMergeKeepsARepeatedSourceInTheNextEntryAndTimesOut(t *testing.T) {
 }
 
 func TestMergeTimesOutWhenASourceNeverDelivers(t *testing.T) {
-	env, _, _ := nodeEnv(nil)
+	env, _ := nodeEnv(nil)
 	def := Definition{Name: "late", Steps: []Step{
 		work("draft"),
 		{ID: "approve", Service: GateService},
@@ -171,7 +170,7 @@ func TestMergeTimesOutWhenASourceNeverDelivers(t *testing.T) {
 			t.Errorf("state %+v", state)
 		}
 	}, 10*time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m3", Definition: def, Inputs: runInput("runs/m3/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m3", Definition: def, Inputs: runInput("runs/m3/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `merge "collect" timed out: no result from "approve"`) {
 		t.Fatalf("error %v", err)
@@ -179,7 +178,7 @@ func TestMergeTimesOutWhenASourceNeverDelivers(t *testing.T) {
 }
 
 func TestMergeFailsTheRunWhenItsQueueIsFull(t *testing.T) {
-	env, rec, _ := nodeEnv(nil)
+	env, rec := nodeEnv(nil)
 	def := Definition{Name: "full", Steps: []Step{
 		work("one"), work("two"), work("three"),
 		{ID: "each", Service: BatchService, DependsOn: []string{"one", "two", "three"}, Size: 1},
@@ -187,7 +186,7 @@ func TestMergeFailsTheRunWhenItsQueueIsFull(t *testing.T) {
 		{ID: "hold", Service: GateService},
 		{ID: "collect", Service: MergeService, DependsOn: []string{"part", "hold"}, Capacity: 2},
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m4", Definition: def, Inputs: runInput("runs/m4/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m4", Definition: def, Inputs: runInput("runs/m4/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `merge "collect" is full: capacity 2`) {
 		t.Fatalf("error %v", err)
@@ -198,7 +197,7 @@ func TestMergeFailsTheRunWhenItsQueueIsFull(t *testing.T) {
 }
 
 func TestMergeWithOneSourceForwardsEveryResultAtOnce(t *testing.T) {
-	env, rec, _ := nodeEnv(map[string]time.Duration{"two": 100 * time.Millisecond})
+	env, rec := nodeEnv(map[string]time.Duration{"two": 100 * time.Millisecond})
 	def := Definition{Name: "single", Steps: []Step{
 		work("one"), work("two"),
 		{ID: "each", Service: BatchService, DependsOn: []string{"one", "two"}, Size: 1},
@@ -206,7 +205,7 @@ func TestMergeWithOneSourceForwardsEveryResultAtOnce(t *testing.T) {
 		{ID: "collect", Service: MergeService, DependsOn: []string{"part"}},
 		work("after", "collect"),
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m5", Definition: def, Inputs: runInput("runs/m5/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m5", Definition: def, Inputs: runInput("runs/m5/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -220,13 +219,13 @@ func TestMergeWithOneSourceForwardsEveryResultAtOnce(t *testing.T) {
 
 func TestBatchReleasesAFullBatchAndASmallerOneWhenItsTimeoutPasses(t *testing.T) {
 	// The sources finish in the order b, a, c.
-	env, rec, _ := nodeEnv(map[string]time.Duration{"a": 100 * time.Millisecond, "c": 200 * time.Millisecond})
+	env, rec := nodeEnv(map[string]time.Duration{"a": 100 * time.Millisecond, "c": 200 * time.Millisecond})
 	def := Definition{Name: "batch", Steps: []Step{
 		work("a"), work("b"), work("c"),
 		{ID: "gather", Service: BatchService, DependsOn: []string{"a", "b", "c"}, Size: 2, InputTimeout: 20},
 		work("summarise", "gather"),
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "b1", Definition: def, Inputs: runInput("runs/b1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "b1", Definition: def, Inputs: runInput("runs/b1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +252,7 @@ func TestBatchReleasesAFullBatchAndASmallerOneWhenItsTimeoutPasses(t *testing.T)
 }
 
 func TestBatchShowsItsCollectedItemsWhileItWaits(t *testing.T) {
-	env, _, _ := nodeEnv(nil)
+	env, _ := nodeEnv(nil)
 	def := Definition{Name: "waiting", Steps: []Step{
 		work("a"),
 		{ID: "gather", Service: BatchService, DependsOn: []string{"a"}, Size: 2, InputTimeout: 60},
@@ -269,14 +268,14 @@ func TestBatchShowsItsCollectedItemsWhileItWaits(t *testing.T) {
 			t.Errorf("state %+v", state)
 		}
 	}, 30*time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "b2", Definition: def, Inputs: runInput("runs/b2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "b2", Definition: def, Inputs: runInput("runs/b2/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestBatchTakesARepeatedSource(t *testing.T) {
-	env, rec, _ := nodeEnv(nil)
+	env, rec := nodeEnv(nil)
 	def := Definition{Name: "again", Steps: []Step{
 		work("one"), work("two"), work("three"),
 		{ID: "each", Service: BatchService, DependsOn: []string{"one", "two", "three"}, Size: 1},
@@ -284,7 +283,7 @@ func TestBatchTakesARepeatedSource(t *testing.T) {
 		{ID: "gather", Service: BatchService, DependsOn: []string{"part"}, Size: 2, InputTimeout: 10},
 		work("summarise", "gather"),
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "b3", Definition: def, Inputs: runInput("runs/b3/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "b3", Definition: def, Inputs: runInput("runs/b3/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +293,7 @@ func TestBatchTakesARepeatedSource(t *testing.T) {
 }
 
 func TestItemsStayFlatThroughChainedNodes(t *testing.T) {
-	env, rec, _ := nodeEnv(map[string]time.Duration{"c": 100 * time.Millisecond})
+	env, rec := nodeEnv(map[string]time.Duration{"c": 100 * time.Millisecond})
 	def := Definition{Name: "chain", Steps: []Step{
 		work("a"), work("b"), work("c"),
 		{ID: "pair", Service: MergeService, DependsOn: []string{"a", "b"}},
@@ -302,7 +301,7 @@ func TestItemsStayFlatThroughChainedNodes(t *testing.T) {
 		{ID: "again", Service: MergeService, DependsOn: []string{"gather"}},
 		work("report", "again"),
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "c1", Definition: def, Inputs: runInput("runs/c1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "c1", Definition: def, Inputs: runInput("runs/c1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -341,12 +340,12 @@ func TestGateAndNestedWorkflowAfterANodeReceiveTheWholeList(t *testing.T) {
 			return
 		}
 		g := state.Gates[0]
-		if g.Step != "approve" || g.Pass != 1 || g.Artifact != "runs/n1/approve.pass-1" || show(g.Inputs) != "a=runs/n1/a#1 b=runs/n1/b#1" {
+		if g.Step != approveStep || g.Pass != 1 || g.Artifact != "runs/n1/approve.pass-1" || show(g.Inputs) != "a=runs/n1/a#1 b=runs/n1/b#1" {
 			t.Errorf("gate %+v", g)
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "approve", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "approve", Decision: Approved, DecidedBy: testUser})
 	}, time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "n1", Definition: def, Inputs: runInput("runs/n1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "n1", Definition: def, Inputs: runInput("runs/n1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +359,7 @@ func TestGateAndNestedWorkflowAfterANodeReceiveTheWholeList(t *testing.T) {
 		t.Fatalf("after inputs %q", got)
 	}
 	var rec1 DecisionRecord
-	if err := json.Unmarshal(store["runs/n1/approve.pass-1"], &rec1); err != nil || rec1.Step != "approve" || len(rec1.Inputs) != 2 {
+	if err := json.Unmarshal(store["runs/n1/approve.pass-1"], &rec1); err != nil || rec1.Step != approveStep || len(rec1.Inputs) != 2 {
 		t.Fatalf("decision record %+v %v", rec1, err)
 	}
 	var res Result
@@ -390,16 +389,16 @@ func TestTeamAndItsGateAfterANodeWorkWithinOnePass(t *testing.T) {
 		if len(state.Gates) != 1 || state.Gates[0].Pass != 1 || state.Gates[0].Round != 1 || show(state.Gates[0].Inputs) != "build=runs/n2/build.pass-1#1" {
 			t.Errorf("first round %+v", state)
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "handle empty input", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "handle empty input", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
 		if len(state.Gates) != 1 || state.Gates[0].Pass != 1 || state.Gates[0].Round != 2 {
 			t.Errorf("second round %+v", state)
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
 	}, 2*time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "n2", Definition: def, Inputs: runInput("runs/n2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "n2", Definition: def, Inputs: runInput("runs/n2/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +416,7 @@ func TestTeamAndItsGateAfterANodeWorkWithinOnePass(t *testing.T) {
 	}
 	var manifest TeamManifest
 	_, _ = f.a.getJSON(ctx, "teams/n2/build.pass-1/team.json", &manifest)
-	if manifest.Round != 2 || manifest.StepID != "build" {
+	if manifest.Round != 2 || manifest.StepID != buildStep {
 		t.Errorf("manifest %+v", manifest)
 	}
 	var res Result
@@ -430,10 +429,10 @@ func TestTeamAndItsGateAfterANodeWorkWithinOnePass(t *testing.T) {
 func TestValidateMergeAndBatchSteps(t *testing.T) {
 	merge := Step{ID: "collect", Service: MergeService, DependsOn: []string{"a", "b"}, Capacity: 4, InputTimeout: 30}
 	batch := Step{ID: "gather", Service: BatchService, DependsOn: []string{"a"}, Size: 2}
-	base := func(steps ...Step) Definition {
-		return Definition{Name: "w", Steps: append([]Step{work("a"), work("b")}, steps...)}
+	base := func(steps ...Step) *Definition {
+		return &Definition{Name: "w", Steps: append([]Step{work("a"), work("b")}, steps...)}
 	}
-	for name, d := range map[string]Definition{
+	for name, d := range map[string]*Definition{
 		"merge":          base(merge),
 		"batch":          base(batch),
 		"defaults":       base(Step{ID: "collect", Service: MergeService, DependsOn: []string{"a"}}),
@@ -451,7 +450,7 @@ func TestValidateMergeAndBatchSteps(t *testing.T) {
 		return s
 	}
 	for name, tc := range map[string]struct {
-		def  Definition
+		def  *Definition
 		want string
 	}{
 		"merge no source":     {base(change(merge, func(s *Step) { s.DependsOn = nil })), "needs at least one source"},

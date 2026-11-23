@@ -18,12 +18,20 @@ import (
 
 const mcpProtocolVersion = "2025-11-25"
 
+// The MCP methods the client calls.
+const (
+	mcpInitialize  = "initialize"
+	mcpInitialized = "notifications/initialized"
+	mcpToolsList   = "tools/list"
+	mcpToolsCall   = "tools/call"
+)
+
 type mcpClient struct {
 	url         string
 	service     string
 	http        *http.Client
-	nextID      atomic.Uint64
 	session     string
+	nextID      atomic.Uint64
 	initialized bool
 }
 
@@ -36,15 +44,15 @@ type mcpTool struct {
 type rpcMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *struct {
-		Code    int    `json:"code"`
 		Message string `json:"message"`
+		Code    int    `json:"code"`
 	} `json:"error,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 func (c *mcpClient) connect(ctx context.Context) error {
-	raw, err := c.call(ctx, "initialize", map[string]any{
+	raw, err := c.call(ctx, mcpInitialize, map[string]any{
 		"protocolVersion": mcpProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]string{"name": "agent-service", "version": "1"},
@@ -65,7 +73,7 @@ func (c *mcpClient) connect(ctx context.Context) error {
 		return fmt.Errorf("initialize: server does not support MCP %s tools", mcpProtocolVersion)
 	}
 	c.initialized = true
-	if err := c.notify(ctx, "notifications/initialized", map[string]any{}); err != nil {
+	if err := c.notify(ctx, mcpInitialized, map[string]any{}); err != nil {
 		c.initialized = false
 		return err
 	}
@@ -80,13 +88,13 @@ func (c *mcpClient) listTools(ctx context.Context) ([]mcpTool, error) {
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		raw, err := c.call(ctx, "tools/list", params)
+		raw, err := c.call(ctx, mcpToolsList, params)
 		if err != nil {
 			return nil, err
 		}
 		var page struct {
-			Tools      []mcpTool `json:"tools"`
 			NextCursor string    `json:"nextCursor"`
+			Tools      []mcpTool `json:"tools"`
 		}
 		if err := json.Unmarshal(raw, &page); err != nil {
 			return nil, fmt.Errorf("tools/list: %w", err)
@@ -99,8 +107,8 @@ func (c *mcpClient) listTools(ctx context.Context) ([]mcpTool, error) {
 	}
 }
 
-func (c *mcpClient) callTool(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
-	raw, err := c.call(ctx, "tools/call", map[string]any{"name": name, "arguments": args})
+func (c *mcpClient) callTool(ctx context.Context, name string, args json.RawMessage) (text string, isError bool, err error) {
+	raw, err := c.call(ctx, mcpToolsCall, map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return "", false, err
 	}
@@ -111,7 +119,8 @@ func (c *mcpClient) callTool(ctx context.Context, name string, args json.RawMess
 		} `json:"content"`
 		IsError bool `json:"isError"`
 	}
-	if err := json.Unmarshal(raw, &res); err != nil {
+	err = json.Unmarshal(raw, &res)
+	if err != nil {
 		return "", false, fmt.Errorf("tools/call: %w", err)
 	}
 	var b strings.Builder
@@ -123,22 +132,22 @@ func (c *mcpClient) callTool(ctx context.Context, name string, args json.RawMess
 	return b.String(), res.IsError, nil
 }
 
-func (c *mcpClient) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+func (c *mcpClient) call(ctx context.Context, method string, params map[string]any) (result json.RawMessage, err error) {
 	id := json.RawMessage(fmt.Sprint(c.nextID.Add(1)))
 	payload := map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}
 	resp, err := c.post(ctx, payload)
 	if err != nil {
-		if ctx.Err() != nil && method != "initialize" {
+		if ctx.Err() != nil && method != mcpInitialize {
 			c.cancel(id)
 		}
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("mcp gateway: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	skillCall := c.service == skillsService && method == "tools/call"
+	skillCall := c.service == skillsService && method == mcpToolsCall
 	var msg *rpcMessage
 	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt == "text/event-stream" {
 		limit := 16 << 20
@@ -155,7 +164,7 @@ func (c *mcpClient) call(ctx context.Context, method string, params map[string]a
 		err = json.NewDecoder(body).Decode(msg)
 	}
 	if err != nil {
-		if ctx.Err() != nil && method != "initialize" {
+		if ctx.Err() != nil && method != mcpInitialize {
 			c.cancel(id)
 		}
 		return nil, fmt.Errorf("mcp %s: %w", method, err)
@@ -197,12 +206,12 @@ func (c *mcpClient) post(ctx context.Context, payload any) (*http.Response, erro
 	return resp, nil
 }
 
-func (c *mcpClient) notify(ctx context.Context, method string, params map[string]any) error {
+func (c *mcpClient) notify(ctx context.Context, method string, params map[string]any) (err error) {
 	resp, err := c.post(ctx, map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("mcp gateway: %s: %s", resp.Status, strings.TrimSpace(string(body)))
@@ -218,13 +227,13 @@ func (c *mcpClient) cancel(id json.RawMessage) {
 
 // close releases an upstream session when the server created one. A missing
 // session and a session already forgotten by the server both require no action.
-func (c *mcpClient) close() error {
+func (c *mcpClient) close() (err error) {
 	if c.session == "" {
 		return nil
 	}
 	ctx, stop := context.WithTimeout(context.Background(), time.Second)
 	defer stop()
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -235,7 +244,7 @@ func (c *mcpClient) close() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode/100 == 2 {
 		c.session = ""
 		return nil

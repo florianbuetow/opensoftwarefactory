@@ -92,13 +92,13 @@ func checkToolRoundEvents(t *testing.T, events []TurnEvent) {
 		t.Fatalf("events = %+v", events)
 	}
 	first, tool, last := events[0], events[1], events[2]
-	if first.Kind != "model_call" || first.Name != "chat completion" || first.Model != "m1" || first.Turn != 1 || first.Status != "completed" || first.Error != "" {
+	if first.Kind != kindModelCall || first.Name != "chat completion" || first.Model != "m1" || first.Turn != 1 || first.Status != statusCompleted || first.Error != "" {
 		t.Fatalf("first model call = %+v", first)
 	}
 	if first.Usage == nil || valueOf(first.Usage.PromptTokens) != 10 || valueOf(first.Usage.CompletionTokens) != 5 || valueOf(first.Usage.TotalTokens) != 15 {
 		t.Fatalf("first model call usage = %+v", first.Usage)
 	}
-	if tool.Kind != "tool_call" || tool.Name != "docs__search" || tool.Turn != 1 || tool.Status != "completed" || tool.Model != "" || tool.Usage != nil {
+	if tool.Kind != kindToolCall || tool.Name != "docs__search" || tool.Turn != 1 || tool.Status != statusCompleted || tool.Model != "" || tool.Usage != nil {
 		t.Fatalf("tool call = %+v", tool)
 	}
 	if want := estimateTokens("found 3 hits"); tool.EstimatedOutputTokens == nil || *tool.EstimatedOutputTokens != want {
@@ -107,18 +107,19 @@ func checkToolRoundEvents(t *testing.T, events []TurnEvent) {
 	if want := estimateJSONTokens(map[string]string{"name": "docs__search", "arguments": `{"q":"auth"}`}); *tool.EstimatedInputTokens != want {
 		t.Fatalf("tool input estimate = %d, want %d", *tool.EstimatedInputTokens, want)
 	}
-	if last.Kind != "model_call" || last.Turn != 2 || last.Status != "completed" || last.Usage == nil || valueOf(last.Usage.TotalTokens) != 27 {
+	if last.Kind != kindModelCall || last.Turn != 2 || last.Status != statusCompleted || last.Usage == nil || valueOf(last.Usage.TotalTokens) != 27 {
 		t.Fatalf("last model call = %+v", last)
 	}
 	if want := estimateTokens(`{"role":"assistant","content":"the plan"}`); *last.EstimatedOutputTokens != want {
 		t.Fatalf("model output estimate = %d, want %d", *last.EstimatedOutputTokens, want)
 	}
-	for i, e := range events {
+	for i := range events {
+		e := &events[i]
 		if e.Started.IsZero() || e.Finished.Before(e.Started) {
 			t.Fatalf("event %d times = %v %v", i, e.Started, e.Finished)
 		}
-		if e.EstimatedInputTokens == nil || *e.EstimatedInputTokens <= 0 || e.EstimatedOutputTokens == nil || e.EstimationMethod != "tiktoken:cl100k_base" {
-			t.Fatalf("event %d estimates = %+v", i, e)
+		if e.EstimatedInputTokens == nil || *e.EstimatedInputTokens <= 0 || e.EstimatedOutputTokens == nil || e.EstimationMethod != estimationMethod {
+			t.Fatalf("event %d estimates = %+v", i, *e)
 		}
 	}
 	// The second request holds the first one plus two messages, so it is larger.
@@ -139,7 +140,7 @@ func checkEventFields(t *testing.T, stored map[string]any) {
 		t.Fatalf("no events stored: %v", stored)
 	}
 	for _, e := range events {
-		for field := range e.(map[string]any) {
+		for field := range jsonObject(t, e) {
 			if !allowed[field] {
 				t.Fatalf("event has the field %q: %v", field, e)
 			}
@@ -154,7 +155,7 @@ func TestProcessSendsAndRecordsModelSettings(t *testing.T) {
 	}
 	checkSettingsSent(t, f, 2)
 	rec := storedObject(t, f, "runs/t1/plan.run.json")
-	if rec["temperature"] != 0.2 || rec["estimation_method"] != "tiktoken:cl100k_base" {
+	if rec["temperature"] != 0.2 || rec["estimation_method"] != estimationMethod {
 		t.Fatalf("record settings = %v %v", rec["temperature"], rec["estimation_method"])
 	}
 	var typed RunRecord
@@ -172,7 +173,7 @@ func TestProcessSendsAndRecordsModelSettings(t *testing.T) {
 		t.Fatalf("model output estimate = %d, want %d", *typed.Events[3].EstimatedOutputTokens, want)
 	}
 	for _, i := range []int{1, 2, 3} {
-		if typed.Events[i].EstimationMethod != "tiktoken:cl100k_base" {
+		if typed.Events[i].EstimationMethod != estimationMethod {
 			t.Fatalf("event %d estimation method = %q", i, typed.Events[i].EstimationMethod)
 		}
 	}
@@ -228,7 +229,7 @@ func TestChatRecordsModelSettingsAndEvents(t *testing.T) {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	log, _ = storedChat(t, f)
-	if len(log.Events) != 4 || log.Events[3].Kind != "model_call" || log.Events[3].Turn != 1 {
+	if len(log.Events) != 4 || log.Events[3].Kind != kindModelCall || log.Events[3].Turn != 1 {
 		t.Fatalf("events after the second message = %+v", log.Events)
 	}
 	if !log.Events[3].Started.After(log.Events[0].Started) {
@@ -246,7 +247,7 @@ func TestChatLogWithoutEventsStillLoads(t *testing.T) {
 	}
 	checkNoSettingsSent(t, f)
 	log, messages := storedChat(t, f)
-	if len(messages) != 5 || messages[0]["content"] != "stored system" || log.Model != "m1" || log.Temperature != nil {
+	if len(messages) != 5 || messages[0]["content"] != storedSystem || log.Model != "m1" || log.Temperature != nil {
 		t.Fatalf("log = %+v %v", log, messages)
 	}
 	// The model reported no usage, so the event has only the estimates.
@@ -257,14 +258,15 @@ func TestChatLogWithoutEventsStillLoads(t *testing.T) {
 	if _, ok := stored["temperature"]; ok {
 		t.Fatalf("log of an agent without settings has a temperature: %v", stored["temperature"])
 	}
-	if _, ok := stored["events"].([]any)[0].(map[string]any)["usage"]; ok {
+	if _, ok := jsonObject(t, jsonList(t, stored["events"])[0])["usage"]; ok {
 		t.Fatalf("event has usage the model did not report: %v", stored["events"])
 	}
 }
 
 func TestChatFailedModelCallIsRecorded(t *testing.T) {
-	f := newFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) {
+	f := newFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) error {
 		http.Error(w, `{"error":{"message":"model overloaded"}}`, http.StatusServiceUnavailable)
+		return nil
 	})
 	if status, _ := postChat(t, f, chatBody()); status != http.StatusBadGateway {
 		t.Fatalf("status = %d", status)
@@ -274,7 +276,7 @@ func TestChatFailedModelCallIsRecorded(t *testing.T) {
 		t.Fatalf("events = %+v", log.Events)
 	}
 	e := log.Events[0]
-	if e.Kind != "model_call" || e.Status != "failed" || !strings.Contains(e.Error, "model overloaded") || e.EstimatedInputTokens == nil || e.EstimatedOutputTokens != nil || e.Finished.Before(e.Started) {
+	if e.Kind != kindModelCall || e.Status != statusFailed || !strings.Contains(e.Error, "model overloaded") || e.EstimatedInputTokens == nil || e.EstimatedOutputTokens != nil || e.Finished.Before(e.Started) {
 		t.Fatalf("failed model call = %+v", e)
 	}
 }
@@ -287,18 +289,18 @@ func TestChatFailedToolCallsAreRecorded(t *testing.T) {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	log, _ := storedChat(t, f)
-	if len(log.Events) != 3 || log.Events[1].Status != "failed" || log.Events[1].Error != "Error: index offline" || log.Events[1].EstimatedOutputTokens == nil {
+	if len(log.Events) != 3 || log.Events[1].Status != statusFailed || log.Events[1].Error != "Error: index offline" || log.Events[1].EstimatedOutputTokens == nil {
 		t.Fatalf("events = %+v", log.Events)
 	}
 
 	// The gateway fails: the turn fails and the event says why.
 	f = newFakes(t, settingsAgentJSON, respond(toolCallResponse), respond(finalResponse))
-	f.mcpFailMethod = "tools/call"
+	f.mcpFailMethod = mcpToolsCall
 	if status, _ := postChat(t, f, chatBody()); status != http.StatusBadGateway {
 		t.Fatalf("status = %d", status)
 	}
 	log, _ = storedChat(t, f)
-	if len(log.Events) != 2 || log.Events[1].Kind != "tool_call" || log.Events[1].Status != "failed" || log.Events[1].Error == "" || log.Events[1].EstimatedOutputTokens != nil {
+	if len(log.Events) != 2 || log.Events[1].Kind != kindToolCall || log.Events[1].Status != statusFailed || log.Events[1].Error == "" || log.Events[1].EstimatedOutputTokens != nil {
 		t.Fatalf("events = %+v", log.Events)
 	}
 }
@@ -327,7 +329,7 @@ func TestTeamTurnRecordsModelSettingsAndEvents(t *testing.T) {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
 	log, _ = storedMember(t, f, teamMemberID)
-	if len(log.Events) != 4 || log.Events[3].Kind != "model_call" || log.Events[3].Turn != 1 {
+	if len(log.Events) != 4 || log.Events[3].Kind != kindModelCall || log.Events[3].Turn != 1 {
 		t.Fatalf("events after the second turn = %+v", log.Events)
 	}
 }
@@ -341,38 +343,39 @@ func TestTeamMemberHistoryWithoutEventsStillLoads(t *testing.T) {
 	}
 	checkNoSettingsSent(t, f)
 	log, messages := storedMember(t, f, teamMemberID)
-	if len(messages) != 5 || messages[0]["content"] != "stored system" || log.Model != "m1" || log.Temperature != nil {
+	if len(messages) != 5 || messages[0]["content"] != storedSystem || log.Model != "m1" || log.Temperature != nil {
 		t.Fatalf("history = %+v %v", log, messages)
 	}
-	if len(log.Events) != 1 || log.Events[0].Kind != "model_call" || log.Events[0].Status != "completed" {
+	if len(log.Events) != 1 || log.Events[0].Kind != kindModelCall || log.Events[0].Status != statusCompleted {
 		t.Fatalf("events = %+v", log.Events)
 	}
 }
 
 func TestTeamTurnFailedModelCallIsRecorded(t *testing.T) {
-	f := teamFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) {
+	f := teamFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) error {
 		http.Error(w, `{"error":{"message":"model overloaded"}}`, http.StatusServiceUnavailable)
+		return nil
 	})
 	if _, err := f.svc.TeamTurn(context.Background(), leadTurn()); err == nil {
 		t.Fatal("the turn did not fail")
 	}
 	log, _ := storedMember(t, f, teamMemberID)
-	if len(log.Events) != 1 || log.Events[0].Status != "failed" || !strings.Contains(log.Events[0].Error, "model overloaded") {
+	if len(log.Events) != 1 || log.Events[0].Status != statusFailed || !strings.Contains(log.Events[0].Error, "model overloaded") {
 		t.Fatalf("events = %+v", log.Events)
 	}
 }
 
 func TestEffortNoneEndsTheRequestWithAnEmptyThinkingBlock(t *testing.T) {
-	messages := []any{map[string]string{"role": "user", "content": "hi"}}
-	none := Definition{Models: []string{"m1"}, Effort: "none"}.chatRequest(messages, nil)
+	messages := []any{map[string]string{"role": roleUser, "content": "hi"}}
+	none := (&Definition{Models: []string{"m1"}, Effort: "none"}).chatRequest(messages, nil)
 	last, ok := none.Messages[len(none.Messages)-1].(map[string]string)
-	if len(none.Messages) != 2 || !ok || last["role"] != "assistant" || last["content"] != noThinking || none.ReasoningEffort != "" {
+	if len(none.Messages) != 2 || !ok || last["role"] != roleAssistant || last["content"] != noThinking || none.ReasoningEffort != "" {
 		t.Fatalf("effort none: %+v", none)
 	}
 	if len(messages) != 1 {
 		t.Fatal("the conversation itself must not grow")
 	}
-	low := Definition{Models: []string{"m1"}, Effort: "low"}.chatRequest(messages, nil)
+	low := (&Definition{Models: []string{"m1"}, Effort: "low"}).chatRequest(messages, nil)
 	if len(low.Messages) != 1 || low.ReasoningEffort != "low" {
 		t.Fatalf("effort low: %+v", low)
 	}

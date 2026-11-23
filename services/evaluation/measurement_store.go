@@ -18,13 +18,21 @@ import (
 var errPrecondition = errors.New("blob revision precondition failed")
 
 type storedObject struct {
-	Data     []byte
-	Revision string
 	Created  time.Time
+	Revision string
+	Data     []byte
 }
 
-func (s *service) readObject(ctx context.Context, id string) (storedObject, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.blobs+"/blobs/"+id, nil)
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
+}
+
+func (s *service) readObject(ctx context.Context, id string) (object storedObject, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.blobs+"/blobs/"+id, http.NoBody)
 	if err != nil {
 		return storedObject{}, err
 	}
@@ -32,7 +40,7 @@ func (s *service) readObject(ctx context.Context, id string) (storedObject, erro
 	if err != nil {
 		return storedObject{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return storedObject{}, errNotFound
 	}
@@ -44,8 +52,8 @@ func (s *service) readObject(ctx context.Context, id string) (storedObject, erro
 	return storedObject{Data: data, Revision: trimETag(resp.Header.Get("ETag")), Created: created}, err
 }
 
-func (s *service) readObjectLimited(ctx context.Context, id string, limit int64) (storedObject, int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.blobs+"/blobs/"+id, nil)
+func (s *service) readObjectLimited(ctx context.Context, id string, limit int64) (object storedObject, size int64, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.blobs+"/blobs/"+id, http.NoBody)
 	if err != nil {
 		return storedObject{}, 0, err
 	}
@@ -53,7 +61,7 @@ func (s *service) readObjectLimited(ctx context.Context, id string, limit int64)
 	if err != nil {
 		return storedObject{}, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == 404 {
 		return storedObject{}, 0, errNotFound
 	}
@@ -69,7 +77,7 @@ func (s *service) readObjectLimited(ctx context.Context, id string, limit int64)
 	return storedObject{Data: data, Revision: trimETag(resp.Header.Get("ETag")), Created: created}, total, err
 }
 
-func (s *service) writeObject(ctx context.Context, id string, value any, condition string) (string, error) {
+func (s *service) writeObject(ctx context.Context, id string, value any, condition string) (revision string, err error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return "", err
@@ -89,7 +97,7 @@ func (s *service) writeObject(ctx context.Context, id string, value any, conditi
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusPreconditionFailed {
 		return "", errPrecondition
 	}
@@ -113,17 +121,19 @@ type blobListing struct {
 	} `json:"objects"`
 }
 
+// executionScope is the orchestrator's ledger record of one workflow
+// execution. Evaluation only reads it.
 type executionScope struct {
-	SchemaVersion     int        `json:"schema_version"`
+	StartedAt         time.Time  `json:"started_at"`
+	ClosedAt          *time.Time `json:"closed_at,omitempty"`
 	ExecutionID       string     `json:"execution_id"`
 	RunID             string     `json:"run_id"`
 	ParentExecutionID string     `json:"parent_execution_id,omitempty"`
 	Workflow          string     `json:"workflow"`
-	WorkflowVersion   int        `json:"workflow_version"`
 	ArtifactPrefix    string     `json:"artifact_prefix"`
-	StartedAt         time.Time  `json:"started_at"`
-	ClosedAt          *time.Time `json:"closed_at,omitempty"`
 	Status            string     `json:"status"`
+	SchemaVersion     int        `json:"schema_version"`
+	WorkflowVersion   int        `json:"workflow_version"`
 }
 
 func (s *service) executionScope(ctx context.Context, executionID string) (executionScope, error) {

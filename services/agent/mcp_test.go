@@ -22,14 +22,14 @@ func TestMCPClientInitializationSessionAndCleanup(t *testing.T) {
 			return
 		}
 		var request struct {
-			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
+			ID     json.RawMessage `json:"id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
 		methods = append(methods, request.Method)
-		if request.Method == "initialize" {
+		if request.Method == mcpInitialize {
 			if r.Header.Get("MCP-Protocol-Version") != "" || r.Header.Get("Mcp-Session-Id") != "" {
 				t.Errorf("initialize headers = %v", r.Header)
 			}
@@ -40,7 +40,7 @@ func TestMCPClientInitializationSessionAndCleanup(t *testing.T) {
 		if r.Header.Get("MCP-Protocol-Version") != mcpProtocolVersion || r.Header.Get("Mcp-Session-Id") != "session-1" {
 			t.Errorf("%s headers = %v", request.Method, r.Header)
 		}
-		if request.Method == "notifications/initialized" {
+		if request.Method == mcpInitialized {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
@@ -94,15 +94,15 @@ func TestMCPClientCancelsActiveCall(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&request)
 		switch request.Method {
-		case "initialize":
+		case mcpInitialize:
 			w.Header().Set("Mcp-Session-Id", "session-cancel")
 			writeRPCResult(w, request.ID, `{"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}`)
-		case "notifications/initialized":
+		case mcpInitialized:
 			w.WriteHeader(http.StatusAccepted)
 		case "notifications/cancelled":
 			cancelled <- request.Params.RequestID
 			w.WriteHeader(http.StatusAccepted)
-		case "tools/call":
+		case mcpToolsCall:
 			<-r.Context().Done()
 		}
 	}))

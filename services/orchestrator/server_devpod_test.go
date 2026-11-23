@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -140,7 +141,7 @@ func TestSavingDevPodStepsAndBackEdges(t *testing.T) {
 			t.Errorf("%s: %d %s", name, code, body)
 		}
 	}
-	if after, _ := workflowObjects(workflows); string(before) != string(after) {
+	if after, _ := workflowObjects(workflows); !bytes.Equal(before, after) {
 		t.Fatal("a refused version changed config.yaml")
 	}
 }

@@ -18,7 +18,7 @@ func firstUserMessage(t *testing.T, f *fakes) string {
 	if len(f.llmReqs) == 0 {
 		t.Fatal("no model request")
 	}
-	return f.llmReqs[0]["messages"].([]any)[1].(map[string]any)["content"].(string)
+	return jsonString(t, jsonObject(t, jsonList(t, f.llmReqs[0]["messages"])[1])["content"])
 }
 
 func TestStepRequestReadsTheItemList(t *testing.T) {
@@ -91,7 +91,7 @@ func TestFirstMessageListsReferencesWithoutUnpacking(t *testing.T) {
 	if got := firstUserMessage(t, f); got != want {
 		t.Fatalf("first message =\n%s\nwant\n%s", got, want)
 	}
-	if system := f.llmReqs[0]["messages"].([]any)[0].(map[string]any)["content"]; system != "You are intake." {
+	if system := jsonObject(t, jsonList(t, f.llmReqs[0]["messages"])[0])["content"]; system != intakePrompt {
 		t.Fatalf("system message changed: %q", system)
 	}
 }
@@ -126,7 +126,7 @@ func TestProcessFailsWithoutUnpackInputs(t *testing.T) {
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != "failed" || !strings.Contains(rec.Error, noUnpackError) {
+	if rec.Status != statusFailed || !strings.Contains(rec.Error, noUnpackError) {
 		t.Fatalf("record = %+v", rec)
 	}
 }

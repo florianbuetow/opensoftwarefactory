@@ -15,33 +15,39 @@ import (
 )
 
 const (
-	RecalculationWorkflowName  = "MeasurementRecalculation"
+	// RecalculationWorkflowName is the registered Temporal workflow type that recalculates
+	// stored measurements.
+	RecalculationWorkflowName = "MeasurementRecalculation"
+	// RecalculationBatchActivity is the activity that asks evaluation for one batch.
 	RecalculationBatchActivity = "RecalculationBatch"
 )
 
+// RecalculationInput names a recalculation job of the evaluation service and where its next
+// batch starts.
 type RecalculationInput struct {
 	ID              string     `json:"id"`
 	DisplayCurrency string     `json:"display_currency"`
-	MeasurementIDs  []string   `json:"measurement_ids,omitempty"`
 	From            *time.Time `json:"from,omitempty"`
 	To              *time.Time `json:"to,omitempty"`
 	Cursor          string     `json:"cursor,omitempty"`
+	MeasurementIDs  []string   `json:"measurement_ids,omitempty"`
 	Limit           int        `json:"limit,omitempty"`
 }
 
+// RecalculationBatchResult is the answer of the evaluation service to one batch.
 type RecalculationBatchResult struct {
+	NextCursor        string `json:"next_cursor,omitempty"`
+	Error             string `json:"error,omitempty"`
+	Status            string `json:"status,omitempty"`
 	Processed         int    `json:"processed"`
 	Pending           int    `json:"pending"`
-	NextCursor        string `json:"next_cursor,omitempty"`
 	Done              bool   `json:"done"`
-	Error             string `json:"error,omitempty"`
 	ProjectionPending bool   `json:"projection_pending,omitempty"`
-	Status            string `json:"status,omitempty"`
 }
 
 // Recalculation is an ordinary Temporal workflow. Its only unit of work is the bounded,
 // deterministic evaluation batch endpoint; progress is durable in Temporal and evaluation.
-func Recalculation(ctx workflow.Context, in RecalculationInput) error {
+func Recalculation(ctx workflow.Context, in *RecalculationInput) error {
 	if in.Limit <= 0 {
 		in.Limit = 100
 	}
@@ -71,7 +77,8 @@ func Recalculation(ctx workflow.Context, in RecalculationInput) error {
 	}
 }
 
-func (a *Activities) RecalculationBatch(ctx context.Context, in RecalculationInput) (RecalculationBatchResult, error) {
+// RecalculationBatch posts one batch of a recalculation job to the evaluation service.
+func (a *Activities) RecalculationBatch(ctx context.Context, in *RecalculationInput) (out RecalculationBatchResult, err error) {
 	base := strings.TrimRight(a.EvaluationURL, "/")
 	if base == "" {
 		return RecalculationBatchResult{}, temporal.NewNonRetryableApplicationError("evaluation service is not configured", "EvaluationUnavailable", nil)
@@ -93,7 +100,7 @@ func (a *Activities) RecalculationBatch(ctx context.Context, in RecalculationInp
 	if err != nil {
 		return RecalculationBatchResult{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return RecalculationBatchResult{}, err
@@ -104,9 +111,6 @@ func (a *Activities) RecalculationBatch(ctx context.Context, in RecalculationInp
 		}
 		return RecalculationBatchResult{}, fmt.Errorf("evaluation batch answered %s: %s", resp.Status, bytes.TrimSpace(data))
 	}
-	var out RecalculationBatchResult
-	if err := json.Unmarshal(data, &out); err != nil {
-		return out, err
-	}
-	return out, nil
+	err = json.Unmarshal(data, &out)
+	return out, err
 }

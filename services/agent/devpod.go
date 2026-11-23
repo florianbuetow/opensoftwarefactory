@@ -23,8 +23,8 @@ var devPodIdentity = []string{"pod", "agent", "run"}
 // devPodCalls is the harness's control over the dev pod tool calls of one turn.
 type devPodCalls struct {
 	pod, agent, run string
-	blocked         bool
 	reason          string
+	blocked         bool
 }
 
 type devPodKey struct{}

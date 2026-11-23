@@ -8,7 +8,7 @@ import (
 )
 
 // IntakeAcceptanceHash covers the complete immutable trigger and pinned workflow snapshot.
-func IntakeAcceptanceHash(def Definition, in IntakeInput) (string, error) {
+func IntakeAcceptanceHash(def *Definition, in *IntakeInput) (string, error) {
 	var event, binding any
 	if len(in.Event) == 0 || json.Unmarshal(in.Event, &event) != nil {
 		return "", errors.New("event must be valid JSON")
@@ -23,7 +23,7 @@ func IntakeAcceptanceHash(def Definition, in IntakeInput) (string, error) {
 		Event           any        `json:"event"`
 		Binding         any        `json:"binding"`
 		Definition      Definition `json:"definition"`
-	}{in.BindingID, in.BindingRevision, in.EventID, event, binding, def})
+	}{in.BindingID, in.BindingRevision, in.EventID, event, binding, *def})
 	if err != nil {
 		return "", err
 	}

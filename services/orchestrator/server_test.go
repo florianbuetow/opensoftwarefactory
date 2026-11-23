@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,7 +23,6 @@ type fakeRunner struct {
 	pending  []PendingDecision
 	decided  map[string]pipeline.Decision
 	decision error
-	removed  []string
 
 	sessions       []WaitingSession
 	teams          []RunningTeam
@@ -30,6 +30,7 @@ type fakeRunner struct {
 	completion     error
 	failedSessions map[string]pipeline.SessionFailure
 	failSessionErr error
+	removed        []string
 }
 
 func (f *fakeRunner) Teams(context.Context) ([]RunningTeam, error) { return f.teams, nil }
@@ -58,18 +59,19 @@ func (f *fakeRunner) FailSession(_ context.Context, id string, failure pipeline.
 	return nil
 }
 
-func (f *fakeRunner) Start(_ context.Context, in pipeline.Input) error {
-	f.started = append(f.started, in)
+func (f *fakeRunner) Start(_ context.Context, in *pipeline.Input) error {
+	f.started = append(f.started, *in)
 	return nil
 }
 
-func (f *fakeRunner) StartExecution(_ context.Context, in pipeline.Input) (string, error) {
-	f.started = append(f.started, in)
+func (f *fakeRunner) StartExecution(_ context.Context, in *pipeline.Input) (string, error) {
+	f.started = append(f.started, *in)
 	return "execution-" + in.TraceID, nil
 }
 
 func (f *fakeRunner) Status(_ context.Context, trace string) (RunStatus, error) {
-	for _, in := range f.started {
+	for i := range f.started {
+		in := &f.started[i]
 		if in.TraceID == trace {
 			return RunStatus{TraceID: trace, Status: "Completed", Artifacts: map[string]string{"a": pipeline.ArtifactID(in.Prefix, "a")}}, nil
 		}
@@ -99,6 +101,13 @@ type memStore struct {
 	data map[string][]byte
 	meta map[string]pipeline.Meta
 }
+
+// memStore lists and deletes the objects of a run, as the blobstore does, and fakeRunner
+// reports the execution it started, as the Temporal runner does.
+var (
+	_ runObjects       = (*memStore)(nil)
+	_ executionStarter = (*fakeRunner)(nil)
+)
 
 func newMemStore() *memStore {
 	return &memStore{data: map[string][]byte{}, meta: map[string]pipeline.Meta{}}
@@ -134,6 +143,16 @@ func (m *memStore) Get(_ context.Context, id string) ([]byte, error) {
 	return d, nil
 }
 
+// Values the tests of this package share.
+const (
+	// sampleWorkflow is the name of the workflow in sampleConfig.
+	sampleWorkflow = "sample"
+	// testUser is the person who starts runs, decides gates, and completes sessions.
+	testUser = "flo"
+	// chatStep is the ID of the interactive step of the session tests.
+	chatStep = "chat"
+)
+
 const sampleConfig = `workflows:
   - name: sample
     steps:
@@ -145,9 +164,9 @@ const sampleConfig = `workflows:
 `
 
 // List returns the immediate child directories and object IDs of a prefix.
-func (m *memStore) List(_ context.Context, prefix string) ([]string, []string, error) {
+func (m *memStore) List(_ context.Context, prefix string) (dirs, objects []string, err error) {
 	seen := map[string]bool{}
-	dirs, objects := []string{}, []string{}
+	dirs, objects = []string{}, []string{}
 	for id := range m.data {
 		rest, ok := strings.CutPrefix(id, prefix+"/")
 		if !ok {
@@ -195,7 +214,10 @@ func storedConfig(s *workflowStore) (Config, error) {
 // workflowObjects returns every stored workflow object, in ID order, so a test can tell
 // whether anything was written.
 func workflowObjects(s *workflowStore) ([]byte, error) {
-	m := s.blobs.(*memStore)
+	m, ok := s.blobs.(*memStore)
+	if !ok {
+		return nil, fmt.Errorf("the workflow store keeps its objects in a %T, not in a memStore", s.blobs)
+	}
 	ids := make([]string, 0, len(m.data))
 	for id := range m.data {
 		ids = append(ids, id)
@@ -219,16 +241,27 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeRunner, *memStore, *wor
 	return srv, runner, store, workflows
 }
 
-func call(t *testing.T, method, url, body string) (int, string) {
+func call(t *testing.T, method, url, body string) (status int, answer string) {
 	t.Helper()
-	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 	data, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(data)
+}
+
+// closeBody closes the body of a response and reports a failed Close as a test error.
+func closeBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if err := resp.Body.Close(); err != nil {
+		t.Error(err)
+	}
 }
 
 func TestStartRunAssignsTraceIDAndStoresInput(t *testing.T) {
@@ -243,7 +276,7 @@ func TestStartRunAssignsTraceIDAndStoresInput(t *testing.T) {
 		t.Fatalf("trace id %q", out["trace_id"])
 	}
 	in := runner.started[0]
-	if len(runner.started) != 1 || in.TraceID != out["trace_id"] || in.Definition.Name != "sample" || in.Prefix != "runs/"+in.TraceID {
+	if len(runner.started) != 1 || in.TraceID != out["trace_id"] || in.Definition.Name != sampleWorkflow || in.Prefix != "runs/"+in.TraceID {
 		t.Fatalf("started %+v", runner.started)
 	}
 	if string(store.data[in.Inputs[0].Artifact]) != "hello" {
@@ -309,7 +342,7 @@ func TestSaveVersionRejectsInvalidGraph(t *testing.T) {
 		t.Fatalf("unknown field accepted: %d", code)
 	}
 	after, _ := workflowObjects(workflows)
-	if string(before) != string(after) {
+	if !bytes.Equal(before, after) {
 		t.Fatal("invalid configuration overwrote config.yaml")
 	}
 }
@@ -341,7 +374,7 @@ func TestDecisions(t *testing.T) {
 	if code, body = call(t, http.MethodPost, srv.URL+"/api/decisions", ok); code != http.StatusAccepted {
 		t.Fatalf("%d %s", code, body)
 	}
-	if d := runner.decided["t/route"]; d.Step != "approve" || d.Decision != pipeline.Approved || d.DecidedBy != "flo" || d.Comment != "go" {
+	if d := runner.decided["t/route"]; d.Step != "approve" || d.Decision != pipeline.Approved || d.DecidedBy != testUser || d.Comment != "go" {
 		t.Fatalf("decided %+v", runner.decided)
 	}
 	for name, bad := range map[string]string{
@@ -368,7 +401,7 @@ func TestSessions(t *testing.T) {
 		t.Fatalf("empty sessions %d %s", code, body)
 	}
 	runner.sessions = []WaitingSession{{WorkflowID: "t/route", TraceID: "t", Workflow: "feature", PendingSession: pipeline.PendingSession{
-		Step: "chat", Agent: "triage@v1", Agents: []string{"triage@v1", "plain@v2"},
+		Step: chatStep, Agent: "triage@v1", Agents: []string{"triage@v1", "plain@v2"},
 		Inputs: []pipeline.Item{{Source: "spec", Artifact: "runs/t/route/spec", Round: 1}}, Artifact: "runs/t/route/chat", Session: "user-sessions/t/route/chat",
 		Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300,
 		AgentSettings: map[string]pipeline.AgentExecutionSettings{"triage@v1": {Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}},
@@ -384,7 +417,7 @@ func TestSessions(t *testing.T) {
 	if code, body = call(t, http.MethodPost, srv.URL+"/api/sessions/complete", ok); code != http.StatusAccepted || strings.TrimSpace(body) != ok {
 		t.Fatalf("%d %s", code, body)
 	}
-	if c := runner.completed["t/route"]; c.Step != "chat" || c.File != "result.md" || c.CompletedBy != "flo" {
+	if c := runner.completed["t/route"]; c.Step != chatStep || c.File != "result.md" || c.CompletedBy != testUser {
 		t.Fatalf("completed %+v", runner.completed)
 	}
 	for name, bad := range map[string]string{
@@ -438,7 +471,7 @@ func TestSessionChatUsesPinnedServerSettingsAndStopsOnlyForMissingDevPod(t *test
 	workflows := storeWorkflows(t, sampleConfig)
 	runner, store := &fakeRunner{}, newMemStore()
 	runner.sessions = []WaitingSession{{WorkflowID: "workflow-1", TraceID: "trace-1", Workflow: "feature", PendingSession: pipeline.PendingSession{
-		Step: "chat", Pass: 2, Agent: "triage@v1", Agents: []string{"triage@v1", "plain@v2"}, Session: "user-sessions/trace-1/chat.pass-2", DevPod: "pod-1",
+		Step: chatStep, Pass: 2, Agent: "triage@v1", Agents: []string{"triage@v1", "plain@v2"}, Session: "user-sessions/trace-1/chat.pass-2", DevPod: "pod-1",
 		AgentSettings: map[string]pipeline.AgentExecutionSettings{"plain@v2": {Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}},
 	}}}
 	s := &server{workflows: workflows, blobs: store, runner: runner, logger: slog.New(slog.DiscardHandler), agentURL: agent.URL, httpClient: http.DefaultClient}
@@ -453,7 +486,7 @@ func TestSessionChatUsesPinnedServerSettingsAndStopsOnlyForMissingDevPod(t *test
 		t.Fatalf("success %d %s", code, body)
 	}
 	got := received[0]
-	if got.TraceID != "trace-1" || got.StepID != "chat" || got.Session != "user-sessions/trace-1/chat.pass-2" || got.DevPod != "pod-1" || got.Skills["git"] != "v3" || len(got.Skills) != 1 || got.SkillScriptTimeoutSeconds != 300 {
+	if got.TraceID != "trace-1" || got.StepID != chatStep || got.Session != "user-sessions/trace-1/chat.pass-2" || got.DevPod != "pod-1" || got.Skills["git"] != "v3" || len(got.Skills) != 1 || got.SkillScriptTimeoutSeconds != 300 {
 		t.Fatalf("agent request %+v", got)
 	}
 	runner.sessions[0].AgentSettings = nil
@@ -466,7 +499,7 @@ func TestSessionChatUsesPinnedServerSettingsAndStopsOnlyForMissingDevPod(t *test
 	if code, _ := post("needs pod"); code != http.StatusUnprocessableEntity {
 		t.Fatalf("needs pod status %d", code)
 	}
-	if failed := runner.failedSessions["workflow-1"]; failed.Step != "chat" || failed.Type != "SkillScriptNeedsDevPod" || !strings.Contains(failed.Error, "needs a devpod step") {
+	if failed := runner.failedSessions["workflow-1"]; failed.Step != chatStep || failed.Type != "SkillScriptNeedsDevPod" || !strings.Contains(failed.Error, "needs a devpod step") {
 		t.Fatalf("workflow failure %+v", failed)
 	}
 	badAgent := `{"workflow_id":"workflow-1","step_id":"chat","session":"user-sessions/trace-1/chat.pass-2","tab":"x","agent":"other@v1","message":"hello","created_by":"ada"}`
@@ -551,25 +584,28 @@ func TestStartRunFromExistingArtifact(t *testing.T) {
 
 func TestStartRunWritesRunRecord(t *testing.T) {
 	srv, runner, store, _ := newTestServer(t)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/workflows/sample/runs", strings.NewReader("hello"))
-	req.Header.Set("X-Creator", "flo")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/api/workflows/sample/runs", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Creator", testUser)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
 	trace := runner.started[0].TraceID
 	var rec RunRecord
-	if err := json.Unmarshal(store.data["runs/"+trace+"/run.json"], &rec); err != nil {
+	if err = json.Unmarshal(store.data["runs/"+trace+"/run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Workflow != "sample" || rec.StartedBy != "flo" || rec.TraceID != trace || rec.Started.IsZero() || rec.InputArtifact != "runs/"+trace+"/input" {
+	if rec.Workflow != sampleWorkflow || rec.StartedBy != testUser || rec.TraceID != trace || rec.Started.IsZero() || rec.InputArtifact != "runs/"+trace+"/input" {
 		t.Fatalf("record %+v", rec)
 	}
-	if m := store.meta["runs/"+trace+"/input"]; m.Creator != "flo" {
+	if m := store.meta["runs/"+trace+"/input"]; m.Creator != testUser {
 		t.Fatalf("input creator %q", m.Creator)
 	}
 }
@@ -583,12 +619,15 @@ func TestDeleteRunRemovesHistoryAndArtifacts(t *testing.T) {
 	}
 	_ = store.Put(context.Background(), "runs/"+other+"/input", []byte("y"), pipeline.Meta{TraceID: other})
 	_ = store.Put(context.Background(), "notes/keep", []byte("z"), pipeline.Meta{TraceID: trace})
-	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/runs/"+trace, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodDelete, srv.URL+"/api/runs/"+trace, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	closeBody(t, resp)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
@@ -606,9 +645,12 @@ func TestDeleteRunRemovesHistoryAndArtifacts(t *testing.T) {
 	if _, ok := store.data["notes/keep"]; !ok {
 		t.Error("an object outside runs/ was removed")
 	}
-	req, _ = http.NewRequest(http.MethodDelete, srv.URL+"/api/runs/not-a-uuid", nil)
+	req, err = http.NewRequestWithContext(context.Background(), http.MethodDelete, srv.URL+"/api/runs/not-a-uuid", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp, err = http.DefaultClient.Do(req); err == nil {
-		resp.Body.Close()
+		closeBody(t, resp)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("bad trace: %d", resp.StatusCode)
 		}

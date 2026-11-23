@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+)
+
+// The types a mapping can read from a judge artifact.
+const (
+	mappingNumber = "number"
+	mappingString = "string"
 )
 
 type extractionMapping struct {
@@ -59,7 +64,7 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	names := map[string]bool{}
 	for _, m := range in.Mappings {
-		if m.Path == "" || m.Name == "" || (m.Type != "number" && m.Type != "string") || names[m.Name] {
+		if m.Path == "" || m.Name == "" || (m.Type != mappingNumber && m.Type != mappingString) || names[m.Name] {
 			s.fail(w, 422, errors.New("mappings require unique names, RFC6901 paths, and number|string types"))
 			return
 		}
@@ -81,11 +86,11 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 	var producer struct {
 		InputArtifact string `json:"input_artifact"`
 	}
-	if err := s.getJSON(r.Context(), s.blobs+"/blobs/runs/"+in.ProducerRunID+"/run.json", &producer); err != nil {
-		if errors.Is(err, errNotFound) {
+	if producerErr := s.getJSON(r.Context(), s.blobs+"/blobs/runs/"+in.ProducerRunID+"/run.json", &producer); producerErr != nil {
+		if errors.Is(producerErr, errNotFound) {
 			s.fail(w, 422, errors.New("producer run is not retained"))
 		} else {
-			s.dependencyFailure(w, err)
+			s.dependencyFailure(w, producerErr)
 		}
 		return
 	}
@@ -94,11 +99,11 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input any
-	if err := s.getJSON(r.Context(), s.blobs+"/blobs/"+producer.InputArtifact, &input); err != nil {
-		if errors.Is(err, errNotFound) {
+	if inputErr := s.getJSON(r.Context(), s.blobs+"/blobs/"+producer.InputArtifact, &input); inputErr != nil {
+		if errors.Is(inputErr, errNotFound) {
 			s.fail(w, 422, errors.New("producer input is not retained"))
 		} else {
-			s.dependencyFailure(w, err)
+			s.dependencyFailure(w, inputErr)
 		}
 		return
 	}
@@ -112,7 +117,7 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 	parseErr := decoder.Decode(&document)
 	if parseErr == nil {
 		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
+		if extraErr := decoder.Decode(&extra); extraErr != io.EOF {
 			parseErr = errors.New("artifact contains multiple JSON values")
 		}
 	}
@@ -129,35 +134,36 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 	records := make([]Measurement, 0, len(in.Mappings))
 	created := 0
 	for _, mapping := range in.Mappings {
-		m := Measurement{SchemaVersion: 1, ID: hashID(in.ProducerRunID, in.ArtifactID, in.MappingVersion, mapping.Name), Kind: "judge", RunID: in.ProducerRunID, ExecutionID: producerScope.ExecutionID, ParentExecutionID: producerScope.ParentExecutionID, Workflow: producerScope.Workflow, WorkflowVersion: &producerScope.WorkflowVersion, Agent: in.AgentRef, OccurredAt: now, TargetRunID: in.TargetRunID, TargetExecutionID: in.TargetExecutionID, ProducerRunID: in.ProducerRunID, ArtifactID: in.ArtifactID, ArtifactRevision: artifact.Revision, MappingVersion: in.MappingVersion, MetricName: mapping.Name, Status: "derived", Missing: []string{}}
+		m := Measurement{SchemaVersion: 1, ID: hashID(in.ProducerRunID, in.ArtifactID, in.MappingVersion, mapping.Name), Kind: kindJudge, RunID: in.ProducerRunID, ExecutionID: producerScope.ExecutionID, ParentExecutionID: producerScope.ParentExecutionID, Workflow: producerScope.Workflow, WorkflowVersion: &producerScope.WorkflowVersion, Agent: in.AgentRef, OccurredAt: now, TargetRunID: in.TargetRunID, TargetExecutionID: in.TargetExecutionID, ProducerRunID: in.ProducerRunID, ArtifactID: in.ArtifactID, ArtifactRevision: artifact.Revision, MappingVersion: in.MappingVersion, MetricName: mapping.Name, Status: statusDerived, Missing: []string{}}
 		if parseErr != nil {
-			m.Status = "invalid"
+			m.Status = statusInvalid
 			m.Missing = []string{"artifact/invalid JSON: " + parseErr.Error()}
 		} else if value, ok := pointerValue(document, mapping.Path); !ok {
-			m.Status = "missing"
+			m.Status = statusMissing
 			m.Missing = []string{mapping.Path + "/field missing"}
-		} else if mapping.Type == "number" {
+		} else if mapping.Type == mappingNumber {
 			number, ok := value.(json.Number)
-			if !ok {
-				m.Status = "invalid"
+			switch {
+			case !ok:
+				m.Status = statusInvalid
 				m.Missing = []string{mapping.Path + "/expected number"}
-			} else if _, ok := new(big.Rat).SetString(number.String()); !ok {
-				m.Status = "invalid"
+			case !exactNumber(number):
+				m.Status = statusInvalid
 				m.Missing = []string{mapping.Path + "/invalid number"}
-			} else {
+			default:
 				m.NumberValue = number
 			}
 		} else {
 			value, ok := value.(string)
 			if !ok {
-				m.Status = "invalid"
+				m.Status = statusInvalid
 				m.Missing = []string{mapping.Path + "/expected string"}
 			} else {
 				m.TextValue = &value
 			}
 		}
 		data, _ := json.Marshal(m)
-		op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: measurementObject("judge", m.ID), MeasurementID: m.ID, Replacement: data, AffectedHour: now.Truncate(time.Hour), Generation: generation, Phase: "intent", CreatedAt: now, UpdatedAt: now}
+		op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: measurementObject(kindJudge, m.ID), MeasurementID: m.ID, Replacement: data, AffectedHour: now.Truncate(time.Hour), Generation: generation, Phase: opIntent, CreatedAt: now, UpdatedAt: now}
 		opRevision, opErr := s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, "*")
 		err = opErr
 		if err != nil {
@@ -165,8 +171,9 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		revision, err := s.writeObject(r.Context(), op.ObjectID, m, "*")
-		if errors.Is(err, errPrecondition) {
-			existing, e := s.loadMeasurement(r.Context(), "judge", m.ID)
+		switch {
+		case errors.Is(err, errPrecondition):
+			existing, e := s.loadMeasurement(r.Context(), kindJudge, m.ID)
 			if e != nil {
 				s.dependencyFailure(w, e)
 				return
@@ -174,22 +181,22 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 			existingRevision := existing.Revision
 			existing.Revision = ""
 			if b, _ := json.Marshal(existing); !bytes.Equal(b, data) {
-				op.Phase, op.UpdatedAt = "cancelled", time.Now().UTC()
+				op.Phase, op.UpdatedAt = opCancelled, time.Now().UTC()
 				_, _ = s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, opRevision)
 				s.fail(w, 412, errors.New("stable extraction identity already contains different content"))
 				return
 			}
 			m.Revision = existingRevision
-			op.Phase = "cancelled"
-		} else if err != nil {
+			op.Phase = opCancelled
+		case err != nil:
 			s.dependencyFailure(w, err)
 			return
-		} else {
+		default:
 			m.Revision = revision
 			created++
 		}
-		if op.Phase != "cancelled" {
-			op.Phase = "projection_pending"
+		if op.Phase != opCancelled {
+			op.Phase = opProjectionPending
 		}
 		op.UpdatedAt = time.Now().UTC()
 		_, _ = s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, opRevision)
@@ -200,6 +207,28 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 		status = 201
 	}
 	writeJSON(w, status, map[string]any{"measurements": records, "created": created, "artifact_revision": artifact.Revision})
+}
+
+// exactNumber reports whether a JSON number can be held as an exact fraction:
+// its power of ten, once the fraction digits are counted in, must stay within
+// maxDecimalExponent. Zero qualifies whatever its exponent. The number is
+// judged from its text and never expanded, so an absurd exponent costs nothing.
+func exactNumber(number json.Number) bool {
+	mantissa, exponent, hasExponent := strings.Cut(strings.ToLower(number.String()), "e")
+	var scale int64
+	if hasExponent {
+		parsed, err := strconv.ParseInt(exponent, 10, 64)
+		if err != nil {
+			return false
+		}
+		scale = parsed
+	}
+	if strings.Trim(mantissa, "-0.") == "" {
+		return true
+	}
+	_, fraction, _ := strings.Cut(mantissa, ".")
+	scale -= int64(len(fraction))
+	return scale >= -maxDecimalExponent && scale <= maxDecimalExponent
 }
 
 func containsExecutionIdentity(value any, runID, executionID string) bool {

@@ -19,21 +19,26 @@ import (
 	"time"
 )
 
-const testNamespace = "opensoftwarefactory-devpods"
+const (
+	testNamespace = "opensoftwarefactory-devpods"
+	// fakeStartCommit is the commit the fake git-helper reports for every clone.
+	fakeStartCommit = "5ta27c0"
+)
 
 // fakeKube is a Kubernetes API server that knows pods, secrets and network policies of one
 // namespace. A created pod runs at once and has an address.
 type fakeKube struct {
-	mu       sync.Mutex
+	t        *testing.T
 	pods     map[string]map[string]any
 	secrets  map[string]map[string]any
 	policies map[string]map[string]any
-	denied   []string // requests outside the namespace or without the token
 	srv      *httptest.Server
+	denied   []string // requests outside the namespace or without the token
+	mu       sync.Mutex
 }
 
 func newFakeKube(t *testing.T) *fakeKube {
-	k := &fakeKube{pods: map[string]map[string]any{}, secrets: map[string]map[string]any{}, policies: map[string]map[string]any{}}
+	k := &fakeKube{t: t, pods: map[string]map[string]any{}, secrets: map[string]map[string]any{}, policies: map[string]map[string]any{}}
 	k.srv = httptest.NewServer(http.HandlerFunc(k.serve))
 	t.Cleanup(k.srv.Close)
 	return k
@@ -67,7 +72,13 @@ func (k *fakeKube) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodPost && name == "":
-		created := body["metadata"].(map[string]any)["name"].(string)
+		metadata, _ := body["metadata"].(map[string]any)
+		created, named := metadata["name"].(string)
+		if !named {
+			k.t.Errorf("%s %s: the object has no metadata.name: %v", r.Method, r.URL.Path, body)
+			w.WriteHeader(422)
+			return
+		}
 		if _, exists := store[created]; exists {
 			w.WriteHeader(409)
 			_ = json.NewEncoder(w).Encode(map[string]string{"message": "already exists"})
@@ -157,21 +168,22 @@ func (k *fakeKube) tokens(key string) map[string]bool {
 
 // fakePod plays both servers of every dev pod: the tool server and git-helper.
 type fakePod struct {
-	mu        sync.Mutex
+	t         *testing.T
 	kube      *fakeKube
-	calls     []string         // every call, in order
-	ops       []map[string]any // the arguments of every tool server operation
 	bodies    map[string]map[string]any
 	exitCodes map[string]int // exit code per command
+	srv       *httptest.Server
+	calls     []string         // every call, in order
+	ops       []map[string]any // the arguments of every tool server operation
+	commits   []commit
+	mu        sync.Mutex
 	failClone bool
 	failPush  bool
-	commits   []commit
-	srv       *httptest.Server
 }
 
 func newFakePod(t *testing.T, kube *fakeKube) *fakePod {
 	p := &fakePod{
-		kube: kube, bodies: map[string]map[string]any{}, exitCodes: map[string]int{},
+		t: t, kube: kube, bodies: map[string]map[string]any{}, exitCodes: map[string]int{},
 		commits: []commit{{Hash: "c0ffee1", Subject: "Add payment date", Author: "course/builder@v1"}},
 	}
 	p.srv = httptest.NewServer(http.HandlerFunc(p.serve))
@@ -192,7 +204,7 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The tool server takes the work token only, git-helper the helper token only.
-	workPath := r.URL.Path == "/op" || r.URL.Path == "/skill-script"
+	workPath := r.URL.Path == opPath || r.URL.Path == skillScriptPath
 	if (workPath && !work) || (!workPath && !helper) {
 		p.calls = append(p.calls, "denied:"+r.URL.Path)
 		w.WriteHeader(403)
@@ -200,16 +212,16 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	p.bodies[r.URL.Path] = body
 	switch r.URL.Path {
-	case "/op", "/skill-script":
+	case opPath, skillScriptPath:
 		name, _ := body["op"].(string)
 		args, _ := body["args"].(map[string]any)
 		p.ops = append(p.ops, args)
 		switch name {
-		case "run_command":
+		case toolRunCommand:
 			command, _ := args["command"].(string)
 			p.calls = append(p.calls, "run:"+command)
 			answer(map[string]any{"ok": true, "result": map[string]any{"exit_code": p.exitCodes[command], "stdout": "ran " + command, "stderr": ""}})
-		case "run_skill_script":
+		case toolRunSkillScript:
 			p.calls = append(p.calls, "run_skill_script:"+fmt.Sprint(args["script"]))
 			timedOut := args["script"] == "scripts/timeout.sh"
 			cut := args["script"] == "scripts/cut.sh"
@@ -240,7 +252,7 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 			answer(map[string]any{"ok": false, "output": "fatal: repository not found"})
 			return
 		}
-		answer(map[string]any{"ok": true, "start_commit": "5ta27c0", "output": "Cloning into '/workspace'..."})
+		answer(map[string]any{"ok": true, "start_commit": fakeStartCommit, "output": "Cloning into '/workspace'..."})
 	case "/protect":
 		p.calls = append(p.calls, "protect")
 		answer(map[string]any{"ok": true})
@@ -260,8 +272,16 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 		answer(map[string]any{"ok": true, "patch": patch, "commits": p.commits})
 	case "/git":
 		args := []string{}
-		for _, arg := range body["args"].([]any) {
-			args = append(args, arg.(string))
+		list, isList := body["args"].([]any)
+		if !isList {
+			p.t.Errorf("/git: args is a %T, not a list", body["args"])
+		}
+		for _, arg := range list {
+			text, isText := arg.(string)
+			if !isText {
+				p.t.Errorf("/git: the argument %v is a %T, not a string", arg, arg)
+			}
+			args = append(args, text)
 		}
 		p.calls = append(p.calls, "git:"+strings.Join(args, " "))
 		answer(map[string]any{"ok": true, "output": "output of git " + strings.Join(args, " ")})
@@ -288,9 +308,9 @@ func (p *fakePod) count(prefix string) int {
 
 // fakeBlobs is the blob store: objects by ID, and a listing of a folder's own objects.
 type fakeBlobs struct {
-	mu      sync.Mutex
 	objects map[string][]byte
 	srv     *httptest.Server
+	mu      sync.Mutex
 }
 
 func newFakeBlobs(t *testing.T) *fakeBlobs {
@@ -398,7 +418,7 @@ func (w *world) start(registry string) *service {
 		sweep: time.Hour, startTimeout: 2 * time.Second, poll: 5 * time.Millisecond, mcpURL: "http://tool-gateway:8080/mcp", registerRetry: 5 * time.Millisecond,
 	}
 	kube := &kubeClient{base: w.kube.srv.URL, namespace: testNamespace, tokenFile: tokenFile, http: http.DefaultClient}
-	s := newService(cfg, slog.New(slog.DiscardHandler), http.DefaultClient, kube)
+	s := newService(&cfg, slog.New(slog.DiscardHandler), http.DefaultClient, kube)
 	s.blobs = blobClient{base: w.blobs.srv.URL, http: http.DefaultClient}
 	s.registry = registry
 	s.skillRegistry = registry
@@ -418,10 +438,9 @@ func (w *world) advance(d time.Duration) {
 }
 
 // call sends a request to the service and returns the status and the decoded answer.
-func (w *world) call(method, path string, body any) (int, map[string]any) {
+func (w *world) call(method, path string, body any) (status int, out map[string]any) {
 	w.t.Helper()
 	status, raw := w.raw(method, path, body)
-	var out map[string]any
 	if len(bytes.TrimSpace(raw)) > 0 && raw[0] == '{' {
 		if err := json.Unmarshal(raw, &out); err != nil {
 			w.t.Fatalf("%s %s: answer is not JSON: %s", method, path, raw)
@@ -430,7 +449,7 @@ func (w *world) call(method, path string, body any) (int, map[string]any) {
 	return status, out
 }
 
-func (w *world) raw(method, path string, body any) (int, []byte) {
+func (w *world) raw(method, path string, body any) (status int, answer []byte) {
 	w.t.Helper()
 	var reader io.Reader
 	switch b := body.(type) {
@@ -481,18 +500,28 @@ func (w *world) devpod(body map[string]any) string {
 	if status != 200 {
 		w.t.Fatalf("creating a dev pod: status %d: %v", status, out)
 	}
-	return out["id"].(string)
+	return as[string](w.t, out["id"])
 }
 
 // tool makes a tool call as the tool gateway does and returns ok, the result and the error.
-func (w *world) tool(pod, run, agent, name string, args map[string]any) (bool, any, string) {
+func (w *world) tool(pod, run, agent, name string, args map[string]any) (ok bool, result any, message string) {
 	w.t.Helper()
 	status, out := w.call("POST", "/api/devpods/"+pod+"/tool", map[string]any{"tool": name, "args": args, "agent": agent, "run": run})
 	if status != 200 {
 		w.t.Fatalf("tool %s: status %d: %v", name, status, out)
 	}
-	message, _ := out["error"].(string)
-	return out["ok"].(bool), out["result"], message
+	message, _ = out["error"].(string)
+	return as[bool](w.t, out["ok"]), out["result"], message
+}
+
+// as returns v as a T and fails the test when v is something else.
+func as[T any](t *testing.T, v any) T {
+	t.Helper()
+	got, ok := v.(T)
+	if !ok {
+		t.Fatalf("%v is a %T, not a %T", v, v, got)
+	}
+	return got
 }
 
 func mustContain(t *testing.T, text string, parts ...string) {

@@ -63,7 +63,7 @@ func TestCalculationPendingRetriesDependencyFailure(t *testing.T) {
 	f.failPriceList = true
 	f.mu.Unlock()
 	zero := int64(0)
-	m := Measurement{SchemaVersion: 1, ID: "usage-retry", Kind: "usage", RunID: runA, ExecutionID: "exec", OccurredAt: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), Vendor: "v", Model: "m", Effort: "none", Modes: modesPtr(), InputTokens: &zero, CachedInputTokens: &zero, UncachedInputTokens: &zero, OutputTokens: &zero, Status: "reported", Missing: []string{}, RawUsage: json.RawMessage(`{}`)}
+	m := Measurement{SchemaVersion: 1, ID: "usage-retry", Kind: "usage", RunID: runA, ExecutionID: "exec", OccurredAt: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, InputTokens: &zero, CachedInputTokens: &zero, UncachedInputTokens: &zero, OutputTokens: &zero, Status: "reported", Missing: []string{}, RawUsage: json.RawMessage(`{}`)}
 	raw, _ := json.Marshal(m)
 	f.mu.Lock()
 	f.objects[measurementObject("usage", m.ID)] = raw
@@ -96,7 +96,7 @@ func TestMeasurementHandlerOnlyEnqueuesProjection(t *testing.T) {
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
 	body := `{"schema_version":1,"id":"queued","kind":"execution","run_id":"run","execution_id":"exec","occurred_at":"2026-11-01T12:00:00Z","status":"missing","missing":["duration_ms/unavailable"]}`
-	code, data := conditionalRequest(t, http.MethodPut, server.URL+"/api/measurements/queued", body, "If-None-Match", "*")
+	code, data := conditionalPut(t, server.URL+"/api/measurements/queued", body, "If-None-Match", "*")
 	if code != 200 {
 		t.Fatalf("put %d %s", code, data)
 	}

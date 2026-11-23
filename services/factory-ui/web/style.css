@@ -340,7 +340,6 @@ ul.tree ul { padding-left: 14px; }
 ul.tree:focus-visible .tree-row.active { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tree-label { overflow: hidden; text-overflow: ellipsis; }
 .tree-sub { margin-left: auto; padding-left: 8px; color: var(--muted); font-size: .75rem; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-#art-tree .tree-sub { flex: none; font-family: ui-monospace, SF Mono, Menlo, monospace; } /* a run folder's shortened trace ID */
 .tree-row.warn .tree-label { color: var(--danger-text); }
 .caret { flex: none; width: 20px; height: 32px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
 .caret .icon { display: inline-flex; transition: transform .12s ease-out; }

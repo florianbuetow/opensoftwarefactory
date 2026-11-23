@@ -58,7 +58,7 @@ func TestPipelineHandsOutputsToDependents(t *testing.T) {
 	env.RegisterActivityWithOptions(record, activity.RegisterOptions{Name: DefaultActivity})
 	env.RegisterActivityWithOptions(record, activity.RegisterOptions{Name: "Merge"})
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t1", Definition: diamond(), Inputs: runInput("runs/t1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t1", Definition: diamond(), Inputs: runInput("runs/t1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestPipelineStopsOnStepFailure(t *testing.T) {
 		return StepResult{}, nil
 	}, activity.RegisterOptions{Name: "Merge"})
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t2", Definition: diamond(), Inputs: runInput("runs/t2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t2", Definition: diamond(), Inputs: runInput("runs/t2/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `step "left" failed`) {
 		t.Fatalf("error %v", err)
@@ -121,7 +121,7 @@ func TestPipelineRejectsInvalidDefinition(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
 	env.RegisterActivity(&Activities{Store: memStore{}})
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t3", Definition: Definition{Name: "empty"}})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t3", Definition: Definition{Name: "empty"}})
 	var appErr *temporal.ApplicationError
 	if err := env.GetWorkflowError(); !errors.As(err, &appErr) || appErr.Type() != "InvalidDefinition" {
 		t.Fatalf("error %v", err)
@@ -141,7 +141,7 @@ func TestAgentStepsCarryThePinnedAgent(t *testing.T) {
 		return StepResult{Artifact: req.OutputArtifact}, nil
 	}, activity.RegisterOptions{Name: DefaultActivity})
 	def := Definition{Name: "w", Steps: []Step{{ID: "intake", Service: AgentService, Agent: "intake@v2"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t4", Definition: def, Inputs: runInput("runs/t4/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t4", Definition: def, Inputs: runInput("runs/t4/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestMissingSkillVersionStopsTheStepWithoutRetry(t *testing.T) {
 	}, activity.RegisterOptions{Name: DefaultActivity})
 
 	def := Definition{Name: "w", Steps: []Step{{ID: "code", Service: AgentService, Agent: "coder@v1"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "missing-skill", Definition: def, Inputs: runInput("runs/missing-skill/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "missing-skill", Definition: def, Inputs: runInput("runs/missing-skill/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), "the skill registry does not know git@v9") {
 		t.Fatalf("error %v", err)
@@ -191,7 +191,7 @@ func TestGateWaitsForADecisionAndStoresIt(t *testing.T) {
 	env.RegisterActivity(&Activities{Store: store})
 	var published StepRequest
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
-		if req.StepID == "publish" {
+		if req.StepID == publishStep {
 			published = req
 		}
 		return StepResult{Artifact: req.OutputArtifact}, nil
@@ -213,14 +213,14 @@ func TestGateWaitsForADecisionAndStoresIt(t *testing.T) {
 			return
 		}
 		g := state.Gates[0]
-		if g.Step != "approve" || g.Question != "Ship it?" || show(g.Inputs) != "draft=runs/t5/draft#1" || g.Artifact != "runs/t5/approve" {
+		if g.Step != approveStep || g.Question != "Ship it?" || show(g.Inputs) != "draft=runs/t5/draft#1" || g.Artifact != "runs/t5/approve" {
 			t.Errorf("gate %+v", g)
 		}
 		env.SignalWorkflow(DecisionSignal, Decision{Step: "nope", Decision: Approved, DecidedBy: "x"})
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "approve", Decision: Approved, Comment: "fine", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "approve", Decision: Approved, Comment: "fine", DecidedBy: testUser})
 	}, time.Second)
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t5", Definition: gated(), Inputs: runInput("runs/t5/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t5", Definition: gated(), Inputs: runInput("runs/t5/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -236,14 +236,14 @@ func TestGateWaitsForADecisionAndStoresIt(t *testing.T) {
 	if err := json.Unmarshal(store["runs/t5/approve"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Decision != Approved || rec.DecidedBy != "flo" || rec.Comment != "fine" || rec.Question != "Ship it?" || rec.DecidedAt.IsZero() {
+	if rec.Decision != Approved || rec.DecidedBy != testUser || rec.Comment != "fine" || rec.Question != "Ship it?" || rec.DecidedAt.IsZero() {
 		t.Fatalf("record %+v", rec)
 	}
 	// The record stores its inputs as the item list.
 	if !strings.Contains(string(store["runs/t5/approve"]), `"inputs": [`) || show(rec.Inputs) != "draft=runs/t5/draft#1" {
 		t.Fatalf("record inputs %s", store["runs/t5/approve"])
 	}
-	if m := store.metaOf("runs/t5/approve"); m.Creator != "flo" || m.TraceID != "t5" {
+	if m := store.metaOf("runs/t5/approve"); m.Creator != testUser || m.TraceID != "t5" {
 		t.Fatalf("meta %+v", m)
 	}
 }
@@ -255,16 +255,16 @@ func TestRejectedGateFailsTheRunAfterRecordingIt(t *testing.T) {
 	env.RegisterActivity(&Activities{Store: store})
 	published := false
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
-		if req.StepID == "publish" {
+		if req.StepID == publishStep {
 			published = true
 		}
 		return StepResult{Artifact: req.OutputArtifact}, nil
 	}, activity.RegisterOptions{Name: DefaultActivity})
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "approve", Decision: Rejected, Comment: "redo", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "approve", Decision: Rejected, Comment: "redo", DecidedBy: testUser})
 	}, time.Second)
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t6", Definition: gated(), Inputs: runInput("runs/t6/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t6", Definition: gated(), Inputs: runInput("runs/t6/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `step "approve" rejected by flo: redo`) {
 		t.Fatalf("error %v", err)
@@ -316,7 +316,7 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 	}})
 	var published StepRequest
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
-		if req.StepID == "publish" {
+		if req.StepID == publishStep {
 			published = req
 		}
 		return StepResult{Artifact: req.OutputArtifact}, nil
@@ -324,13 +324,13 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
-		if state.TraceID != "t11" || state.Workflow != "talk" || len(state.Sessions) != 1 || state.Gates == nil || len(state.Gates) != 0 {
+		if state.TraceID != sessionRun || state.Workflow != "talk" || len(state.Sessions) != 1 || state.Gates == nil || len(state.Gates) != 0 {
 			t.Errorf("pending %+v", state)
 			return
 		}
 		p := state.Sessions[0]
-		if p.Step != "chat" || p.Agent != "triage@v1" || strings.Join(p.Agents, ",") != "triage@v1,plain@v2" ||
-			show(p.Inputs) != "draft=runs/t11/draft#1" || p.Artifact != "runs/t11/chat" || p.Session != session {
+		if p.Step != chatStep || p.Agent != "triage@v1" || strings.Join(p.Agents, ",") != "triage@v1,plain@v2" ||
+			show(p.Inputs) != "draft=runs/t11/draft#1" || p.Artifact != sessionArtifact || p.Session != session {
 			t.Errorf("session %+v", p)
 		}
 		if p.Skills["triage"] != "v2" || p.SkillScriptTimeoutSeconds != 45 || p.AgentSettings["triage@v1"].Skills["triage"] != "v2" {
@@ -339,18 +339,18 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 		if string(store[session+"/files/input-draft.json"]) != `{"title":"draft"}` {
 			t.Errorf("input file not opened: %q", store[session+"/files/input-draft.json"])
 		}
-		if m := store.metaOf(session + "/files/input-draft.json"); m.TraceID != "t11" {
+		if m := store.metaOf(session + "/files/input-draft.json"); m.TraceID != sessionRun {
 			t.Errorf("input file meta %+v", m)
 		}
 		// None of these may end the step: an unknown step, a missing person, an
 		// invalid file name, and a file that does not exist.
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "nope", File: "result.md", CompletedBy: "flo"})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "nope", File: "result.md", CompletedBy: testUser})
 		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "result.md"})
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "../result.md", CompletedBy: "flo"})
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "absent.md", CompletedBy: "flo"})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "../result.md", CompletedBy: testUser})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "absent.md", CompletedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
-		if state := pendingState(t, env); len(state.Sessions) != 1 || state.Sessions[0].Step != "chat" {
+		if state := pendingState(t, env); len(state.Sessions) != 1 || state.Sessions[0].Step != chatStep {
 			t.Errorf("a failed completion ended the step: %+v", state)
 		}
 		if _, ok := store[session+"/completed.json"]; ok {
@@ -359,16 +359,16 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 		if published.StepID != "" {
 			t.Error("publish ran before the session was completed")
 		}
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "result.md", CompletedBy: "flo"})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "result.md", CompletedBy: testUser})
 	}, time.Minute)
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t11", Definition: interactive(), Inputs: runInput("runs/t11/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t11", Definition: interactive(), Inputs: runInput("runs/t11/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
 	var res Result
 	_ = env.GetWorkflowResult(&res)
-	if res.Artifacts["chat"] != "runs/t11/chat" || res.Artifacts["publish"] != "runs/t11/publish" {
+	if res.Artifacts["chat"] != sessionArtifact || res.Artifacts["publish"] != "runs/t11/publish" {
 		t.Fatalf("artifacts %v", res.Artifacts)
 	}
 	if show(published.Inputs) != "chat=runs/t11/chat#1" {
@@ -377,14 +377,14 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 	if string(store["runs/t11/chat"]) != "# Result" {
 		t.Fatalf("output %q", store["runs/t11/chat"])
 	}
-	if m := store.metaOf("runs/t11/chat"); m.Creator != "flo" || m.TraceID != "t11" {
+	if m := store.metaOf("runs/t11/chat"); m.Creator != testUser || m.TraceID != sessionRun {
 		t.Fatalf("meta %+v", m)
 	}
 	var rec CompletionRecord
 	if err := json.Unmarshal(store[session+"/completed.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.File != "result.md" || rec.CompletedBy != "flo" || rec.Artifact != "runs/t11/chat" || rec.CompletedAt.IsZero() {
+	if rec.File != "result.md" || rec.CompletedBy != testUser || rec.Artifact != sessionArtifact || rec.CompletedAt.IsZero() {
 		t.Fatalf("record %+v", rec)
 	}
 }
@@ -396,20 +396,20 @@ func TestTerminalChatFailureStopsTheWaitingInteractiveStep(t *testing.T) {
 	env.RegisterActivity(&Activities{Store: store})
 	published := false
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
-		if req.StepID == "publish" {
+		if req.StepID == publishStep {
 			published = true
 		}
 		return StepResult{Artifact: req.OutputArtifact}, nil
 	}, activity.RegisterOptions{Name: DefaultActivity})
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
-		if len(state.Sessions) != 1 || state.Sessions[0].Step != "chat" {
+		if len(state.Sessions) != 1 || state.Sessions[0].Step != chatStep {
 			t.Errorf("pending sessions %+v", state.Sessions)
 		}
 		env.SignalWorkflow(SessionFailureSignal, SessionFailure{Step: "chat", Type: "SkillScriptNeedsDevPod", Error: "The workflow needs a devpod step before this step to run a skill script."})
 	}, time.Second)
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "chat-failure", Definition: interactive(), Inputs: runInput("runs/chat-failure/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "chat-failure", Definition: interactive(), Inputs: runInput("runs/chat-failure/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `step "chat" failed: The workflow needs a devpod step`) {
 		t.Fatalf("error %v", err)
@@ -438,24 +438,24 @@ func TestInteractiveStepTakesTheFirstOfTwoCompletions(t *testing.T) {
 	env.RegisterActivity(&Activities{Store: store})
 	publishes := 0
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
-		if req.StepID == "publish" {
+		if req.StepID == publishStep {
 			publishes++
 		}
 		return StepResult{Artifact: req.OutputArtifact}, nil
 	}, activity.RegisterOptions{Name: DefaultActivity})
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "first.md", CompletedBy: "flo"})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "first.md", CompletedBy: testUser})
 		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "second.md", CompletedBy: "ada"})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(CompleteSignal, Completion{Step: "chat", File: "second.md", CompletedBy: "ada"})
 	}, 2*time.Second)
 
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t12", Definition: interactive(), Inputs: runInput("runs/t12/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t12", Definition: interactive(), Inputs: runInput("runs/t12/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if string(store["runs/t12/chat"]) != "first" || store.metaOf("runs/t12/chat").Creator != "flo" {
+	if string(store["runs/t12/chat"]) != "first" || store.metaOf("runs/t12/chat").Creator != testUser {
 		t.Fatalf("output %q by %+v", store["runs/t12/chat"], store.metaOf("runs/t12/chat"))
 	}
 	if publishes != 1 {
@@ -466,7 +466,7 @@ func TestInteractiveStepTakesTheFirstOfTwoCompletions(t *testing.T) {
 func TestOpenSessionNamesInputFilesByContent(t *testing.T) {
 	store := memStore{"runs/t/a": []byte("plain text"), "runs/t/b": []byte(" {\"k\":1}\n"), "runs/t/input": []byte("")}
 	a := &Activities{Store: store}
-	res, err := a.OpenSession(context.Background(), OpenSessionRequest{
+	res, err := a.OpenSession(context.Background(), &OpenSessionRequest{
 		TraceID: "t", Session: "user-sessions/t/chat",
 		Inputs: []Item{
 			{Source: "a", Artifact: "runs/t/a", Round: 1},
@@ -491,7 +491,7 @@ func TestOpenSessionNamesInputFilesByContent(t *testing.T) {
 			t.Errorf("%s was not written", name)
 		}
 	}
-	if _, err = a.OpenSession(context.Background(), OpenSessionRequest{Session: "user-sessions/t/chat", Inputs: []Item{{Source: "x", Artifact: "runs/t/missing", Round: 1}}}); !errors.Is(err, ErrNotFound) {
+	if _, err = a.OpenSession(context.Background(), &OpenSessionRequest{Session: "user-sessions/t/chat", Inputs: []Item{{Source: "x", Artifact: "runs/t/missing", Round: 1}}}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing input error %v", err)
 	}
 }
@@ -529,7 +529,7 @@ func TestRouteStartsTheNamedWorkflowAsAChild(t *testing.T) {
 		{ID: "triage", Service: "triage"},
 		{ID: "route", Service: RouteService, DependsOn: []string{"triage"}},
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t7", Definition: def, Inputs: runInput("runs/t7/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t7", Definition: def, Inputs: runInput("runs/t7/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestRouteStartsTheNamedWorkflowAsAChild(t *testing.T) {
 	}
 	fix := seen["fix"]
 	// The routed workflow receives the item that named the route.
-	if fix.Workflow != "small-fix" || fix.TraceID != "t7" || show(fix.Inputs) != "triage=runs/t7/triage#1" {
+	if fix.Workflow != smallFix || fix.TraceID != "t7" || show(fix.Inputs) != "triage=runs/t7/triage#1" {
 		t.Fatalf("fix request %+v", fix)
 	}
 }
@@ -557,7 +557,7 @@ func TestRouteRejectsUnknownWorkflow(t *testing.T) {
 		{ID: "triage", Service: "triage"},
 		{ID: "route", Service: RouteService, DependsOn: []string{"triage"}},
 	}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "t8", Definition: def, Inputs: runInput("runs/t8/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "t8", Definition: def, Inputs: runInput("runs/t8/input")})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), "not a configured workflow") {
 		t.Fatalf("error %v", err)
@@ -638,7 +638,7 @@ func TestValidate(t *testing.T) {
 		"chat timeout":   {Name: "w", Steps: []Step{{ID: "c", Service: InteractiveService, Agent: "triage@v1", Timeout: "soon"}}},
 	}
 	for name, d := range cases {
-		if Validate(d) == nil {
+		if Validate(&d) == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -651,7 +651,7 @@ func TestValidate(t *testing.T) {
 		"agent":   {Name: "w", Steps: []Step{{ID: "a", Service: AgentService, Agent: "intake@v12"}}},
 		"route":   {Name: "w", Steps: []Step{{ID: "a", Service: "s"}, {ID: "r", Service: RouteService, DependsOn: []string{"a"}}}},
 	} {
-		if err := Validate(d); err != nil {
+		if err := Validate(&d); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -674,7 +674,7 @@ func TestResolveRouteAcceptsFencedJSON(t *testing.T) {
 		return []Definition{{Name: "small-fix", Steps: []Step{{ID: "fix", Service: "fix"}}}}, nil
 	}}
 	res, err := a.ResolveRoute(context.Background(), RouteRequest{Inputs: []Item{{Source: "triage", Artifact: "runs/t9/triage", Round: 1}}})
-	if err != nil || res.Definition.Name != "small-fix" {
+	if err != nil || res.Definition.Name != smallFix {
 		t.Fatalf("result %+v error %v", res, err)
 	}
 	if string(unfence([]byte(`{"a":1}`))) != `{"a":1}` {
@@ -694,7 +694,7 @@ func TestResolveRouteFollowsGateRecordToStepOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Definition.Name != "small-fix" || show(res.Inputs) != "triage=runs/t10/triage#1" {
+	if res.Definition.Name != smallFix || show(res.Inputs) != "triage=runs/t10/triage#1" {
 		t.Fatalf("got %q from %v", res.Definition.Name, res.Inputs)
 	}
 }
@@ -709,7 +709,7 @@ func TestValidateAcceptsAgentsInFolders(t *testing.T) {
 		"Translation/en@v1":          false,
 		"translation/en-2-de@latest": false,
 	} {
-		err := Validate(Definition{Name: "w", Steps: []Step{{ID: "a", Service: AgentService, Agent: ref}}})
+		err := Validate(&Definition{Name: "w", Steps: []Step{{ID: "a", Service: AgentService, Agent: ref}}})
 		if (err == nil) != ok {
 			t.Errorf("%s: error %v, want ok=%v", ref, err, ok)
 		}
@@ -734,15 +734,15 @@ func TestStepTimeoutDefaults(t *testing.T) {
 
 func TestNamesMayHaveWordsInCapitals(t *testing.T) {
 	ok := Definition{Name: "API-review", Steps: []Step{{ID: "QA-check", Service: GateService}}}
-	if err := Validate(ok); err != nil {
+	if err := Validate(&ok); err != nil {
 		t.Fatalf("capital words rejected: %v", err)
 	}
 	dup := Definition{Name: "review", Steps: []Step{{ID: "QA-check", Service: GateService}, {ID: "qa-check", Service: GateService}}}
-	if err := Validate(dup); err == nil {
+	if err := Validate(&dup); err == nil {
 		t.Fatal("step ids that differ only in case were accepted")
 	}
 	input := Definition{Name: "review", Steps: []Step{{ID: "INPUT", Service: GateService}}}
-	if err := Validate(input); err == nil {
+	if err := Validate(&input); err == nil {
 		t.Fatal("a step named like the run input was accepted")
 	}
 }
@@ -750,12 +750,12 @@ func TestNamesMayHaveWordsInCapitals(t *testing.T) {
 func TestValidateReservesSessionFolderNamesForInteractiveSteps(t *testing.T) {
 	for _, id := range []string{"files", "chats", "Files"} {
 		d := Definition{Name: "w", Steps: []Step{{ID: id, Service: InteractiveService, Agent: "triage@v1"}}}
-		if err := Validate(d); err == nil {
+		if err := Validate(&d); err == nil {
 			t.Errorf("interactive step id %q must be refused", id)
 		}
 	}
 	// Other kinds of step may still use the names.
-	if err := Validate(Definition{Name: "w", Steps: []Step{{ID: "files", Service: GateService}}}); err != nil {
+	if err := Validate(&Definition{Name: "w", Steps: []Step{{ID: "files", Service: GateService}}}); err != nil {
 		t.Errorf("a gate step named files must stay valid: %v", err)
 	}
 }

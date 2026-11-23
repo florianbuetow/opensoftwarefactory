@@ -29,15 +29,56 @@ func fakeBackend(t *testing.T, got chan<- seen) *httptest.Server {
 	return srv
 }
 
-func newTestUI(t *testing.T) (*httptest.Server, chan seen) {
+// newRequest builds a request to a test server.
+func newRequest(t *testing.T, method, target, body string) *http.Request {
 	t.Helper()
-	got := make(chan seen, 1)
-	b := fakeBackend(t, got)
-	h, err := newHandler(backends{orchestrator: b.URL, agents: b.URL, policies: b.URL, blobs: b.URL, llm: b.URL, mcp: b.URL, evaluations: b.URL, connectors: b.URL, gitHost: b.URL}, slog.New(slog.DiscardHandler))
+	req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ui := httptest.NewServer(h)
+	return req
+}
+
+// answer is what a test server sent back.
+type answer struct {
+	header http.Header
+	body   string
+	status int
+}
+
+// exchange sends req, reads the whole response, and closes it.
+func exchange(t *testing.T, client *http.Client, req *http.Request) answer {
+	t.Helper()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return answer{header: resp.Header, body: string(data), status: resp.StatusCode}
+}
+
+// get fetches target from a test server.
+func get(t *testing.T, target string) answer {
+	t.Helper()
+	return exchange(t, http.DefaultClient, newRequest(t, http.MethodGet, target, ""))
+}
+
+func newTestUI(t *testing.T) (ui *httptest.Server, got chan seen) {
+	t.Helper()
+	got = make(chan seen, 1)
+	b := fakeBackend(t, got)
+	h, err := newHandler(&backends{orchestrator: b.URL, agents: b.URL, policies: b.URL, blobs: b.URL, llm: b.URL, mcp: b.URL, evaluations: b.URL, connectors: b.URL, gitHost: b.URL}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui = httptest.NewServer(h)
 	t.Cleanup(ui.Close)
 	return ui, got
 }
@@ -80,20 +121,16 @@ func TestProxyRewritesPaths(t *testing.T) {
 		{"POST", "/git/claims-review.git/git-receive-pack", "/claims-review.git/git-receive-pack", "pack data"},
 	}
 	for _, c := range cases {
-		req, _ := http.NewRequest(c.method, ui.URL+c.path+"?x=1", strings.NewReader(c.body))
+		req := newRequest(t, c.method, ui.URL+c.path+"?x=1", c.body)
 		req.Header.Set("X-Creator", "ada")
 		req.Header.Set("MCP-Protocol-Version", "2025-11-25")
 		req.Header.Set("Mcp-Session-Id", "test-session")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.Header.Get("Mcp-Session-Id") != "upstream-session" {
+		resp := exchange(t, http.DefaultClient, req)
+		if resp.header.Get("Mcp-Session-Id") != "upstream-session" {
 			t.Fatal("UI proxy dropped upstream session header")
 		}
-		if resp.StatusCode != http.StatusCreated {
-			t.Fatalf("%s %s: status %d", c.method, c.path, resp.StatusCode)
+		if resp.status != http.StatusCreated {
+			t.Fatalf("%s %s: status %d", c.method, c.path, resp.status)
 		}
 		s := <-got
 		want := seen{c.method, c.want, "x=1", c.body, "ada", "2025-11-25", "test-session"}
@@ -110,14 +147,9 @@ func TestLLMProxyOnlyListsModels(t *testing.T) {
 		{"POST", "/api/llm/v1/models"},
 		{"GET", "/api/llm/v1/models/some-model"},
 	} {
-		req, _ := http.NewRequest(c.method, ui.URL+c.path, strings.NewReader(`{"model":"some-model"}`))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode < 400 {
-			t.Errorf("%s %s: status %d, want an error", c.method, c.path, resp.StatusCode)
+		resp := exchange(t, http.DefaultClient, newRequest(t, c.method, ui.URL+c.path, `{"model":"some-model"}`))
+		if resp.status < 400 {
+			t.Errorf("%s %s: status %d, want an error", c.method, c.path, resp.status)
 		}
 	}
 	select {
@@ -130,14 +162,9 @@ func TestLLMProxyOnlyListsModels(t *testing.T) {
 func TestBlobsProxyIsReadOnly(t *testing.T) {
 	ui, got := newTestUI(t)
 	for _, method := range []string{"PUT", "DELETE", "POST"} {
-		req, _ := http.NewRequest(method, ui.URL+"/api/blobs/blobs/x", strings.NewReader("data"))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("%s: status %d, want 405", method, resp.StatusCode)
+		resp := exchange(t, http.DefaultClient, newRequest(t, method, ui.URL+"/api/blobs/blobs/x", "data"))
+		if resp.status != http.StatusMethodNotAllowed {
+			t.Errorf("%s: status %d, want 405", method, resp.status)
 		}
 	}
 	select {
@@ -148,12 +175,12 @@ func TestBlobsProxyIsReadOnly(t *testing.T) {
 }
 
 func TestBackendDownReturnsJSONError(t *testing.T) {
-	h, err := newHandler(backends{orchestrator: "http://127.0.0.1:1", agents: "http://127.0.0.1:1", policies: "http://127.0.0.1:1", blobs: "http://127.0.0.1:1"}, slog.New(slog.DiscardHandler))
+	h, err := newHandler(&backends{orchestrator: "http://127.0.0.1:1", agents: "http://127.0.0.1:1", policies: "http://127.0.0.1:1", blobs: "http://127.0.0.1:1"}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/orchestrator/workflows", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/orchestrator/workflows", http.NoBody))
 	var body map[string]string
 	if rec.Code != http.StatusBadGateway || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body["error"] == "" {
 		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
@@ -163,39 +190,24 @@ func TestBackendDownReturnsJSONError(t *testing.T) {
 func TestServesIndexAndHealth(t *testing.T) {
 	ui, _ := newTestUI(t)
 	for path, want := range map[string]string{"/": "Software Factory", "/healthz": `"status":"ok"`, "/app.js": "function api("} {
-		resp, err := http.Get(ui.URL + path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
-			t.Errorf("GET %s: %d, body lacks %q", path, resp.StatusCode, want)
+		resp := get(t, ui.URL+path)
+		if resp.status != http.StatusOK || !strings.Contains(resp.body, want) {
+			t.Errorf("GET %s: %d, body lacks %q", path, resp.status, want)
 		}
 	}
 }
 
 func TestBlobsProxyAllowsTaskUploads(t *testing.T) {
 	ui, got := newTestUI(t)
-	req, _ := http.NewRequest(http.MethodPut, ui.URL+"/api/blobs/blobs/tasks/demo/example.md", strings.NewReader("task"))
-	if r2, _ := http.NewRequest(http.MethodPut, ui.URL+"/api/blobs/blobs/templates/tasks/t.md", strings.NewReader("tpl")); r2 != nil {
-		resp, err := http.DefaultClient.Do(r2)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusMethodNotAllowed {
-			t.Fatal("template upload rejected")
-		}
-		<-got
+	template := exchange(t, http.DefaultClient, newRequest(t, http.MethodPut, ui.URL+"/api/blobs/blobs/templates/tasks/t.md", "tpl"))
+	if template.status == http.StatusMethodNotAllowed {
+		t.Fatal("template upload rejected")
 	}
+	<-got
+	req := newRequest(t, http.MethodPut, ui.URL+"/api/blobs/blobs/tasks/demo/example.md", "task")
 	req.Header.Set("X-Creator", "ada")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode == http.StatusMethodNotAllowed {
+	task := exchange(t, http.DefaultClient, req)
+	if task.status == http.StatusMethodNotAllowed {
 		t.Fatal("task upload rejected")
 	}
 	s := <-got
@@ -203,36 +215,21 @@ func TestBlobsProxyAllowsTaskUploads(t *testing.T) {
 		t.Fatalf("backend got %+v", s)
 	}
 	// A task outside a collection is refused before it reaches the backend.
-	flat, _ := http.NewRequest(http.MethodPut, ui.URL+"/api/blobs/blobs/tasks/loose.md", strings.NewReader("x"))
-	if resp, err := http.DefaultClient.Do(flat); err != nil {
-		t.Fatal(err)
-	} else {
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("flat task upload: %d, want 400", resp.StatusCode)
-		}
+	flat := exchange(t, http.DefaultClient, newRequest(t, http.MethodPut, ui.URL+"/api/blobs/blobs/tasks/loose.md", "x"))
+	if flat.status != http.StatusBadRequest {
+		t.Fatalf("flat task upload: %d, want 400", flat.status)
 	}
-	del, _ := http.NewRequest(http.MethodDelete, ui.URL+"/api/blobs/blobs/tasks/demo/example.md", nil)
-	if resp, err := http.DefaultClient.Do(del); err != nil {
-		t.Fatal(err)
-	} else {
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusMethodNotAllowed {
-			t.Fatal("task delete rejected")
-		}
-		if s := <-got; s.method != http.MethodDelete || s.path != "/blobs/tasks/demo/example.md" {
-			t.Fatalf("backend got %+v", s)
-		}
+	deleted := exchange(t, http.DefaultClient, newRequest(t, http.MethodDelete, ui.URL+"/api/blobs/blobs/tasks/demo/example.md", ""))
+	if deleted.status == http.StatusMethodNotAllowed {
+		t.Fatal("task delete rejected")
+	}
+	if s = <-got; s.method != http.MethodDelete || s.path != "/blobs/tasks/demo/example.md" {
+		t.Fatalf("backend got %+v", s)
 	}
 	for _, path := range []string{"/api/blobs/blobs/tasks/", "/api/blobs/blobs/other/x"} {
-		req, _ := http.NewRequest(http.MethodPut, ui.URL+path, strings.NewReader("x"))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("%s: %d", path, resp.StatusCode)
+		refused := exchange(t, http.DefaultClient, newRequest(t, http.MethodPut, ui.URL+path, "x"))
+		if refused.status != http.StatusMethodNotAllowed {
+			t.Errorf("%s: %d", path, refused.status)
 		}
 	}
 }
@@ -240,13 +237,11 @@ func TestBlobsProxyAllowsTaskUploads(t *testing.T) {
 func TestChatProxyForwardsOnlyThroughTheOrchestrator(t *testing.T) {
 	ui, got := newTestUI(t)
 	body := `{"trace_id":"abc","step_id":"talk","session":"user-sessions/abc/talk","tab":"triage","agent":"triage@v1","message":"hello","created_by":"ada"}`
-	resp, err := http.Post(ui.URL+"/api/agent/chat", "application/json", strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("chat: status %d", resp.StatusCode)
+	chat := newRequest(t, http.MethodPost, ui.URL+"/api/agent/chat", body)
+	chat.Header.Set("Content-Type", "application/json")
+	accepted := exchange(t, http.DefaultClient, chat)
+	if accepted.status != http.StatusCreated {
+		t.Fatalf("chat: status %d", accepted.status)
 	}
 	if s := <-got; s.method != http.MethodPost || s.path != "/api/sessions/chat" || s.body != body {
 		t.Fatalf("orchestrator got %+v", s)
@@ -260,14 +255,9 @@ func TestChatProxyForwardsOnlyThroughTheOrchestrator(t *testing.T) {
 		{"GET", "/api/agent/healthz"},
 		{"POST", "/api/agent/"},
 	} {
-		req, _ := http.NewRequest(c.method, ui.URL+c.path, strings.NewReader(body))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode < 400 {
-			t.Errorf("%s %s: status %d, want an error", c.method, c.path, resp.StatusCode)
+		resp := exchange(t, http.DefaultClient, newRequest(t, c.method, ui.URL+c.path, body))
+		if resp.status < 400 {
+			t.Errorf("%s %s: status %d, want an error", c.method, c.path, resp.status)
 		}
 	}
 	select {
@@ -291,35 +281,34 @@ func TestAgentChatProxyWaitsUntilItsDeadline(t *testing.T) {
 		_, _ = w.Write([]byte(`{"reply":"done"}`))
 	}))
 	t.Cleanup(agent.Close)
-	h, err := newHandler(backends{orchestrator: agent.URL, agents: agent.URL, policies: agent.URL, blobs: agent.URL}, slog.New(slog.DiscardHandler))
+	h, err := newHandler(&backends{orchestrator: agent.URL, agents: agent.URL, policies: agent.URL, blobs: agent.URL}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ui := httptest.NewServer(h)
 	t.Cleanup(ui.Close)
+	chat := func() answer {
+		req := newRequest(t, http.MethodPost, ui.URL+"/api/agent/chat", `{}`)
+		req.Header.Set("Content-Type", "application/json")
+		return exchange(t, http.DefaultClient, req)
+	}
 
 	chatTimeout = 50 * time.Millisecond
-	resp, err := http.Post(ui.URL+"/api/agent/chat", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	late := chat()
 	var failure map[string]string
-	_ = json.NewDecoder(resp.Body).Decode(&failure)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway || failure["error"] == "" {
-		t.Fatalf("past the deadline: status %d %v, want 502 with an error", resp.StatusCode, failure)
+	err = json.Unmarshal([]byte(late.body), &failure)
+	if err != nil {
+		t.Fatalf("past the deadline: body %q: %v", late.body, err)
+	}
+	if late.status != http.StatusBadGateway || failure["error"] == "" {
+		t.Fatalf("past the deadline: status %d %v, want 502 with an error", late.status, failure)
 	}
 
 	chatTimeout = time.Minute
 	go func() { time.Sleep(300 * time.Millisecond); close(release) }()
-	resp, err = http.Post(ui.URL+"/api/agent/chat", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || string(reply) != `{"reply":"done"}` {
-		t.Fatalf("slow answer: status %d %q", resp.StatusCode, reply)
+	slow := chat()
+	if slow.status != http.StatusOK || slow.body != `{"reply":"done"}` {
+		t.Fatalf("slow answer: status %d %q", slow.status, slow.body)
 	}
 }
 
@@ -353,16 +342,12 @@ func TestBlobsProxyAllowsSessionFiles(t *testing.T) {
 		{"PUT", "runs/abc/talk/files/notes.md", false},
 		{"DELETE", "runs/abc/user-sessions/abc/talk/files/notes.md", false},
 	} {
-		req, _ := http.NewRequest(c.method, ui.URL+"/api/blobs/blobs/"+c.path, strings.NewReader("text"))
+		req := newRequest(t, c.method, ui.URL+"/api/blobs/blobs/"+c.path, "text")
 		req.Header.Set("X-Creator", "ada")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
+		resp := exchange(t, http.DefaultClient, req)
 		if !c.allowed {
-			if resp.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("%s %s: status %d, want 405", c.method, c.path, resp.StatusCode)
+			if resp.status != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s: status %d, want 405", c.method, c.path, resp.status)
 			}
 			select {
 			case s := <-got:
@@ -371,8 +356,8 @@ func TestBlobsProxyAllowsSessionFiles(t *testing.T) {
 			}
 			continue
 		}
-		if resp.StatusCode != http.StatusCreated {
-			t.Errorf("%s %s: status %d", c.method, c.path, resp.StatusCode)
+		if resp.status != http.StatusCreated {
+			t.Errorf("%s %s: status %d", c.method, c.path, resp.status)
 			continue
 		}
 		if s := <-got; s.method != c.method || s.path != "/blobs/"+c.path || s.creator != "ada" {
@@ -403,17 +388,9 @@ func TestBlobsProxyRejectsDisguisedSessionPaths(t *testing.T) {
 		"user-sessions/abc/talk/chats%2Ffiles/../main.json",
 	} {
 		for _, method := range []string{"PUT", "DELETE"} {
-			req, err := http.NewRequest(method, ui.URL+"/api/blobs/blobs/"+path, strings.NewReader("text"))
-			if err != nil {
-				t.Fatalf("%s: %v", path, err)
-			}
-			resp, err := client.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode < 300 {
-				t.Errorf("%s %s: status %d, want a refusal", method, path, resp.StatusCode)
+			resp := exchange(t, client, newRequest(t, method, ui.URL+"/api/blobs/blobs/"+path, "text"))
+			if resp.status < 300 {
+				t.Errorf("%s %s: status %d, want a refusal", method, path, resp.status)
 			}
 			select {
 			case s := <-got:
@@ -429,31 +406,22 @@ func TestBlobsProxyRejectsDisguisedSessionPaths(t *testing.T) {
 func TestServesVendoredMermaid(t *testing.T) {
 	ui, _ := newTestUI(t)
 	for query, want := range map[string]string{"": "no-store", "?v=1": "public, max-age=31536000, immutable"} {
-		resp, err := http.Get(ui.URL + "/vendor/mermaid.min.js" + query)
-		if err != nil {
-			t.Fatal(err)
+		resp := get(t, ui.URL+"/vendor/mermaid.min.js"+query)
+		if resp.status != http.StatusOK || !strings.Contains(resp.body, "mermaid") {
+			t.Fatalf("GET /vendor/mermaid.min.js%s: status %d, %d bytes", query, resp.status, len(resp.body))
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "mermaid") {
-			t.Fatalf("GET /vendor/mermaid.min.js%s: status %d, %d bytes", query, resp.StatusCode, len(body))
-		}
-		if got := resp.Header.Get("Cache-Control"); got != want {
+		if got := resp.header.Get("Cache-Control"); got != want {
 			t.Errorf("Cache-Control%s = %q, want %q", query, got, want)
 		}
-		if !strings.Contains(resp.Header.Get("Content-Type"), "javascript") {
-			t.Errorf("Content-Type = %q", resp.Header.Get("Content-Type"))
+		if !strings.Contains(resp.header.Get("Content-Type"), "javascript") {
+			t.Errorf("Content-Type = %q", resp.header.Get("Content-Type"))
 		}
-		if csp := resp.Header.Get("Content-Security-Policy"); csp != "" {
+		if csp := resp.header.Get("Content-Security-Policy"); csp != "" {
 			t.Errorf("unexpected Content-Security-Policy %q", csp)
 		}
 	}
-	resp, err := http.Get(ui.URL + "/app.js?v=1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+	resp := get(t, ui.URL+"/app.js?v=1")
+	if got := resp.header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)
 	}
 }

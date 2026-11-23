@@ -26,19 +26,19 @@ const (
 )
 
 type fixture struct {
-	mu                sync.Mutex
 	runs              map[string]bool
 	objects           map[string][]byte
 	revisions         map[string]string
+	statuses          map[string]any
+	mu                sync.Mutex
 	nextRevision      int
 	failPriceList     bool
 	failExecutionList bool
-	statuses          map[string]any
 }
 
-func newFixture(t *testing.T) (*fixture, *httptest.Server, *httptest.Server) {
+func newFixture(t *testing.T) (f *fixture, blob, orch *httptest.Server) {
 	t.Helper()
-	f := &fixture{runs: map[string]bool{runA: true, runB: true, runC: true, runD: true}, objects: map[string][]byte{}, revisions: map[string]string{}, statuses: map[string]any{}}
+	f = &fixture{runs: map[string]bool{runA: true, runB: true, runC: true, runD: true}, objects: map[string][]byte{}, revisions: map[string]string{}, statuses: map[string]any{}}
 	started := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	put := func(id string, v any) { f.objects[id], _ = json.Marshal(v) }
 	put("runs/"+runA+"/run.json", map[string]any{"trace_id": runA, "workflow": "feature", "started": started.Add(2 * time.Hour), "input_artifact": "runs/" + runA + "/input", "distributed_trace_id": strings.Repeat("a", 32)})
@@ -51,9 +51,9 @@ func newFixture(t *testing.T) (*fixture, *httptest.Server, *httptest.Server) {
 	put("runs/"+runD+"/run.json", map[string]any{"trace_id": runD, "workflow": "feature", "started": started.Add(-time.Hour), "input_artifact": "runs/" + runD + "/input"})
 	f.statuses[runA] = map[string]any{"status": "Completed", "started": started.Add(2*time.Hour + time.Second), "finished": started.Add(2*time.Hour + 5*time.Second), "duration_ms": 4000, "duration_known": true}
 	f.statuses[runB] = map[string]any{"status": "Failed", "started": started.Add(time.Hour), "finished": started.Add(time.Hour), "duration_ms": 0, "duration_known": true}
-	blob := httptest.NewServer(http.HandlerFunc(f.blobHandler))
+	blob = httptest.NewServer(http.HandlerFunc(f.blobHandler))
 	t.Cleanup(blob.Close)
-	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	orch = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/runs/")
 		if id == runC {
 			http.NotFound(w, r)
@@ -61,7 +61,7 @@ func newFixture(t *testing.T) (*fixture, *httptest.Server, *httptest.Server) {
 		}
 		v, ok := f.statuses[id]
 		if !ok {
-			http.Error(w, "unavailable", 503)
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		writeJSON(w, 200, v)
@@ -92,11 +92,11 @@ func (f *fixture) blobHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/list/"):
 		prefix := strings.Trim(strings.TrimPrefix(r.URL.Path, "/list/"), "/") + "/"
 		if f.failPriceList && prefix == pricePrefix+"/" {
-			http.Error(w, "temporarily unavailable", 503)
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		if f.failExecutionList && prefix == "workflow-executions/" {
-			http.Error(w, "temporarily unavailable", 503)
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		var objects []map[string]any
@@ -165,18 +165,46 @@ func testEvaluation(t *testing.T, blob, orch string) *httptest.Server {
 	return srv
 }
 
-func request(t *testing.T, method, url, body string) (int, []byte) {
+func request(t *testing.T, method, url, body string) (status int, data []byte) {
 	t.Helper()
-	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Creator", "tester")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	data, _ := io.ReadAll(res.Body)
+	defer closeBody(t, res.Body)
+	data, err = io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return res.StatusCode, data
+}
+
+// get sends a GET request that ends with the test.
+func get(t *testing.T, url string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// closeBody closes what a test has read and reports a failed Close.
+func closeBody(t *testing.T, body io.Closer) {
+	t.Helper()
+	if err := body.Close(); err != nil {
+		t.Error(err)
+	}
 }
 
 func TestRunFiltersPaginationAndIncompleteEvidence(t *testing.T) {
@@ -202,8 +230,8 @@ func TestRunFiltersPaginationAndIncompleteEvidence(t *testing.T) {
 	}
 	code, data = request(t, "GET", srv.URL+"/api/runs?limit=1", "")
 	var first struct {
-		Runs []RunSnapshot `json:"runs"`
 		Next string        `json:"next_cursor"`
+		Runs []RunSnapshot `json:"runs"`
 	}
 	_ = json.Unmarshal(data, &first)
 	if code != 200 || len(first.Runs) != 1 || first.Next == "" {
@@ -393,11 +421,8 @@ func TestExportIsAZipWithReadmeSetAndRunFolders(t *testing.T) {
 	if err := json.Unmarshal(data, &set); err != nil {
 		t.Fatal(err)
 	}
-	res, err := http.Get(srv.URL + "/api/sets/" + set.ID + "/export")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
+	res := get(t, srv.URL+"/api/sets/"+set.ID+"/export")
+	defer closeBody(t, res.Body)
 	body, _ := io.ReadAll(res.Body)
 	if res.StatusCode != 200 || res.Header.Get("Content-Type") != "application/zip" || !strings.Contains(res.Header.Get("Content-Disposition"), `filename="Base-line.zip"`) {
 		t.Fatalf("%d %v", res.StatusCode, res.Header)
@@ -427,8 +452,11 @@ func TestExportIsAZipWithReadmeSetAndRunFolders(t *testing.T) {
 	if manifest == nil {
 		t.Fatalf("no manifest among %d files", len(names))
 	}
-	rc, _ := manifest.Open()
-	defer rc.Close()
+	rc, err := manifest.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBody(t, rc)
 	var m exportManifest
 	if err := json.NewDecoder(rc).Decode(&m); err != nil {
 		t.Fatal(err)

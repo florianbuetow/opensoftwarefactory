@@ -63,8 +63,8 @@ func run() error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := shutdownTelemetry(ctx); err != nil {
-			logger.Warn("telemetry shutdown failed", "error", err)
+		if shutdownErr := shutdownTelemetry(ctx); shutdownErr != nil {
+			logger.Warn("telemetry shutdown failed", "error", shutdownErr)
 		}
 	}()
 	tracing, err := temporalotel.NewTracingInterceptor(temporalotel.TracerOptions{})
@@ -87,20 +87,21 @@ func run() error {
 	w.RegisterWorkflowWithOptions(pipeline.Recalculation, workflow.RegisterOptions{Name: pipeline.RecalculationWorkflowName})
 	agents := newAgentRegistry(blobs.Client)
 	w.RegisterActivity(&pipeline.Activities{Store: blobs, Conditional: blobs, EvaluationURL: envString("EVALUATION_URL", "http://evaluation:8080"), HTTPClient: blobs.Client, LoadDefinitions: func() ([]pipeline.Definition, error) {
-		cfg, err := workflows.snapshot()
-		return cfg.Workflows, err
+		cfg, snapshotErr := workflows.snapshot()
+		return cfg.Workflows, snapshotErr
 	}, DescribeAgent: agentDescriber(agents, logger), LoadAgentSettings: func(ctx context.Context, ref string) (pipeline.AgentExecutionSettings, error) {
-		settings, err := agents.settings(ctx, ref)
-		if err != nil {
-			var missing unknownSkillVersion
-			if errors.As(err, &missing) {
-				return pipeline.AgentExecutionSettings{}, temporal.NewNonRetryableApplicationError(err.Error(), "MissingSkillVersion", err)
+		settings, settingsErr := agents.settings(ctx, ref)
+		if settingsErr != nil {
+			var missing unknownSkillVersionError
+			if errors.As(settingsErr, &missing) {
+				return pipeline.AgentExecutionSettings{}, temporal.NewNonRetryableApplicationError(settingsErr.Error(), "MissingSkillVersion", settingsErr)
 			}
-			return pipeline.AgentExecutionSettings{}, err
+			return pipeline.AgentExecutionSettings{}, settingsErr
 		}
 		return pipeline.AgentExecutionSettings{Skills: settings.Skills, SkillScriptTimeoutSeconds: settings.SkillScriptTimeoutSeconds}, nil
 	}, Connectors: pipeline.NewHTTPConnectorsFromEnv(blobs.Client)})
-	if err = w.Start(); err != nil {
+	err = w.Start()
+	if err != nil {
 		return err
 	}
 	defer w.Stop()
@@ -137,20 +138,20 @@ type temporalRunner struct{ c client.Client }
 
 // Start uses the trace ID as the Temporal workflow ID, so each run is
 // addressable by its trace ID in the API and the Temporal UI.
-func (r temporalRunner) Start(ctx context.Context, in pipeline.Input) error {
+func (r temporalRunner) Start(ctx context.Context, in *pipeline.Input) error {
 	_, err := r.StartExecution(ctx, in)
 	return err
 }
 
 type executionStarter interface {
-	StartExecution(context.Context, pipeline.Input) (string, error)
+	StartExecution(context.Context, *pipeline.Input) (string, error)
 }
 
-func (r temporalRunner) StartExecution(ctx context.Context, in pipeline.Input) (string, error) {
+func (r temporalRunner) StartExecution(ctx context.Context, in *pipeline.Input) (string, error) {
 	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        in.TraceID,
 		TaskQueue: pipeline.TaskQueue,
-		Memo:      map[string]any{"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(in.Definition), "trace_id": in.TraceID, "artifact_prefix": in.Prefix},
+		Memo:      map[string]any{"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(&in.Definition), "trace_id": in.TraceID, "artifact_prefix": in.Prefix},
 	}, pipeline.WorkflowName, in)
 	if err != nil {
 		// A deadline or transport error can be ambiguous: Temporal may have accepted the
@@ -180,14 +181,14 @@ func (r temporalRunner) Status(ctx context.Context, traceID string) (RunStatus, 
 		_ = converter.GetDefaultDataConverter().FromPayload(p, &st.Workflow)
 	}
 	// The state of the merge and batch steps is also answered for a run that has ended.
-	if value, err := r.c.QueryWorkflow(ctx, traceID, "", pipeline.NodesQuery); err == nil {
+	if value, queryErr := r.c.QueryWorkflow(ctx, traceID, "", pipeline.NodesQuery); queryErr == nil {
 		var nodes map[string]json.RawMessage
 		if value.Get(&nodes) == nil && len(nodes) > 0 {
 			st.Nodes, _ = json.Marshal(nodes)
 		}
 	}
 	// How often the steps that ran again after a rejection have run.
-	if value, err := r.c.QueryWorkflow(ctx, traceID, "", pipeline.RoundsQuery); err == nil {
+	if value, queryErr := r.c.QueryWorkflow(ctx, traceID, "", pipeline.RoundsQuery); queryErr == nil {
 		var rounds map[string]int
 		if value.Get(&rounds) == nil && len(rounds) > 0 {
 			st.Rounds = rounds
@@ -239,7 +240,8 @@ func (r temporalRunner) Pending(ctx context.Context) ([]PendingDecision, error) 
 				continue // the workflow finished between the list and the query
 			}
 			var state pipeline.PendingState
-			if err = value.Get(&state); err != nil {
+			err = value.Get(&state)
+			if err != nil {
 				return nil, err
 			}
 			for _, g := range state.Gates {
@@ -290,11 +292,12 @@ func (r temporalRunner) Sessions(ctx context.Context) ([]WaitingSession, error) 
 				continue // the workflow finished between the list and the query
 			}
 			var state pipeline.PendingState
-			if err = value.Get(&state); err != nil {
+			err = value.Get(&state)
+			if err != nil {
 				return nil, err
 			}
-			for _, session := range state.Sessions {
-				out = append(out, WaitingSession{WorkflowID: id, TraceID: state.TraceID, Workflow: state.Workflow, PendingSession: session})
+			for i := range state.Sessions {
+				out = append(out, WaitingSession{WorkflowID: id, TraceID: state.TraceID, Workflow: state.Workflow, PendingSession: state.Sessions[i]})
 			}
 		}
 		token = page.GetNextPageToken()
@@ -324,7 +327,8 @@ func (r temporalRunner) Teams(ctx context.Context) ([]RunningTeam, error) {
 				continue // the workflow finished between the list and the query
 			}
 			var state pipeline.PendingState
-			if err = value.Get(&state); err != nil {
+			err = value.Get(&state)
+			if err != nil {
 				return nil, err
 			}
 			for _, team := range state.Teams {

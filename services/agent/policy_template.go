@@ -13,8 +13,8 @@ import (
 )
 
 type policyToken struct {
-	start, end int
 	id         string
+	start, end int
 }
 
 type requiredPolicyError struct{ text string }
@@ -25,7 +25,7 @@ type resolvedPolicy struct{ ID, Version, Content string }
 
 var (
 	policySegment        = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$|^[a-z0-9]$`)
-	policyVersionSegment = regexp.MustCompile(`^v[1-9][0-9]*$`)
+	policyVersionSegment = regexp.MustCompile(`^v[1-9]\d*$`)
 )
 
 func parsePolicyTokens(text string) ([]policyToken, error) {
@@ -81,7 +81,7 @@ func (s *Service) compilePrompt(ctx context.Context, prompt string) (string, []r
 		}
 		endpoint := strings.TrimRight(s.PolicyRegistryURL, "/") + "/policies/" + strings.Join(parts, "/") + "/latest"
 		fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, http.NoBody)
 		if err != nil {
 			cancel()
 			return "", nil, fmt.Errorf("compiling agent: required policy %q: %w", token.id, err)
@@ -105,10 +105,10 @@ func (s *Service) compilePrompt(ctx context.Context, prompt string) (string, []r
 			return "", nil, fmt.Errorf("compiling agent: required policy %q: policy service returned %s", token.id, resp.Status)
 		}
 		var entry struct {
-			Version string `json:"version"`
-			Files   struct {
+			Files struct {
 				Policy *string `json:"policy.md"`
 			} `json:"files"`
+			Version string `json:"version"`
 		}
 		if err := json.Unmarshal(body, &entry); err != nil || entry.Version == "" || entry.Files.Policy == nil {
 			return "", nil, fmt.Errorf("compiling agent: required policy %q: invalid policy service response", token.id)

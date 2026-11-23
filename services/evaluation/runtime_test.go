@@ -11,7 +11,7 @@ func TestWriterLockExcludesSecondProcessOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second, err := acquireWriterLock(path); err == nil {
+	if second, secondErr := acquireWriterLock(path); secondErr == nil {
 		_ = second.Close()
 		t.Fatal("second writer acquired lock")
 	}

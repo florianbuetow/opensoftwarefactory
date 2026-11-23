@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,12 +41,29 @@ type podGateway struct {
 	fail  bool // tool calls answer with a tool error
 }
 
+// toolRequest is the part of an MCP request the fake gateways read.
+type toolRequest struct {
+	Method string `json:"method"`
+	Params struct {
+		Arguments map[string]any `json:"arguments"`
+		Name      string         `json:"name"`
+	} `json:"params"`
+	ID json.RawMessage `json:"id"`
+}
+
+// Values the dev pod tests use again and again.
+const (
+	testPod        = "pod-1"
+	serviceDown    = "The test service is down."
+	mcpFactoryPath = "/mcp/factory"
+)
+
 // devPodMCP points the service at a gateway with the MCP services `devpod` and `factory`.
 func devPodMCP(t *testing.T, f *fakes) *podGateway {
 	t.Helper()
 	g := &podGateway{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/mcp/devpod" && r.URL.Path != "/mcp/factory" {
+		if r.URL.Path != "/mcp/devpod" && r.URL.Path != mcpFactoryPath {
 			http.NotFound(w, r)
 			return
 		}
@@ -54,25 +71,21 @@ func devPodMCP(t *testing.T, f *fakes) *podGateway {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		var msg struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			} `json:"params"`
+		var msg toolRequest
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			t.Error(err)
+			return
 		}
-		json.NewDecoder(r.Body).Decode(&msg)
 		reply := func(result string) {
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":`+result+`}`)
+			writeBody(t, w, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":`+result+`}`)
 		}
 		switch msg.Method {
-		case "initialize":
+		case mcpInitialize:
 			w.Header().Set("Mcp-Session-Id", "session-pod")
 			reply(`{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}`)
-		case "tools/list":
-			if r.URL.Path == "/mcp/factory" {
+		case mcpToolsList:
+			if r.URL.Path == mcpFactoryPath {
 				// A tool of another service keeps an argument named like a dev pod one.
 				reply(`{"tools":[{"name":"send_message","description":"Send","inputSchema":{"type":"object","properties":{"run":{"type":"string"},"text":{"type":"string"}},"required":["run","text"]}}]}`)
 				return
@@ -82,7 +95,7 @@ func devPodMCP(t *testing.T, f *fakes) *podGateway {
 				{"name":"read_file","description":"Read a file","inputSchema":{"type":"object","properties":{` + identity + `,"path":{"type":"string"},"start_line":{"type":"integer"}},"required":["pod","agent","run","path"]}},
 				{"name":"push_branch","description":"Push","inputSchema":{"type":"object","properties":{` + identity + `},"required":["pod","agent","run"]}},
 				{"name":"report_blocked","description":"Report blocked","inputSchema":{"type":"object","properties":{` + identity + `,"reason":{"type":"string"}},"required":["pod","agent","run","reason"]}}]}`)
-		case "tools/call":
+		case mcpToolsCall:
 			f.mu.Lock()
 			g.names = append(g.names, msg.Params.Name)
 			g.calls = append(g.calls, msg.Params.Arguments)
@@ -103,18 +116,18 @@ func devPodMCP(t *testing.T, f *fakes) *podGateway {
 }
 
 // podCalls is a model answer that calls the named tools; each call is {alias, arguments}.
-func podCalls(calls ...[2]string) func(http.ResponseWriter, map[string]any) {
+func podCalls(calls ...[2]string) llmHandler {
 	list := make([]map[string]any, len(calls))
 	for i, c := range calls {
 		list[i] = map[string]any{"id": "c" + string(rune('a'+i)), "type": "function", "function": map[string]string{"name": c[0], "arguments": c[1]}}
 	}
-	data, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": nil, "tool_calls": list}}}})
+	data, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": roleAssistant, "content": nil, "tool_calls": list}}}})
 	return respond(string(data))
 }
 
-func podRequest() StepRequest {
+func podRequest() *StepRequest {
 	req := request()
-	req.DevPod = "pod-1"
+	req.DevPod = testPod
 	return req
 }
 
@@ -122,9 +135,9 @@ func podRequest() StepRequest {
 func shownSchemas(t *testing.T, body map[string]any) map[string]map[string]any {
 	t.Helper()
 	out := map[string]map[string]any{}
-	for _, tool := range body["tools"].([]any) {
-		fn := tool.(map[string]any)["function"].(map[string]any)
-		out[fn["name"].(string)] = fn["parameters"].(map[string]any)
+	for _, tool := range jsonList(t, body["tools"]) {
+		fn := jsonObject(t, jsonObject(t, tool)["function"])
+		out[jsonString(t, fn["name"])] = jsonObject(t, fn["parameters"])
 	}
 	return out
 }
@@ -138,7 +151,7 @@ func TestRequestsReadTheDevPod(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if step.DevPod != "pod-1" || chat.DevPod != "pod-1" || turn.DevPod != "pod-1" {
+	if step.DevPod != testPod || chat.DevPod != testPod || turn.DevPod != testPod {
 		t.Fatalf("dev_pod = %q %q %q", step.DevPod, chat.DevPod, turn.DevPod)
 	}
 }
@@ -159,10 +172,10 @@ func TestDevPodToolCallsCarryPodAgentAndRun(t *testing.T) {
 	if strings.Join(g.names, ",") != "read_file,push_branch,send_message" {
 		t.Fatalf("forwarded tools = %v", g.names)
 	}
-	if c := g.calls[0]; c["pod"] != "pod-1" || c["agent"] != "intake@v1" || c["run"] != "t1" || c["path"] != "src/panel.py" || len(c) != 4 {
+	if c := g.calls[0]; c["pod"] != testPod || c["agent"] != intakeRef || c["run"] != "t1" || c["path"] != "src/panel.py" || len(c) != 4 {
 		t.Fatalf("read_file arguments = %v", c)
 	}
-	if c := g.calls[1]; c["pod"] != "pod-1" || c["agent"] != "intake@v1" || c["run"] != "t1" || len(c) != 3 {
+	if c := g.calls[1]; c["pod"] != testPod || c["agent"] != intakeRef || c["run"] != "t1" || len(c) != 3 {
 		t.Fatalf("push_branch arguments = %v", c)
 	}
 	if c := g.calls[2]; c["run"] != "mine" || c["pod"] != nil || c["agent"] != nil {
@@ -176,7 +189,7 @@ func TestDevPodToolCallsCarryPodAgentAndRun(t *testing.T) {
 	if stored, _ := json.Marshal(rec.Messages[2]); !strings.Contains(string(stored), "someone-elses-pod") {
 		t.Fatalf("stored tool call = %s", stored)
 	}
-	if rec.Status != "completed" {
+	if rec.Status != statusCompleted {
 		t.Fatalf("record status = %q", rec.Status)
 	}
 }
@@ -189,7 +202,7 @@ func TestDevPodToolSchemasHideTheHarnessArguments(t *testing.T) {
 	}
 	schemas := shownSchemas(t, f.llmReqs[0])
 	read := schemas["devpod__read_file"]
-	props := read["properties"].(map[string]any)
+	props := jsonObject(t, read["properties"])
 	if len(props) != 2 || props["path"] == nil || props["start_line"] == nil {
 		t.Fatalf("read_file properties = %v", props)
 	}
@@ -197,7 +210,7 @@ func TestDevPodToolSchemasHideTheHarnessArguments(t *testing.T) {
 		t.Fatalf("read_file required = %s", required)
 	}
 	push := schemas["devpod__push_branch"]
-	if _, has := push["required"]; has || len(push["properties"].(map[string]any)) != 0 || push["type"] != "object" {
+	if _, has := push["required"]; has || len(jsonObject(t, push["properties"])) != 0 || push["type"] != "object" {
 		t.Fatalf("push_branch schema = %v", push)
 	}
 	if required, _ := json.Marshal(schemas["devpod__report_blocked"]["required"]); string(required) != `["reason"]` {
@@ -205,7 +218,7 @@ func TestDevPodToolSchemasHideTheHarnessArguments(t *testing.T) {
 	}
 	// Another service's schema stays as offered.
 	send := schemas["factory__send_message"]
-	if required, _ := json.Marshal(send["required"]); string(required) != `["run","text"]` || send["properties"].(map[string]any)["run"] == nil {
+	if required, _ := json.Marshal(send["required"]); string(required) != `["run","text"]` || jsonObject(t, send["properties"])["run"] == nil {
 		t.Fatalf("send_message schema = %v", send)
 	}
 }
@@ -219,7 +232,7 @@ func TestTrimDevPodSchemaKeepsWhatItCannotRead(t *testing.T) {
 		_ = json.Unmarshal([]byte(raw), &want)
 		x, _ := json.Marshal(got)
 		y, _ := json.Marshal(want)
-		if string(x) != string(y) {
+		if !bytes.Equal(x, y) {
 			t.Fatalf("%s became %s", raw, x)
 		}
 	}
@@ -237,12 +250,12 @@ func TestDevPodToolWithoutADevPodIsAToolError(t *testing.T) {
 	if len(g.calls) != 0 {
 		t.Fatalf("a dev pod tool was forwarded without a dev pod: %v", g.calls)
 	}
-	sent := f.llmReqs[1]["messages"].([]any)
+	sent := jsonList(t, f.llmReqs[1]["messages"])
 	want := `Error: tool "devpod__read_file" works in a dev pod, and this run has none. The workflow needs a devpod step before this step.`
-	if got := sent[3].(map[string]any)["content"]; got != want {
+	if got := jsonObject(t, sent[3])["content"]; got != want {
 		t.Fatalf("tool message = %q", got)
 	}
-	if got := string(f.blobs["runs/t1/plan"]); got != "the plan" {
+	if got := string(f.blobs[planArtifact]); got != planAnswer {
 		t.Fatalf("stored answer = %q", got)
 	}
 	if strings.Contains(firstUserMessage(t, f), "Dev pod") {
@@ -261,7 +274,7 @@ func TestProcessFirstMessageEndsWithTheDevPodNote(t *testing.T) {
 	if got := firstUserMessage(t, f); got != want {
 		t.Fatalf("first message =\n%s\nwant\n%s", got, want)
 	}
-	if system := f.llmReqs[0]["messages"].([]any)[0].(map[string]any)["content"]; system != "You are intake." {
+	if system := jsonObject(t, jsonList(t, f.llmReqs[0]["messages"])[0])["content"]; system != intakePrompt {
 		t.Fatalf("system message changed: %q", system)
 	}
 }
@@ -286,20 +299,20 @@ func TestProcessBlockedEndsTheWorkAtOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Artifact != "runs/t1/plan" || res.Blocked != "The test service is down." {
+	if res.Artifact != planArtifact || res.Blocked != serviceDown {
 		t.Fatalf("result = %+v", res)
 	}
 	data, _ := json.Marshal(res)
 	if string(data) != `{"artifact":"runs/t1/plan","blocked":"The test service is down."}` {
 		t.Fatalf("result JSON = %s", data)
 	}
-	if got := string(f.blobs["runs/t1/plan"]); got != "The test service is down." {
+	if got := string(f.blobs[planArtifact]); got != serviceDown {
 		t.Fatalf("output document = %q", got)
 	}
 	if len(f.llmReqs) != 1 || strings.Join(g.names, ",") != "report_blocked" {
 		t.Fatalf("model calls = %d, forwarded tools = %v", len(f.llmReqs), g.names)
 	}
-	if c := g.calls[0]; c["pod"] != "pod-1" || c["agent"] != "intake@v1" || c["run"] != "t1" || c["reason"] != "The test service is down." {
+	if c := g.calls[0]; c["pod"] != testPod || c["agent"] != intakeRef || c["run"] != "t1" || c["reason"] != serviceDown {
 		t.Fatalf("report_blocked arguments = %v", c)
 	}
 	for _, id := range []string{"runs/t1/plan.run.json", "runs/t1/plan.attempt-1.run.json"} {
@@ -307,14 +320,14 @@ func TestProcessBlockedEndsTheWorkAtOnce(t *testing.T) {
 		if err := json.Unmarshal(f.blobs[id], &rec); err != nil {
 			t.Fatal(err)
 		}
-		if rec.Status != "blocked" || rec.Error != "The test service is down." || rec.ModelCalls != 1 {
+		if rec.Status != statusBlocked || rec.Error != serviceDown || rec.ModelCalls != 1 {
 			t.Fatalf("%s: status %q, error %q, model calls %d", id, rec.Status, rec.Error, rec.ModelCalls)
 		}
 	}
 }
 
 func TestProcessResultWithoutBlockedHasNoBlockedField(t *testing.T) {
-	data, _ := json.Marshal(StepResult{Artifact: "runs/t1/plan"})
+	data, _ := json.Marshal(StepResult{Artifact: planArtifact})
 	if string(data) != `{"artifact":"runs/t1/plan"}` {
 		t.Fatalf("result JSON = %s", data)
 	}
@@ -324,8 +337,8 @@ func TestProcessBlockedWithoutAReason(t *testing.T) {
 	f := newFakes(t, devPodAgentJSON, podCalls([2]string{"devpod__report_blocked", `{}`}), respond(finalResponse))
 	devPodMCP(t, f)
 	res, err := f.svc.Process(context.Background(), podRequest())
-	if err != nil || res.Blocked != noBlockedReason || string(f.blobs["runs/t1/plan"]) != noBlockedReason {
-		t.Fatalf("result = %+v, %v, document %q", res, err, f.blobs["runs/t1/plan"])
+	if err != nil || res.Blocked != noBlockedReason || string(f.blobs[planArtifact]) != noBlockedReason {
+		t.Fatalf("result = %+v, %v, document %q", res, err, f.blobs[planArtifact])
 	}
 }
 
@@ -338,18 +351,18 @@ func TestProcessARefusedReportBlockedGoesOn(t *testing.T) {
 	if err != nil || res.Blocked != "" || len(f.llmReqs) != 2 {
 		t.Fatalf("result = %+v, %v, model calls %d", res, err, len(f.llmReqs))
 	}
-	if got := string(f.blobs["runs/t1/plan"]); got != "the plan" {
+	if got := string(f.blobs[planArtifact]); got != planAnswer {
 		t.Fatalf("stored answer = %q", got)
 	}
 	var rec RunRecord
-	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil || rec.Status != "completed" {
+	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil || rec.Status != statusCompleted {
 		t.Fatalf("record status = %q, %v", rec.Status, err)
 	}
 }
 
 func podChatBody() map[string]string {
 	body := chatBody()
-	body["dev_pod"] = "pod-1"
+	body["dev_pod"] = testPod
 	return body
 }
 
@@ -357,18 +370,18 @@ func TestChatDevPodNoteAndArguments(t *testing.T) {
 	f := newFakes(t, devPodAgentJSON, podCalls([2]string{"devpod__read_file", `{"path":"a.py","run":"x"}`}), respond(finalResponse))
 	g := devPodMCP(t, f)
 	status, out := postChat(t, f, podChatBody())
-	if status != http.StatusOK || out["reply"] != "the plan" {
+	if status != http.StatusOK || out["reply"] != planAnswer {
 		t.Fatalf("response = %d %v", status, out)
 	}
-	if c := g.calls[0]; c["pod"] != "pod-1" || c["agent"] != "intake@v1" || c["run"] != "t1" || c["path"] != "a.py" {
+	if c := g.calls[0]; c["pod"] != testPod || c["agent"] != intakeRef || c["run"] != "t1" || c["path"] != "a.py" {
 		t.Fatalf("read_file arguments = %v", c)
 	}
 	_, messages := storedChat(t, f)
-	want := "You are intake." + sessionNote("user-sessions/t1/talk") + devPodNoteText
+	want := intakePrompt + sessionNote("user-sessions/t1/talk") + devPodNoteText
 	if messages[0]["content"] != want {
 		t.Fatalf("system message =\n%s\nwant\n%s", messages[0]["content"], want)
 	}
-	if messages[1]["content"] != "hello there" {
+	if messages[1]["content"] != chatMessage {
 		t.Fatalf("user message = %q", messages[1]["content"])
 	}
 	if required, _ := json.Marshal(shownSchemas(t, f.llmReqs[0])["devpod__read_file"]["required"]); string(required) != `["path"]` {
@@ -383,10 +396,10 @@ func TestChatWithoutADevPod(t *testing.T) {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	_, messages := storedChat(t, f)
-	if strings.Contains(messages[0]["content"].(string), "Dev pod") {
+	if strings.Contains(jsonString(t, messages[0]["content"]), "Dev pod") {
 		t.Fatalf("system message = %s", messages[0]["content"])
 	}
-	if len(g.calls) != 0 || !strings.HasPrefix(messages[3]["content"].(string), `Error: tool "devpod__read_file" works in a dev pod`) {
+	if len(g.calls) != 0 || !strings.HasPrefix(jsonString(t, messages[3]["content"]), `Error: tool "devpod__read_file" works in a dev pod`) {
 		t.Fatalf("calls = %v, tool message = %v", g.calls, messages[3]["content"])
 	}
 }
@@ -414,9 +427,9 @@ func TestChatBlockedReasonIsTheReply(t *testing.T) {
 	}
 }
 
-func podCoderTurn() TeamTurnRequest {
+func podCoderTurn() *TeamTurnRequest {
 	req := coderTurn()
-	req.DevPod = "pod-1"
+	req.DevPod = testPod
 	return req
 }
 
@@ -427,14 +440,14 @@ func TestTeamTurnDevPodNoteAndArguments(t *testing.T) {
 	if err != nil || res.Blocked != "" {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
-	if c := g.calls[0]; g.names[0] != "read_file" || c["pod"] != "pod-1" || c["agent"] != "intake@v1" || c["run"] != "t1" || c["team"] != "kept" {
+	if c := g.calls[0]; g.names[0] != "read_file" || c["pod"] != testPod || c["agent"] != intakeRef || c["run"] != "t1" || c["team"] != "kept" {
 		t.Fatalf("read_file arguments = %v", c)
 	}
 	_, messages := storedMember(t, f, teamPath+"/members/coder.json")
 	if want := "[Message from lead on channel coder--lead]\nwrite it" + devPodNoteText; messages[1]["content"] != want {
 		t.Fatalf("first user message =\n%s\nwant\n%s", messages[1]["content"], want)
 	}
-	if strings.Contains(messages[0]["content"].(string), "Dev pod") {
+	if strings.Contains(jsonString(t, messages[0]["content"]), "Dev pod") {
 		t.Fatalf("system message = %s", messages[0]["content"])
 	}
 
@@ -461,7 +474,7 @@ func TestTeamTurnWithoutADevPodHasNoNote(t *testing.T) {
 	if messages[1]["content"] != "[Message from lead on channel coder--lead]\nwrite it" {
 		t.Fatalf("first user message = %q", messages[1]["content"])
 	}
-	if len(g.names) != 1 || g.names[0] != "send_message" || !strings.HasPrefix(messages[3]["content"].(string), `Error: tool "devpod__read_file" works in a dev pod`) {
+	if len(g.names) != 1 || g.names[0] != teamSendTool || !strings.HasPrefix(jsonString(t, messages[3]["content"]), `Error: tool "devpod__read_file" works in a dev pod`) {
 		t.Fatalf("forwarded tools = %v, tool message = %v", g.names, messages[3]["content"])
 	}
 }
@@ -484,16 +497,16 @@ func TestTeamTurnBlockedReasonIsTheAnswer(t *testing.T) {
 	if strings.Join(g.names, ",") != "report_blocked,send_message" {
 		t.Fatalf("forwarded tools = %v", g.names)
 	}
-	if c := g.calls[1]; c["channel"] != "coder--lead" || c["text"] != "The repository has no tests folder." || c["member"] != "coder" {
+	if c := g.calls[1]; c["channel"] != coderLeadChannel || c["text"] != "The repository has no tests folder." || c["member"] != coderMember {
 		t.Fatalf("send_message arguments = %v", c)
 	}
 	_, messages := storedMember(t, f, teamPath+"/members/coder.json")
-	if len(messages) != 5 || messages[3]["tool_call_id"] != "ca" || messages[4]["tool_call_id"] != "cb" || !strings.HasPrefix(messages[4]["content"].(string), "Not run:") {
+	if len(messages) != 5 || messages[3]["tool_call_id"] != "ca" || messages[4]["tool_call_id"] != "cb" || !strings.HasPrefix(jsonString(t, messages[4]["content"]), "Not run:") {
 		t.Fatalf("messages = %v", messages)
 	}
 }
 
-func rejectionRequest(f *fakes) StepRequest {
+func rejectionRequest(f *fakes) *StepRequest {
 	f.blobs["runs/t1/review.1"] = []byte(`{"step":"review","decision":"reject","comment":"The payment date is missing.","decided_by":"flo"}`)
 	f.blobs["runs/t1/plan.round-1"] = []byte("old plan")
 	f.blobs["runs/t1/check.round-1"] = []byte("check report")
@@ -501,9 +514,9 @@ func rejectionRequest(f *fakes) StepRequest {
 	// The marked items are rendered after the normal inputs, wherever they stand in the list.
 	req.Inputs = []InputItem{
 		{Source: "input", Artifact: "runs/t1/input", Round: 1},
-		{Source: "review", Artifact: "runs/t1/review.1", Round: 1, Kind: "rejection"},
-		{Source: "plan", Artifact: "runs/t1/plan.round-1", Round: 1, Kind: "previous"},
-		{Source: "check", Artifact: "runs/t1/check.round-1", Round: 1, Kind: "reviewed"},
+		{Source: "review", Artifact: "runs/t1/review.1", Round: 1, Kind: inputKindRejection},
+		{Source: "plan", Artifact: "runs/t1/plan.round-1", Round: 1, Kind: inputKindPrevious},
+		{Source: "check", Artifact: "runs/t1/check.round-1", Round: 1, Kind: inputKindReviewed},
 		{Source: "intake", Artifact: "runs/t1/intake", Round: 1},
 	}
 	return req
@@ -515,7 +528,7 @@ func TestStepRequestReadsTheItemKind(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
 		t.Fatal(err)
 	}
-	if req.Inputs[0].Kind != "" || req.Inputs[1].Kind != "rejection" {
+	if req.Inputs[0].Kind != "" || req.Inputs[1].Kind != inputKindRejection {
 		t.Fatalf("inputs = %+v", req.Inputs)
 	}
 }
@@ -576,7 +589,7 @@ func TestFirstMessageWithARejectionEndsWithTheDevPodNote(t *testing.T) {
 	f := newFakes(t, devPodAgentJSON, respond(finalResponse))
 	devPodMCP(t, f)
 	req := rejectionRequest(f)
-	req.DevPod = "pod-1"
+	req.DevPod = testPod
 	if _, err := f.svc.Process(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}

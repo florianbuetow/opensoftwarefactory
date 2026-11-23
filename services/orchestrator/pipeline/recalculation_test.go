@@ -30,7 +30,7 @@ func TestRecalculationBatchUsesPinnedBoundedContract(t *testing.T) {
 		return &http.Response{StatusCode: 200, Status: "OK", Body: io.NopCloser(strings.NewReader(`{"processed":10,"pending":0,"done":true}`)), Header: make(http.Header)}, nil
 	})}
 	a := Activities{EvaluationURL: "http://evaluation:8080", HTTPClient: client}
-	out, err := a.RecalculationBatch(context.Background(), RecalculationInput{ID: "job-1", DisplayCurrency: "EUR", Cursor: "20", Limit: 100})
+	out, err := a.RecalculationBatch(context.Background(), &RecalculationInput{ID: "job-1", DisplayCurrency: "EUR", Cursor: "20", Limit: 100})
 	if err != nil || !out.Done || out.Processed != 10 {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}
@@ -47,7 +47,7 @@ func TestRecalculationWaitsForProjectionCompletion(t *testing.T) {
 		}
 		return RecalculationBatchResult{Done: true, Status: "complete"}, nil
 	}, activity.RegisterOptions{Name: RecalculationBatchActivity})
-	env.ExecuteWorkflow(Recalculation, RecalculationInput{ID: "job", DisplayCurrency: "EUR"})
+	env.ExecuteWorkflow(Recalculation, &RecalculationInput{ID: "job", DisplayCurrency: "EUR"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}

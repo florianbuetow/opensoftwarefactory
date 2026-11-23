@@ -36,12 +36,11 @@ var podNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`
 //	/api/cluster/events            /api/v1/namespaces/<ns>/events
 //	/api/cluster/pods/{name}/log   /api/v1/namespaces/<ns>/pods/{name}/log
 type clusterProxy struct {
-	apiBase string // https://host:port, empty outside a cluster
-	dir     string // service account directory
 	logger  *slog.Logger
-
-	mu     sync.Mutex
-	client *http.Client
+	client  *http.Client // built on first use, guarded by mu
+	apiBase string       // https://host:port, empty outside a cluster
+	dir     string       // service account directory
+	mu      sync.Mutex
 }
 
 // inClusterAPI returns the API server URL from the environment Kubernetes sets.
@@ -82,7 +81,7 @@ func (c *clusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, http.NoBody)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -95,7 +94,11 @@ func (c *clusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes API unavailable"})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Error("closing kubernetes response", "path", resource, "error", closeErr)
+		}
+	}()
 	if resp.StatusCode >= 400 {
 		// Kubernetes errors are Status objects; hand the UI their message as {"error": ...}.
 		var status struct {
@@ -145,8 +148,14 @@ func clusterRoute(path string, q url.Values) (string, url.Values, bool) {
 }
 
 // read returns a trimmed service account file. The token rotates, so it is read on every request.
-func (c *clusterProxy) read(name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(c.dir, name))
+// The read cannot leave the service account directory.
+func (c *clusterProxy) read(name string) (_ string, err error) {
+	root, err := os.OpenRoot(c.dir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = closeAfter(err, root) }()
+	data, err := root.ReadFile(name)
 	return strings.TrimSpace(string(data)), err
 }
 

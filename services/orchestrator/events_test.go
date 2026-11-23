@@ -23,8 +23,8 @@ import (
 )
 
 type eventMemoryStore struct {
-	mu   sync.Mutex
 	data map[string][]byte
+	mu   sync.Mutex
 }
 
 func (s *eventMemoryStore) Put(_ context.Context, id string, data []byte, _ pipeline.Meta) error {
@@ -44,8 +44,8 @@ func (s *eventMemoryStore) Get(_ context.Context, id string) ([]byte, error) {
 	return append([]byte{}, data...), nil
 }
 
-func (s *eventMemoryStore) GetWithRevision(ctx context.Context, id string) ([]byte, string, error) {
-	data, err := s.Get(ctx, id)
+func (s *eventMemoryStore) GetWithRevision(ctx context.Context, id string) (data []byte, revision string, err error) {
+	data, err = s.Get(ctx, id)
 	return data, "r", err
 }
 
@@ -70,7 +70,7 @@ func (s *eventMemoryStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *eventMemoryStore) List(_ context.Context, prefix string) ([]string, []string, error) {
+func (s *eventMemoryStore) List(_ context.Context, prefix string) (dirs, objects []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var ids []string
@@ -85,14 +85,14 @@ func (s *eventMemoryStore) List(_ context.Context, prefix string) ([]string, []s
 type recordingPublisher struct {
 	subject string
 	payload []byte
-	calls   int
+	calls   uint64
 }
 
 func (p *recordingPublisher) Publish(_ context.Context, subject string, payload []byte, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	p.subject = subject
 	p.payload = append([]byte{}, payload...)
 	p.calls++
-	return &jetstream.PubAck{Stream: "EVENTS", Sequence: uint64(p.calls)}, nil
+	return &jetstream.PubAck{Stream: "EVENTS", Sequence: p.calls}, nil
 }
 
 func TestPendingPublicationCompletesIndependentlyOfVisibilityScan(t *testing.T) {

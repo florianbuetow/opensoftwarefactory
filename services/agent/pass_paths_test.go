@@ -47,7 +47,7 @@ func TestChatWorksWithAPassSession(t *testing.T) {
 	}
 	var system map[string]string
 	_ = json.Unmarshal(log.Messages[0], &system)
-	if log.Session != "user-sessions/t1/talk.pass-2" || log.StepID != "talk" || log.TraceID != "t1" ||
+	if log.Session != "user-sessions/t1/talk.pass-2" || log.StepID != chatStep || log.TraceID != "t1" ||
 		!strings.Contains(system["content"], "`user-sessions/t1/talk.pass-2/files/`") {
 		t.Fatalf("log = %+v, system = %q", log, system["content"])
 	}
@@ -55,22 +55,22 @@ func TestChatWorksWithAPassSession(t *testing.T) {
 
 func TestTeamTurnWorksWithAPassTeam(t *testing.T) {
 	f := teamFakes(t, chatAgentJSON, respond(finalResponse))
-	const passTeam = "teams/t1/build.pass-2"
+	const rerunTeam = "teams/t1/build.pass-2"
 	// The same team, stored under the path of the second pass.
 	for id, data := range f.blobs {
 		if strings.HasPrefix(id, teamPath+"/") {
-			f.blobs[passTeam+strings.TrimPrefix(id, teamPath)] = data
+			f.blobs[rerunTeam+strings.TrimPrefix(id, teamPath)] = data
 			delete(f.blobs, id)
 		}
 	}
 	req := leadTurn()
-	req.Team = passTeam
+	req.Team = rerunTeam
 	res, err := f.svc.TeamTurn(context.Background(), req)
 	if err != nil || res.ModelCalls != 1 {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
-	log, messages := storedMember(t, f, passTeam+"/members/lead.json")
-	if log.Member != "lead" || len(messages) < 3 || !strings.Contains(messages[0]["content"].(string), "in the team `"+passTeam+"`") {
+	log, messages := storedMember(t, f, rerunTeam+"/members/lead.json")
+	if log.Member != leadMember || len(messages) < 3 || !strings.Contains(jsonString(t, messages[0]["content"]), "in the team `"+rerunTeam+"`") {
 		t.Fatalf("log = %+v, messages = %v", log, messages)
 	}
 }

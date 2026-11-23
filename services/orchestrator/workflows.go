@@ -22,16 +22,16 @@ type workflowView struct {
 	Versions []int `json:"versions"`
 }
 
-func (c Config) view(d pipeline.Definition) workflowView {
-	return workflowView{Definition: d, Versions: c.versions(d.Name)}
+func (c Config) view(d *pipeline.Definition) workflowView {
+	return workflowView{Definition: *d, Versions: c.versions(d.Name)}
 }
 
 // statusError is an error with the HTTP status it is answered with. Workflows names the
 // workflows that stand in the way, for a conflict.
 type statusError struct {
-	status    int
 	err       error
 	workflows []string
+	status    int
 }
 
 func (e *statusError) Error() string { return e.err.Error() }
@@ -77,8 +77,9 @@ func (s *server) getWorkflows(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	views := []workflowView{}
-	for _, d := range pipeline.Newest(c.Workflows) {
-		views = append(views, c.view(d))
+	newest := pipeline.Newest(c.Workflows)
+	for i := range newest {
+		views = append(views, c.view(&newest[i]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workflows": views})
 }
@@ -96,7 +97,7 @@ func (s *server) getWorkflowVersion(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusNotFound, errors.New("unknown workflow version"))
 		return
 	}
-	writeJSON(w, http.StatusOK, c.view(def))
+	writeJSON(w, http.StatusOK, c.view(&def))
 }
 
 func descriptionHasLineBreaks(description string) bool {
@@ -139,7 +140,7 @@ func (s *server) patchWorkflowDescription(w http.ResponseWriter, r *http.Request
 			def := &c.Workflows[i]
 			if def.Name == r.PathValue("name") && def.Version == version {
 				def.Description = *body.Description
-				stored = c.view(*def)
+				stored = c.view(def)
 				return nil
 			}
 		}
@@ -180,7 +181,7 @@ func (s *server) postWorkflowVersion(w http.ResponseWriter, r *http.Request) {
 		c.Workflows = append(c.Workflows, def)
 		// A reference without a version names the newest version at the time of saving.
 		pipeline.PinReferences(c.Workflows)
-		stored = c.view(c.Workflows[len(c.Workflows)-1])
+		stored = c.view(&c.Workflows[len(c.Workflows)-1])
 		return nil
 	})
 	if err != nil {
@@ -212,7 +213,7 @@ func (s *server) renameWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 		// The stored versions are valid, so this checks the new name.
 		candidate.Name = renamed
-		if err := pipeline.Validate(candidate); err != nil {
+		if err := pipeline.Validate(&candidate); err != nil {
 			return &statusError{status: http.StatusUnprocessableEntity, err: err}
 		}
 		for _, other := range c.Workflows {
@@ -262,7 +263,7 @@ func (s *server) renameWorkflow(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		newest, _ := c.find(renamed, 0)
-		stored = c.view(newest)
+		stored = c.view(&newest)
 		return nil
 	})
 	if err != nil {
@@ -282,7 +283,9 @@ func (s *server) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 			return refuse(http.StatusNotFound, "unknown workflow")
 		}
 		users := []string{}
-		for _, newest := range pipeline.Newest(c.Workflows) {
+		heads := pipeline.Newest(c.Workflows)
+		for i := range heads {
+			newest := &heads[i]
 			if newest.Name == name {
 				continue
 			}

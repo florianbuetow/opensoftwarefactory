@@ -13,6 +13,7 @@ function setup() {
     loadBlob: async () => ({ text: "{{task}}" }),
     creatorHeaders: () => ({ "X-Creator": "ada" }),
     runIndex: { refresh: async () => {} },
+    location: { hash: "#workflows/demo" },
     setSaveState() {}, setStatus(message) { context.error = message; },
     document: { dispatchEvent() {} }, CustomEvent: class { constructor(type, init) { Object.assign(this, { type }, init); } },
     localStorage: { getItem: () => JSON.stringify({ mode: "text", text: "Fix the bug", template: "default" }), setItem() {} },
@@ -50,4 +51,12 @@ test("the Text input takes a file from the file dialog or a drop, and only a tex
   assert.match(source, /takeFile = async \(file\) => \{\s*if \(!file\) return;\s*if \(!isText\(file\)\) \{ setStatus\(`Not added: \$\{file\.name\} \(not a text file\)`, "error"\); return; \}/);
   const css = fs.readFileSync(new URL("web/style.css", import.meta.url), "utf8");
   assert.match(css, /\.inputs-text\.drop \{ outline: 2px dashed var\(--accent\)/);
+});
+
+test("a started run opens on Runs, as whatever is created opens", async () => {
+  const { Inputs, context } = setup();
+  await Inputs.runAgain("ecc/ECC-plan", 3);
+  assert.equal(context.error, undefined);
+  assert.equal(context.location.hash, "#runs/t1", "the new run, by the trace ID the orchestrator returned");
+  assert.match(source, /location\.hash = started === 1 && last \? `#runs\/\$\{encodeURIComponent\(last\)\}` : `#runs\?workflow=\$\{encodeURIComponent\(workflow\)\}`;/, "several runs open as the workflow's runs");
 });

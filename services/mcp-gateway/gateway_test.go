@@ -67,11 +67,13 @@ func TestConfigurationFailures(t *testing.T) {
 				w.WriteHeader(404)
 				return
 			}
-			w.Write(b)
+			if _, err := w.Write(b); err != nil {
+				t.Error(err)
+			}
 		}
 	}))
 	defer blob.Close()
-	g := newGateway(blobStore{blob.URL, blob.Client()}, slog.Default())
+	g := newGateway(blobStore{base: blob.URL, client: blob.Client()}, slog.Default())
 	defer g.close()
 	srv := httptest.NewServer(g.routes())
 	defer srv.Close()
@@ -98,16 +100,46 @@ func TestConfigurationFailures(t *testing.T) {
 	}
 }
 
+// closeResponse closes a response body and reports a close failure on the test.
+// The response is nil when the request was expected to fail.
+func closeResponse(t *testing.T, res *http.Response) {
+	t.Helper()
+	if res == nil {
+		return
+	}
+	if err := res.Body.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+// closeUpstream closes an upstream and reports a close failure on the test.
+func closeUpstream(t *testing.T, u upstream) {
+	t.Helper()
+	if err := u.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+// newRequest builds a request that carries a context.
+func newRequest(t *testing.T, method, url string, body io.Reader) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), method, url, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
 func requestJSON(t *testing.T, method, url string, value any, status int) []byte {
 	t.Helper()
 	data, _ := json.Marshal(value)
-	req, _ := http.NewRequest(method, url, bytes.NewReader(data))
+	req := newRequest(t, method, url, bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer closeResponse(t, res)
 	body, _ := io.ReadAll(res.Body)
 	if res.StatusCode != status {
 		t.Fatalf("%s %s: %d want %d: %s", method, url, res.StatusCode, status, body)
@@ -118,14 +150,14 @@ func requestJSON(t *testing.T, method, url string, value any, status int) []byte
 func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []byte {
 	t.Helper()
 	init := initializeRequest("test-init")
-	initReq, _ := http.NewRequest("POST", url, bytes.NewReader(init))
+	initReq := newRequest(t, "POST", url, bytes.NewReader(init))
 	initReq.Header = protocolHeaders(true)
 	initRes, err := http.DefaultClient.Do(initReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	initBody, _ := io.ReadAll(initRes.Body)
-	initRes.Body.Close()
+	closeResponse(t, initRes)
 	if initRes.StatusCode != http.StatusOK {
 		if initRes.StatusCode == status {
 			return initBody
@@ -133,7 +165,7 @@ func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []by
 		t.Fatalf("initialize: %d", initRes.StatusCode)
 	}
 	session := initRes.Header.Get("Mcp-Session-Id")
-	notify, _ := http.NewRequest("POST", url, bytes.NewReader(initializedNotification()))
+	notify := newRequest(t, "POST", url, bytes.NewReader(initializedNotification()))
 	notify.Header = protocolHeaders(false)
 	if session != "" {
 		notify.Header.Set("Mcp-Session-Id", session)
@@ -142,12 +174,12 @@ func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []by
 	if err != nil {
 		t.Fatal(err)
 	}
-	notifyRes.Body.Close()
+	closeResponse(t, notifyRes)
 	if notifyRes.StatusCode != http.StatusAccepted {
 		t.Fatalf("initialized: %d", notifyRes.StatusCode)
 	}
-	payload := map[string]any{"jsonrpc": "2.0", "id": "connection-test", "method": method, "params": map[string]any{}}
-	params := payload["params"].(map[string]any)
+	params := map[string]any{}
+	payload := map[string]any{"jsonrpc": "2.0", "id": "connection-test", "method": method, "params": params}
 	if name != "" {
 		params["name"] = name
 		params["arguments"] = map[string]any{"text": "hello"}
@@ -156,7 +188,7 @@ func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []by
 		params["cursor"] = cursor
 	}
 	data, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(data))
+	req := newRequest(t, "POST", url, bytes.NewReader(data))
 	req.Header = protocolHeaders(false)
 	if session != "" {
 		req.Header.Set("Mcp-Session-Id", session)
@@ -165,7 +197,7 @@ func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []by
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer closeResponse(t, res)
 	body, _ := io.ReadAll(res.Body)
 	if res.StatusCode != status {
 		t.Fatalf("%s %s: %d want %d: %s", method, name, res.StatusCode, status, body)
@@ -191,7 +223,9 @@ func freeAddr(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addr := l.Addr().String()
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return addr
 }
 
@@ -209,9 +243,9 @@ func launch(t *testing.T, bin string, args ...string) {
 func waitHTTP(t *testing.T, url string) {
 	t.Helper()
 	for i := 0; i < 100; i++ {
-		r, err := http.Get(url)
+		r, err := http.DefaultClient.Do(newRequest(t, http.MethodGet, url, http.NoBody))
 		if err == nil {
-			r.Body.Close()
+			closeResponse(t, r)
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -230,7 +264,7 @@ func TestGatewayRealBlobstoreAndExternalServers(t *testing.T) {
 	launch(t, mockBin, "-http", mockAddr)
 	mockURL := "http://" + mockAddr
 	waitHTTP(t, mockURL+"/calls")
-	store := blobStore{blobURL, &http.Client{Timeout: 5 * time.Second}}
+	store := blobStore{base: blobURL, client: &http.Client{Timeout: 5 * time.Second}}
 	g := newGateway(store, slog.Default())
 	if err := g.load(context.Background()); err != nil {
 		t.Fatal(err)
@@ -279,7 +313,7 @@ func TestGatewayRealBlobstoreAndExternalServers(t *testing.T) {
 	if string(bytes.TrimSpace(calls)) != `["echo"]` {
 		t.Fatal(string(calls))
 	}
-	data, err := os.ReadFile(callsFile)
+	data, err := os.ReadFile(filepath.Clean(callsFile))
 	if err != nil || string(data) != "echo\n" {
 		t.Fatalf("stdio calls %q: %v", data, err)
 	}
@@ -303,34 +337,43 @@ func TestSSEFilteringAndIncrementalDelivery(t *testing.T) {
 	defer close(done)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintln(w, `data: {"jsonrpc":"2.0","id":"connection-test","result":{"tools":[{"name":"echo"},{"name":"blocked"}],"nextCursor":"next"}}`)
-		fmt.Fprintln(w)
-		w.(http.Flusher).Flush()
+		if _, err := fmt.Fprintln(w, `data: {"jsonrpc":"2.0","id":"connection-test","result":{"tools":[{"name":"echo"},{"name":"blocked"}],"nextCursor":"next"}}`); err != nil {
+			t.Error(err)
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			t.Error(err)
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+		}
 		select {
 		case <-done:
 		case <-r.Context().Done():
 		}
 	}))
 	defer up.Close()
-	u, err := newUpstream(Connection{Transport: "streamable-http", URL: up.URL})
+	u, err := newUpstream(&Connection{Transport: "streamable-http", URL: up.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
 	g := newGateway(blobStore{}, slog.Default())
-	g.entries["test"] = &entry{Config{Allowlist: []string{"echo"}}, u}
+	g.entries["test"] = &entry{config: Config{Allowlist: []string{"echo"}}, upstream: u}
 	defer g.close()
 	srv := httptest.NewServer(g.routes())
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	payload := []byte(`{"jsonrpc":"2.0","id":"connection-test","method":"tools/list","params":{}}`)
-	req, _ := http.NewRequestWithContext(ctx, "POST", srv.URL+"/mcp/test", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", srv.URL+"/mcp/test", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
 	req.Header = protocolHeaders(false)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer closeResponse(t, res)
 	result, err := readRPCResponse(res, json.RawMessage(`"connection-test"`))
 	if err != nil {
 		t.Fatal(err)
@@ -361,10 +404,12 @@ func TestProxyLogsCorrelatedToolOutcomeWithoutArguments(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"private failure detail"}]}}`)
+		if _, err := fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"private failure detail"}]}}`); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer up.Close()
-	u, err := newUpstream(Connection{Transport: "streamable-http", URL: up.URL})
+	u, err := newUpstream(&Connection{Transport: "streamable-http", URL: up.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +420,7 @@ func TestProxyLogsCorrelatedToolOutcomeWithoutArguments(t *testing.T) {
 	srv := httptest.NewServer(g.routes())
 	defer srv.Close()
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lookup","arguments":{"secret":"do not log"}}}`
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/mcp/docs", strings.NewReader(body))
+	req := newRequest(t, http.MethodPost, srv.URL+"/mcp/docs", strings.NewReader(body))
 	req.Header = protocolHeaders(false)
 	req.Header.Set("Traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
 	req.Header.Set("X-Trace-Id", "run-123")
@@ -385,7 +430,7 @@ func TestProxyLogsCorrelatedToolOutcomeWithoutArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	closeResponse(t, res)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", res.StatusCode)
 	}
@@ -457,7 +502,7 @@ func TestHTTPGatewayForwardsAndClosesSession(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer upstream.Close()
-	u, err := newUpstream(Connection{Transport: "streamable-http", URL: upstream.URL})
+	u, err := newUpstream(&Connection{Transport: "streamable-http", URL: upstream.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,31 +512,31 @@ func TestHTTPGatewayForwardsAndClosesSession(t *testing.T) {
 	srv := httptest.NewServer(g.routes())
 	defer srv.Close()
 	init := initializeRequest("test-init")
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/mcp/remote", bytes.NewReader(init))
+	req := newRequest(t, http.MethodPost, srv.URL+"/mcp/remote", bytes.NewReader(init))
 	req.Header = protocolHeaders(true)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	closeResponse(t, res)
 	if res.Header.Get("Mcp-Session-Id") != "s1" {
 		t.Fatal("session was not returned")
 	}
-	closeReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/mcp/remote", nil)
+	closeReq := newRequest(t, http.MethodDelete, srv.URL+"/mcp/remote", http.NoBody)
 	closeReq.Header.Set("Mcp-Session-Id", "s1")
 	closeRes, err := http.DefaultClient.Do(closeReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	closeRes.Body.Close()
+	closeResponse(t, closeRes)
 	if closeRes.StatusCode != http.StatusNoContent || !deleted {
 		t.Fatalf("delete status=%d deleted=%v", closeRes.StatusCode, deleted)
 	}
-	getRes, err := http.Get(srv.URL + "/mcp/remote")
+	getRes, err := http.DefaultClient.Do(newRequest(t, http.MethodGet, srv.URL+"/mcp/remote", http.NoBody))
 	if err != nil {
 		t.Fatal(err)
 	}
-	getRes.Body.Close()
+	closeResponse(t, getRes)
 	if getRes.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET status %d", getRes.StatusCode)
 	}

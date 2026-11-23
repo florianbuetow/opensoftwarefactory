@@ -40,32 +40,33 @@ const (
 
 var workflowEventNamespace = uuid.MustParse("17972ed2-7116-5c0a-8834-73ccf87a15ae")
 
+// WorkflowEvent is the lifecycle event published when a workflow execution starts or finishes.
 type WorkflowEvent struct {
-	SchemaVersion     int       `json:"schema_version"`
 	ID                string    `json:"id"`
 	Type              string    `json:"type"`
 	RunID             string    `json:"run_id"`
 	ExecutionID       string    `json:"execution_id"`
 	ParentExecutionID string    `json:"parent_execution_id,omitempty"`
 	Workflow          string    `json:"workflow"`
-	WorkflowVersion   int       `json:"workflow_version"`
 	TraceID           string    `json:"trace_id,omitempty"`
 	OccurredAt        time.Time `json:"occurred_at"`
 	Status            string    `json:"status"`
+	SchemaVersion     int       `json:"schema_version"`
+	WorkflowVersion   int       `json:"workflow_version"`
 }
 
 type workflowEventPublication struct {
-	Event       WorkflowEvent `json:"event"`
 	PublishedAt *time.Time    `json:"published_at,omitempty"`
+	Event       WorkflowEvent `json:"event"`
 }
 
 type knownOpenExecution struct {
 	WorkflowID      string    `json:"workflow_id"`
 	ExecutionID     string    `json:"execution_id"`
 	RunID           string    `json:"run_id"`
+	AcceptedAt      time.Time `json:"accepted_at"`
 	Workflow        string    `json:"workflow"`
 	WorkflowVersion int       `json:"workflow_version"`
-	AcceptedAt      time.Time `json:"accepted_at"`
 }
 
 type executionMeasurementDelivery struct {
@@ -81,12 +82,12 @@ type eventService struct {
 	temporal      eventTemporal
 	store         eventStore
 	js            eventPublisher
-	interval      time.Duration
 	log           *slog.Logger
 	http          *http.Client
 	evaluationURL string
-	mu            sync.RWMutex
 	health        eventHealth
+	interval      time.Duration
+	mu            sync.RWMutex
 }
 type eventTemporal interface {
 	ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error)
@@ -104,10 +105,10 @@ type eventPublisher interface {
 }
 
 type eventHealth struct {
-	Pending       int       `json:"pending"`
 	OldestPending time.Time `json:"oldest_pending,omitempty"`
 	LastProgress  time.Time `json:"last_progress,omitempty"`
 	LastError     string    `json:"last_error,omitempty"`
+	Pending       int       `json:"pending"`
 }
 
 func natsOptionsFromEnv() ([]nats.Option, error) {
@@ -175,9 +176,14 @@ func (s *eventService) run(ctx context.Context) {
 
 func (s *eventService) maintenanceCycle(ctx context.Context) {
 	actions := []struct {
-		name string
 		run  func(context.Context) error
-	}{{"accepted run metadata recovery", s.recoverRunStarts}, {"pending workflow event publication", s.publishPending}, {"pending execution measurement delivery", s.deliverMeasurements}, {"workflow event reconciliation", s.reconcileOnce}}
+		name string
+	}{
+		{name: "accepted run metadata recovery", run: s.recoverRunStarts},
+		{name: "pending workflow event publication", run: s.publishPending},
+		{name: "pending execution measurement delivery", run: s.deliverMeasurements},
+		{name: "workflow event reconciliation", run: s.reconcileOnce},
+	}
 	healthy := true
 	for _, action := range actions {
 		if err := action.run(ctx); err != nil {
@@ -225,23 +231,27 @@ func (s *eventService) recoverRunStarts(ctx context.Context) error {
 		record, _ := json.MarshalIndent(obligation.Run, "", "  ")
 		metadata, _ := json.MarshalIndent(obligation.Metadata, "", "  ")
 		prefix := pipeline.RunPrefix(obligation.Run.TraceID)
-		if err = s.store.Put(ctx, pipeline.ArtifactID(prefix, "run.json"), record, pipeline.Meta{Creator: obligation.Run.StartedBy, TraceID: obligation.Run.TraceID}); err != nil {
+		err = s.store.Put(ctx, pipeline.ArtifactID(prefix, "run.json"), record, pipeline.Meta{Creator: obligation.Run.StartedBy, TraceID: obligation.Run.TraceID})
+		if err != nil {
 			return err
 		}
-		if err = s.store.Put(ctx, pipeline.ArtifactID(prefix, pipeline.MetadataFile), metadata, pipeline.Meta{Creator: obligation.Run.StartedBy, TraceID: obligation.Run.TraceID}); err != nil {
+		err = s.store.Put(ctx, pipeline.ArtifactID(prefix, pipeline.MetadataFile), metadata, pipeline.Meta{Creator: obligation.Run.StartedBy, TraceID: obligation.Run.TraceID})
+		if err != nil {
 			return err
 		}
-		if err = s.acceptExecution(ctx, knownOpenExecution{WorkflowID: obligation.Run.TraceID, ExecutionID: exec.GetRunId(), RunID: obligation.Run.TraceID, Workflow: obligation.Run.Workflow, WorkflowVersion: obligation.Run.WorkflowVersion, AcceptedAt: obligation.Run.Started}); err != nil {
+		err = s.acceptExecution(ctx, &knownOpenExecution{WorkflowID: obligation.Run.TraceID, ExecutionID: exec.GetRunId(), RunID: obligation.Run.TraceID, Workflow: obligation.Run.Workflow, WorkflowVersion: obligation.Run.WorkflowVersion, AcceptedAt: obligation.Run.Started})
+		if err != nil {
 			return err
 		}
-		if err = s.store.Delete(ctx, id); err != nil {
+		err = s.store.Delete(ctx, id)
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *eventService) acceptExecution(ctx context.Context, accepted knownOpenExecution) error {
+func (s *eventService) acceptExecution(ctx context.Context, accepted *knownOpenExecution) error {
 	data, _ := json.MarshalIndent(accepted, "", "  ")
 	if _, err := s.store.PutIfAbsent(ctx, workflowOpenPrefix+"/"+accepted.ExecutionID+".json", data, pipeline.Meta{Creator: "orchestrator"}); err != nil && !errors.Is(err, pipeline.ErrPreconditionFailed) {
 		return err
@@ -304,11 +314,13 @@ func (s *eventService) reconcileKnownOpen(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		if err = s.persistExecution(ctx, desc.GetWorkflowExecutionInfo()); err != nil {
+		err = s.persistExecution(ctx, desc.GetWorkflowExecutionInfo())
+		if err != nil {
 			return err
 		}
 		if desc.GetWorkflowExecutionInfo().GetCloseTime() != nil {
-			if err = s.store.Delete(ctx, id); err != nil {
+			err = s.store.Delete(ctx, id)
+			if err != nil {
 				return err
 			}
 		}
@@ -320,7 +332,9 @@ func (s *eventService) persistExecution(ctx context.Context, info *workflowpb.Wo
 	if err := s.persistExecutionIdentity(ctx, info); err != nil {
 		return err
 	}
-	for _, event := range eventsForExecution(info) {
+	events := eventsForExecution(info)
+	for i := range events {
+		event := &events[i]
 		if rootBlockedEligible(event) {
 			data, readErr := s.store.Get(ctx, pipeline.ArtifactID(pipeline.RunPrefix(event.RunID), pipeline.MetadataFile))
 			if readErr != nil {
@@ -345,7 +359,7 @@ func (s *eventService) persistExecution(ctx context.Context, info *workflowpb.Wo
 		} else if !errors.Is(publishedErr, pipeline.ErrNotFound) {
 			return publishedErr
 		}
-		data, _ := json.MarshalIndent(workflowEventPublication{Event: event}, "", "  ")
+		data, _ := json.MarshalIndent(workflowEventPublication{Event: *event}, "", "  ")
 		if _, err := s.store.PutIfAbsent(ctx, workflowEventPrefix+"/"+event.ID+".json", data, pipeline.Meta{Creator: "orchestrator"}); err != nil && !errors.Is(err, pipeline.ErrPreconditionFailed) {
 			return err
 		}
@@ -379,7 +393,7 @@ func (s *eventService) persistExecutionIdentity(ctx context.Context, info *workf
 	return s.store.Put(ctx, workflowExecutionPrefix+"/"+event.ExecutionID+".json", data, pipeline.Meta{Creator: "orchestrator"})
 }
 
-func rootBlockedEligible(event WorkflowEvent) bool {
+func rootBlockedEligible(event *WorkflowEvent) bool {
 	return event.Type == "workflow.finished" && event.Status == "completed" && event.ParentExecutionID == ""
 }
 
@@ -467,12 +481,12 @@ func executionMeasurementForInfo(info *workflowpb.WorkflowExecutionInfo) (map[st
 		return nil, false
 	}
 	event := events[len(events)-1]
-	start, close := info.GetStartTime().AsTime(), info.GetCloseTime().AsTime()
-	duration := close.Sub(start).Milliseconds()
+	start, end := info.GetStartTime().AsTime(), info.GetCloseTime().AsTime()
+	duration := end.Sub(start).Milliseconds()
 	if duration < 0 {
 		duration = 0
 	}
-	measurement := map[string]any{"schema_version": 1, "id": event.ExecutionID, "kind": "execution", "run_id": event.RunID, "execution_id": event.ExecutionID, "workflow": event.Workflow, "workflow_version": event.WorkflowVersion, "trace_id": event.TraceID, "occurred_at": close.Format(time.RFC3339Nano), "duration_ms": duration, "status": "reported", "missing": []string{}}
+	measurement := map[string]any{"schema_version": 1, "id": event.ExecutionID, "kind": "execution", "run_id": event.RunID, "execution_id": event.ExecutionID, "workflow": event.Workflow, "workflow_version": event.WorkflowVersion, "trace_id": event.TraceID, "occurred_at": end.Format(time.RFC3339Nano), "duration_ms": duration, "status": "reported", "missing": []string{}}
 	if event.ParentExecutionID != "" {
 		measurement["parent_execution_id"] = event.ParentExecutionID
 	}
@@ -504,7 +518,8 @@ func (s *eventService) deliverMeasurements(ctx context.Context) error {
 		measurementID, _ := delivery.Measurement["id"].(string)
 		receiptID := executionMeasurementDeliveredPrefix + "/" + measurementID + ".json"
 		if _, receiptErr := s.store.Get(ctx, receiptID); receiptErr == nil {
-			if err = s.store.Delete(ctx, id); err != nil {
+			err = s.store.Delete(ctx, id)
+			if err != nil {
 				return err
 			}
 			continue
@@ -530,7 +545,9 @@ func (s *eventService) deliverMeasurements(ctx context.Context) error {
 			return err
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return closeErr
+		}
 		if resp.StatusCode == http.StatusPreconditionFailed {
 			matched, verifyErr := verifyStoredMeasurement(ctx, client, base, measurementID, delivery.Measurement)
 			if verifyErr != nil {
@@ -542,7 +559,8 @@ func (s *eventService) deliverMeasurements(ctx context.Context) error {
 		} else if resp.StatusCode/100 != 2 {
 			return fmt.Errorf("evaluation measurement delivery answered %s: %s", resp.Status, bytes.TrimSpace(body))
 		}
-		if err = s.completeMeasurementDelivery(ctx, id, measurementID); err != nil {
+		err = s.completeMeasurementDelivery(ctx, id, measurementID)
+		if err != nil {
 			return err
 		}
 	}
@@ -557,8 +575,8 @@ func (s *eventService) completeMeasurementDelivery(ctx context.Context, pendingI
 	return s.store.Delete(ctx, pendingID)
 }
 
-func verifyStoredMeasurement(ctx context.Context, client *http.Client, base, id string, expected map[string]any) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/measurements/"+url.PathEscape(id), nil)
+func verifyStoredMeasurement(ctx context.Context, client *http.Client, base, id string, expected map[string]any) (matched bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/measurements/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
 		return false, err
 	}
@@ -566,7 +584,7 @@ func verifyStoredMeasurement(ctx context.Context, client *http.Client, base, id 
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
@@ -578,7 +596,8 @@ func verifyStoredMeasurement(ctx context.Context, client *http.Client, base, id 
 		return false, fmt.Errorf("verifying evaluation measurement %s: %s", id, resp.Status)
 	}
 	var actual, normalized map[string]any
-	if err = json.Unmarshal(data, &actual); err != nil {
+	err = json.Unmarshal(data, &actual)
+	if err != nil {
 		return false, err
 	}
 	encoded, _ := json.Marshal(expected)
@@ -635,13 +654,14 @@ func (s *eventService) publishPending(ctx context.Context) error {
 			return err
 		}
 		var publication workflowEventPublication
-		if err := json.Unmarshal(data, &publication); err != nil {
-			return fmt.Errorf("reading pending event %s: %w", id, err)
+		if decodeErr := json.Unmarshal(data, &publication); decodeErr != nil {
+			return fmt.Errorf("reading pending event %s: %w", id, decodeErr)
 		}
 		event := publication.Event
 		publishedID := workflowEventPublishedPrefix + "/" + event.ID + ".json"
 		if _, publishedErr := s.store.Get(ctx, publishedID); publishedErr == nil {
-			if err = s.store.Delete(ctx, id); err != nil {
+			err = s.store.Delete(ctx, id)
+			if err != nil {
 				return err
 			}
 			continue

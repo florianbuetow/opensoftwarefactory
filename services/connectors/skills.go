@@ -17,23 +17,23 @@ import (
 
 var (
 	skillPathSegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	skillVersion     = regexp.MustCompile(`^v[1-9][0-9]*$`)
+	skillVersion     = regexp.MustCompile(`^v[1-9]\d*$`)
 )
 
 type skillToolInput struct {
+	Args    map[string]json.RawMessage `json:"args"`
 	Tool    string                     `json:"tool"`
 	Agent   string                     `json:"agent"`
 	Run     string                     `json:"run"`
 	Pod     string                     `json:"pod"`
 	Skill   string                     `json:"skill"`
 	Version string                     `json:"version"`
-	Args    map[string]json.RawMessage `json:"args"`
 }
 
 type skillScriptResult struct {
-	ExitCode  int    `json:"exit_code"`
 	Stdout    string `json:"stdout"`
 	Stderr    string `json:"stderr"`
+	ExitCode  int    `json:"exit_code"`
 	StdoutCut bool   `json:"stdout_cut"`
 	StderrCut bool   `json:"stderr_cut"`
 	TimedOut  bool   `json:"timed_out"`
@@ -45,7 +45,7 @@ func (s *service) skillTool(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 400, err)
 		return
 	}
-	result, err := s.runSkillTool(r.Context(), in)
+	result, err := s.runSkillTool(r.Context(), &in)
 	if err != nil {
 		s.log.Info("skill tool call refused or failed", "tool", in.Tool, "skill", in.Skill,
 			"agent", in.Agent, "run", in.Run, "error", err)
@@ -55,7 +55,7 @@ func (s *service) skillTool(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "result": result})
 }
 
-func (s *service) runSkillTool(ctx context.Context, in skillToolInput) (any, error) {
+func (s *service) runSkillTool(ctx context.Context, in *skillToolInput) (any, error) {
 	if !contains(skillTools, in.Tool) {
 		return nil, fmt.Errorf("Refused: %q is not a skill tool. The tools are: %s.", in.Tool, strings.Join(skillTools, ", "))
 	}
@@ -80,13 +80,13 @@ func (s *service) runSkillTool(ctx context.Context, in skillToolInput) (any, err
 			return nil, missingSkillFile(in.Skill, file, files)
 		}
 		return content, nil
-	case "run_skill_script":
+	case toolRunSkillScript:
 		return s.runSkillScript(ctx, in)
 	}
 	panic("validated skill tool was not handled")
 }
 
-func (s *service) runSkillScript(ctx context.Context, in skillToolInput) (any, error) {
+func (s *service) runSkillScript(ctx context.Context, in *skillToolInput) (any, error) {
 	if in.Pod == "" {
 		return nil, errors.New("Refused: this run has no dev pod, so a skill script cannot run. The workflow needs a devpod step before this node.")
 	}
@@ -137,7 +137,7 @@ func (s *service) runSkillScript(ctx context.Context, in skillToolInput) (any, e
 	}
 	s.active(ctx, in.Pod)
 	defer s.active(ctx, in.Pod)
-	raw, err := s.opWithin(ctx, in.Pod, "run_skill_script", map[string]any{
+	raw, err := s.opWithin(ctx, in.Pod, toolRunSkillScript, map[string]any{
 		"files": files, "script": script, "args": arguments, "timeout_seconds": timeout,
 		"max_lines": s.cfg.skillOutputLines, "max_bytes": s.cfg.skillOutputBytes,
 	}, (time.Duration(timeout)+30)*time.Second)
@@ -153,19 +153,19 @@ func (s *service) runSkillScript(ctx context.Context, in skillToolInput) (any, e
 			script, timeout, result.Stdout, result.Stderr)
 	}
 	out := map[string]any{"exit_code": result.ExitCode, "stdout": result.Stdout, "stderr": result.Stderr}
-	if warning := skillOutputWarning(result, s.cfg); warning != "" {
+	if warning := skillOutputWarning(result, &s.cfg); warning != "" {
 		out["warning"] = warning
 	}
 	return out, nil
 }
 
-func (s *service) skillFiles(ctx context.Context, skill, version string) (map[string]string, error) {
+func (s *service) skillFiles(ctx context.Context, skill, version string) (files map[string]string, err error) {
 	segments := strings.Split(skill, "/")
 	for i := range segments {
 		segments[i] = url.PathEscape(segments[i])
 	}
 	endpoint := s.skillRegistry + "/skills/" + strings.Join(segments, "/") + "/" + url.PathEscape(version)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func (s *service) skillFiles(ctx context.Context, skill, version string) (map[st
 	if err != nil {
 		return nil, fmt.Errorf("Refused: skill %q version %s could not be read from the skill registry: %v. Try again.", skill, version, err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("Refused: skill %q version %s does not exist. Fix the agent to use a stored skill version.", skill, version)
 	}
@@ -184,7 +184,7 @@ func (s *service) skillFiles(ctx context.Context, skill, version string) (map[st
 	var stored struct {
 		Files map[string]string `json:"files"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&stored); err != nil || stored.Files == nil {
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&stored); decodeErr != nil || stored.Files == nil {
 		return nil, fmt.Errorf("Refused: skill %q version %s has an unreadable registry response. Fix the stored skill version.", skill, version)
 	}
 	return stored.Files, nil
@@ -239,7 +239,7 @@ func rawInt(args map[string]json.RawMessage, key string) int {
 	return value
 }
 
-func skillOutputWarning(result skillScriptResult, cfg config) string {
+func skillOutputWarning(result skillScriptResult, cfg *config) string {
 	parts := []string{}
 	if result.StdoutCut {
 		parts = append(parts, fmt.Sprintf("Standard output was longer than the limit. Only the last %d lines or %d bytes are shown.", cfg.skillOutputLines, cfg.skillOutputBytes))

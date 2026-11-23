@@ -31,22 +31,43 @@ func (s *service) projectionStreamName() string {
 	return projectionStream
 }
 
+// The phases of an hour's projection, in the order it passes through them.
+// The two ambiguous phases are terminal until an operator resolves them.
+const (
+	phaseSnapshotNeeded      = "snapshot_needed"
+	phaseSnapshotBuilding    = "snapshot_building"
+	phaseDeleteNeeded        = "delete_needed"
+	phaseDeleteSubmitting    = "delete_submitting"
+	phaseDeleteRequested     = "delete_requested"
+	phaseDeleteAmbiguous     = "delete_ambiguous"
+	phaseDeletionVerifying   = "deletion_verifying"
+	phaseReplayReady         = "replay_ready"
+	phaseIngestionSubmitting = "ingestion_submitting"
+	phaseIngestionSubmitted  = "ingestion_submitted"
+	phaseIngestionAmbiguous  = "ingestion_ambiguous"
+	phaseComplete            = "complete"
+)
+
+// streamAbsent stands in for a delete job id when OpenObserve has no stream to
+// delete from.
+const streamAbsent = "stream_absent"
+
 type projectionManifest struct {
 	Stream         string    `json:"stream"`
 	Hour           time.Time `json:"hour"`
-	Generation     int64     `json:"generation"`
 	Phase          string    `json:"phase"`
 	DeleteJobID    string    `json:"delete_job_id,omitempty"`
-	ExpectedIDs    []string  `json:"expected_ids,omitempty"`
-	PendingIDs     []string  `json:"pending_ids,omitempty"`
-	ReplayCursor   int       `json:"replay_cursor,omitempty"`
-	VerifyCursor   int       `json:"verify_cursor,omitempty"`
-	ActualIDs      []string  `json:"actual_ids,omitempty"`
 	SnapshotID     string    `json:"snapshot_id,omitempty"`
-	SnapshotChunks int       `json:"snapshot_chunks,omitempty"`
-	SnapshotCount  int       `json:"snapshot_count,omitempty"`
 	Error          string    `json:"error,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	ExpectedIDs    []string  `json:"expected_ids,omitempty"`
+	PendingIDs     []string  `json:"pending_ids,omitempty"`
+	ActualIDs      []string  `json:"actual_ids,omitempty"`
+	Generation     int64     `json:"generation"`
+	ReplayCursor   int       `json:"replay_cursor,omitempty"`
+	VerifyCursor   int       `json:"verify_cursor,omitempty"`
+	SnapshotChunks int       `json:"snapshot_chunks,omitempty"`
+	SnapshotCount  int       `json:"snapshot_count,omitempty"`
 }
 
 func projectionObject(hour time.Time) string {
@@ -67,21 +88,21 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 	hour = hour.UTC().Truncate(time.Hour)
 	id := s.projectionObject(hour)
 	stream := s.projectionStreamName()
-	m := projectionManifest{Stream: stream, Hour: hour, Generation: generation, Phase: "snapshot_needed", UpdatedAt: time.Now().UTC()}
+	m := projectionManifest{Stream: stream, Hour: hour, Generation: generation, Phase: phaseSnapshotNeeded, UpdatedAt: time.Now().UTC()}
 	condition := "*"
 	if object, err := s.readObject(ctx, id); err == nil {
 		if json.Unmarshal(object.Data, &m) != nil {
 			return false, errors.New("invalid projection manifest")
 		}
 		condition = object.Revision
-		if m.Phase == "complete" && m.Generation >= generation {
+		if m.Phase == phaseComplete && m.Generation >= generation {
 			return true, nil
 		}
 		if m.Generation < generation {
-			if m.Phase != "complete" {
+			if m.Phase != phaseComplete {
 				return false, nil
 			}
-			m.Generation, m.Phase, m.DeleteJobID, m.ExpectedIDs, m.Error = generation, "snapshot_needed", "", nil, ""
+			m.Generation, m.Phase, m.DeleteJobID, m.ExpectedIDs, m.Error = generation, phaseSnapshotNeeded, "", nil, ""
 			m.PendingIDs = nil
 			m.ActualIDs = nil
 			m.ReplayCursor = 0
@@ -101,6 +122,16 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 		}
 		return err
 	}
+	// recordFailure keeps a dependency failure in the manifest and leaves the
+	// hour in its phase, to be tried again on the next pass. The failure is
+	// then the manifest's to report, and this call returns no error for it.
+	recordFailure := func(cause error) (bool, error) {
+		m.Error = cause.Error()
+		if err := write(); err != nil {
+			return false, errors.Join(cause, err)
+		}
+		return false, nil
+	}
 	if condition == "*" {
 		if err := write(); err != nil {
 			return false, err
@@ -108,35 +139,32 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 	}
 	for step := 0; step < 4; step++ {
 		switch m.Phase {
-		case "snapshot_needed":
+		case phaseSnapshotNeeded:
 			m.SnapshotID = uuid.NewString()
-			m.Phase = "snapshot_building"
+			m.Phase = phaseSnapshotBuilding
 			m.Error = ""
 			if err := write(); err != nil {
 				return false, err
 			}
 			chunks, count, err := s.freezeProjectionSnapshot(ctx, hour, m.Generation, m.SnapshotID)
 			if err != nil {
-				m.Error = err.Error()
-				_ = write()
-				return false, nil
+				return recordFailure(err)
 			}
-			m.SnapshotChunks, m.SnapshotCount, m.Phase = chunks, count, "delete_needed"
-			if err = write(); err != nil {
+			m.SnapshotChunks, m.SnapshotCount, m.Phase = chunks, count, phaseDeleteNeeded
+			err = write()
+			if err != nil {
 				return false, err
 			}
-		case "snapshot_building":
-			m.Phase, m.SnapshotID, m.Error = "snapshot_needed", "", "interrupted snapshot build discarded before remote mutation"
+		case phaseSnapshotBuilding:
+			m.Phase, m.SnapshotID, m.Error = phaseSnapshotNeeded, "", "interrupted snapshot build discarded before remote mutation"
 			m.SnapshotChunks, m.SnapshotCount = 0, 0
 			if err := write(); err != nil {
 				return false, err
 			}
-		case "delete_needed":
+		case phaseDeleteNeeded:
 			quiescent, absent, qerr := s.projectionQuiescent(ctx, hour)
 			if qerr != nil {
-				m.Error = qerr.Error()
-				_ = write()
-				return false, nil
+				return recordFailure(qerr)
 			}
 			if !quiescent {
 				m.Error = "waiting for OpenObserve WAL to persist the complete owned hour"
@@ -144,13 +172,13 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 				return false, nil
 			}
 			if absent {
-				m.Phase, m.Error, m.DeleteJobID = "replay_ready", "", "stream_absent"
+				m.Phase, m.Error, m.DeleteJobID = phaseReplayReady, "", streamAbsent
 				if err := write(); err != nil {
 					return false, err
 				}
 				continue
 			}
-			m.Phase, m.Error = "delete_submitting", ""
+			m.Phase, m.Error = phaseDeleteSubmitting, ""
 			if err := write(); err != nil {
 				return false, err
 			}
@@ -158,38 +186,40 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 			if err != nil {
 				m.Error = err.Error()
 				if !definitive {
-					m.Phase = "delete_ambiguous"
+					m.Phase = phaseDeleteAmbiguous
 				} else {
-					m.Phase = "delete_needed"
+					m.Phase = phaseDeleteNeeded
 				}
 				_ = write()
 				return false, nil
 			}
-			if job == "" {
-				m.Phase = "deletion_verifying"
-			} else if job == "stream_absent" {
-				m.Phase = "replay_ready"
+			switch job {
+			case "":
+				m.Phase = phaseDeletionVerifying
+			case streamAbsent:
+				m.Phase = phaseReplayReady
 				m.DeleteJobID = ""
-			} else {
-				m.DeleteJobID, m.Phase = job, "delete_requested"
+			default:
+				m.DeleteJobID, m.Phase = job, phaseDeleteRequested
 			}
 			m.Error = ""
-			if err = write(); err != nil {
+			err = write()
+			if err != nil {
 				return false, err
 			}
-			if job != "" && job != "stream_absent" {
+			if job != "" && job != streamAbsent {
 				return false, nil
 			}
-		case "delete_submitting":
-			m.Phase, m.Error = "delete_ambiguous", "delete submission was interrupted before its remote identity was persisted"
+		case phaseDeleteSubmitting:
+			m.Phase, m.Error = phaseDeleteAmbiguous, "delete submission was interrupted before its remote identity was persisted"
 			_ = write()
 			return false, nil
-		case "delete_requested":
+		case phaseDeleteRequested:
 			complete, ambiguous, err := s.deleteStatus(ctx, m.DeleteJobID)
 			if err != nil {
 				m.Error = err.Error()
 				if ambiguous {
-					m.Phase = "delete_ambiguous"
+					m.Phase = phaseDeleteAmbiguous
 				}
 				_ = write()
 				return false, nil
@@ -197,46 +227,50 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 			if !complete {
 				return false, nil
 			}
-			m.Phase, m.Error = "deletion_verifying", ""
-			if err = write(); err != nil {
+			m.Phase, m.Error = phaseDeletionVerifying, ""
+			err = write()
+			if err != nil {
 				return false, err
 			}
-		case "deletion_verifying":
+		case phaseDeletionVerifying:
 			empty, err := s.projectionEmpty(ctx, hour)
 			if err != nil {
-				m.Error = err.Error()
-				_ = write()
-				return false, nil
+				return recordFailure(err)
 			}
 			if !empty {
 				return false, nil
 			}
-			m.Phase, m.Error = "replay_ready", ""
-			if err = write(); err != nil {
-				return false, err
-			}
-		case "replay_ready":
-			records, ids, more, err := s.projectionSnapshotBatch(ctx, m, m.ReplayCursor, 500)
+			m.Phase, m.Error = phaseReplayReady, ""
+			err = write()
 			if err != nil {
 				return false, err
 			}
-			m.PendingIDs, m.Phase, m.Error = ids, "ingestion_submitting", ""
-			if err = write(); err != nil {
+		case phaseReplayReady:
+			records, ids, more, err := s.projectionSnapshotBatch(ctx, &m, m.ReplayCursor)
+			if err != nil {
+				return false, err
+			}
+			m.PendingIDs, m.Phase, m.Error = ids, phaseIngestionSubmitting, ""
+			err = write()
+			if err != nil {
 				return false, err
 			}
 			if len(records) == 0 {
-				if m.SnapshotCount == 0 && m.DeleteJobID == "stream_absent" {
-					m.Phase, m.Error = "complete", ""
-					if err = write(); err != nil {
+				if m.SnapshotCount == 0 && m.DeleteJobID == streamAbsent {
+					m.Phase, m.Error = phaseComplete, ""
+					err = write()
+					if err != nil {
 						return false, err
 					}
-					if err = s.completeProjectionOperations(ctx, hour, m.Generation); err != nil {
+					err = s.completeProjectionOperations(ctx, hour, m.Generation)
+					if err != nil {
 						return false, err
 					}
 					return true, nil
 				}
-				m.Phase = "ingestion_submitted"
-				if err = write(); err != nil {
+				m.Phase = phaseIngestionSubmitted
+				err = write()
+				if err != nil {
 					return false, err
 				}
 				continue
@@ -245,18 +279,19 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 			if err != nil {
 				m.Error = err.Error()
 				var partial partialIngestError
-				if errors.As(err, &partial) {
-					m.Phase = "delete_needed"
+				switch {
+				case errors.As(err, &partial):
+					m.Phase = phaseDeleteNeeded
 					m.DeleteJobID = ""
 					m.ExpectedIDs = nil
 					m.PendingIDs = nil
 					m.ActualIDs = nil
 					m.ReplayCursor = 0
 					m.VerifyCursor = 0
-				} else if !definitive {
-					m.Phase = "ingestion_ambiguous"
-				} else {
-					m.Phase = "replay_ready"
+				case !definitive:
+					m.Phase = phaseIngestionAmbiguous
+				default:
+					m.Phase = phaseReplayReady
 				}
 				_ = write()
 				return false, nil
@@ -265,23 +300,22 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 			m.ReplayCursor += len(m.PendingIDs)
 			m.PendingIDs = nil
 			if more {
-				m.Phase = "replay_ready"
+				m.Phase = phaseReplayReady
 			} else {
-				m.Phase = "ingestion_submitted"
+				m.Phase = phaseIngestionSubmitted
 			}
 			m.Error = ""
-			if err = write(); err != nil {
+			err = write()
+			if err != nil {
 				return false, err
 			}
 			if more {
 				return false, nil
 			}
-		case "ingestion_submitted":
+		case phaseIngestionSubmitted:
 			actual, total, partial, err := s.verifyProjectionBatch(ctx, hour, m.VerifyCursor, 500)
 			if err != nil {
-				m.Error = err.Error()
-				_ = write()
-				return false, nil
+				return recordFailure(err)
 			}
 			if partial {
 				m.Error = "OpenObserve verification query was partial"
@@ -309,21 +343,23 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 				_ = write()
 				return false, nil
 			}
-			m.Phase, m.Error = "complete", ""
-			if err = write(); err != nil {
+			m.Phase, m.Error = phaseComplete, ""
+			err = write()
+			if err != nil {
 				return false, err
 			}
-			if err = s.completeProjectionOperations(ctx, hour, m.Generation); err != nil {
+			err = s.completeProjectionOperations(ctx, hour, m.Generation)
+			if err != nil {
 				return false, err
 			}
 			return true, nil
-		case "complete":
+		case phaseComplete:
 			return m.Generation >= generation, nil
-		case "ingestion_submitting":
-			m.Phase, m.Error = "ingestion_ambiguous", "ingestion was interrupted before its acknowledgement was persisted"
+		case phaseIngestionSubmitting:
+			m.Phase, m.Error = phaseIngestionAmbiguous, "ingestion was interrupted before its acknowledgement was persisted"
 			_ = write()
 			return false, nil
-		case "delete_ambiguous", "ingestion_ambiguous":
+		case phaseDeleteAmbiguous, phaseIngestionAmbiguous:
 			return false, nil
 		default:
 			return false, fmt.Errorf("unknown projection phase %q", m.Phase)
@@ -332,7 +368,7 @@ func (s *service) advanceProjection(ctx context.Context, hour time.Time, generat
 	return false, nil
 }
 
-func (s *service) openObserveRequest(ctx context.Context, method, endpoint string, body []byte) (int, []byte, error) {
+func (s *service) openObserveRequest(ctx context.Context, method, endpoint string, body []byte) (status int, data []byte, err error) {
 	if s.openobserve == "" || s.openobserveUser == "" || s.openobservePassword == "" {
 		return 0, nil, errors.New("OpenObserve is not configured")
 	}
@@ -346,19 +382,19 @@ func (s *service) openObserveRequest(ctx context.Context, method, endpoint strin
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	return resp.StatusCode, data, readErr
+	defer func() { err = closeAfter(err, resp.Body) }()
+	data, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	return resp.StatusCode, data, err
 }
 
-func (s *service) requestHourDelete(ctx context.Context, hour time.Time) (string, bool, error) {
+func (s *service) requestHourDelete(ctx context.Context, hour time.Time) (job string, definitive bool, err error) {
 	q := url.Values{"type": {"logs"}, "start": {strconv.FormatInt(hour.UnixMicro(), 10)}, "end": {strconv.FormatInt(hour.Add(time.Hour).UnixMicro(), 10)}}
 	status, data, err := s.openObserveRequest(ctx, http.MethodDelete, "/api/default/streams/"+s.projectionStreamName()+"/data_by_time_range?"+q.Encode(), nil)
 	if err != nil {
 		return "", false, err
 	}
 	if status == 404 {
-		return "stream_absent", true, nil
+		return streamAbsent, true, nil
 	}
 	if status != 200 {
 		return "", true, fmt.Errorf("OpenObserve delete returned %d: %s", status, strings.TrimSpace(string(data)))
@@ -372,7 +408,7 @@ func (s *service) requestHourDelete(ctx context.Context, hour time.Time) (string
 	return result.ID, true, nil
 }
 
-func (s *service) deleteStatus(ctx context.Context, job string) (bool, bool, error) {
+func (s *service) deleteStatus(ctx context.Context, job string) (complete, ambiguous bool, err error) {
 	status, data, err := s.openObserveRequest(ctx, http.MethodGet, "/api/default/streams/"+s.projectionStreamName()+"/data_by_time_range/status/"+url.PathEscape(job), nil)
 	if err != nil {
 		return false, false, err
@@ -412,7 +448,7 @@ func (s *service) projectionEmpty(ctx context.Context, hour time.Time) (bool, er
 	return err == nil && !result.Partial && result.Total == 0, err
 }
 
-func (s *service) projectionQuiescent(ctx context.Context, hour time.Time) (bool, bool, error) {
+func (s *service) projectionQuiescent(ctx context.Context, hour time.Time) (quiescent, absent bool, err error) {
 	stream := s.projectionStreamName()
 	schemaStatus, _, schemaErr := s.openObserveRequest(ctx, http.MethodGet, "/api/default/streams/"+stream+"/schema?type=logs", nil)
 	if schemaErr != nil {
@@ -519,7 +555,7 @@ type (
 	}
 )
 
-func (s *service) verifyProjectionBatch(ctx context.Context, hour time.Time, offset, limit int) ([]projectedIdentity, int, bool, error) {
+func (s *service) verifyProjectionBatch(ctx context.Context, hour time.Time, offset, limit int) (identities []projectedIdentity, total int, partial bool, err error) {
 	result, err := s.openObserveSearch(ctx, "SELECT projection_id, generation FROM \""+s.projectionStreamName()+"\" ORDER BY projection_id", hour, hour.Add(time.Hour), offset, limit, "")
 	if err != nil {
 		return nil, 0, false, err
@@ -547,32 +583,32 @@ func int64Value(v any) int64 {
 
 type projectionSnapshotRecord struct {
 	ProjectionID      string         `json:"projection_id"`
-	CanonicalRevision string         `json:"canonical_revision"`
 	Replacement       map[string]any `json:"replacement"`
+	CanonicalRevision string         `json:"canonical_revision"`
 }
 type projectionSnapshotChunk struct {
-	SchemaVersion int                        `json:"schema_version"`
 	SnapshotID    string                     `json:"snapshot_id"`
+	Records       []projectionSnapshotRecord `json:"records"`
+	SchemaVersion int                        `json:"schema_version"`
 	Generation    int64                      `json:"generation"`
 	Index         int                        `json:"index"`
-	Records       []projectionSnapshotRecord `json:"records"`
 }
 
-func projectionSnapshotObject(hour time.Time, snapshotID string, index int) string {
-	return fmt.Sprintf("measurement-projection-snapshots/%s/%s/%s/%06d.json", projectionStream, hour.UTC().Format("20060102T15"), snapshotID, index)
-}
+// snapshotChunkSize is the number of records in one stored snapshot chunk, and
+// so the most records one replay batch holds.
+const snapshotChunkSize = 500
 
 func (s *service) projectionSnapshotObject(hour time.Time, snapshotID string, index int) string {
 	return fmt.Sprintf("measurement-projection-snapshots/%s/%s/%s/%06d.json", s.projectionStreamName(), hour.UTC().Format("20060102T15"), snapshotID, index)
 }
 
-func (s *service) freezeProjectionSnapshot(ctx context.Context, hour time.Time, generation int64, snapshotID string) (int, int, error) {
+func (s *service) freezeProjectionSnapshot(ctx context.Context, hour time.Time, generation int64, snapshotID string) (chunks, count int, err error) {
 	type candidate struct{ kind, id string }
 	var candidates []candidate
-	for _, kind := range []string{"usage", "execution", "judge"} {
-		objects, err := s.listObjects(ctx, "measurements/"+kind)
-		if err != nil {
-			return 0, 0, err
+	for _, kind := range []string{kindUsage, kindExecution, kindJudge} {
+		objects, listErr := s.listObjects(ctx, "measurements/"+kind)
+		if listErr != nil {
+			return 0, 0, listErr
 		}
 		sort.Strings(objects)
 		for _, id := range objects {
@@ -580,13 +616,12 @@ func (s *service) freezeProjectionSnapshot(ctx context.Context, hour time.Time, 
 		}
 	}
 	chunk := projectionSnapshotChunk{SchemaVersion: 1, SnapshotID: snapshotID, Generation: generation, Index: 0, Records: []projectionSnapshotRecord{}}
-	chunks, count := 0, 0
 	flush := func() error {
 		if len(chunk.Records) == 0 {
 			return nil
 		}
-		if _, err := s.writeObject(ctx, s.projectionSnapshotObject(hour, snapshotID, chunk.Index), chunk, "*"); err != nil {
-			return err
+		if _, writeErr := s.writeObject(ctx, s.projectionSnapshotObject(hour, snapshotID, chunk.Index), chunk, "*"); writeErr != nil {
+			return writeErr
 		}
 		chunks++
 		chunk.Index++
@@ -594,22 +629,24 @@ func (s *service) freezeProjectionSnapshot(ctx context.Context, hour time.Time, 
 		return nil
 	}
 	for _, candidate := range candidates {
-		snapshot, ok, err := s.snapshotRecord(ctx, candidate.kind, candidate.id, hour, generation)
-		if err != nil {
-			return 0, 0, err
+		snapshot, ok, recordErr := s.snapshotRecord(ctx, candidate.kind, candidate.id, hour, generation)
+		if recordErr != nil {
+			return 0, 0, recordErr
 		}
 		if !ok {
 			continue
 		}
 		chunk.Records = append(chunk.Records, snapshot)
 		count++
-		if len(chunk.Records) == 500 {
-			if err = flush(); err != nil {
+		if len(chunk.Records) == snapshotChunkSize {
+			err = flush()
+			if err != nil {
 				return 0, 0, err
 			}
 		}
 	}
-	if err := flush(); err != nil {
+	err = flush()
+	if err != nil {
 		return 0, 0, err
 	}
 	return chunks, count, nil
@@ -635,7 +672,7 @@ func (s *service) snapshotRecord(ctx context.Context, kind, objectID string, hou
 	projectionID := kind + "/" + measurement.ID
 	record["projection_id"], record["generation"], record["_timestamp"] = projectionID, generation, measurement.OccurredAt.UnixMicro()
 	revision := object.Revision
-	if kind == "usage" {
+	if kind == kindUsage {
 		if costObject, costErr := s.readObject(ctx, costPrefix+"/"+measurement.ID+".json"); costErr == nil {
 			var cost CurrentCost
 			if json.Unmarshal(costObject.Data, &cost) != nil {
@@ -648,14 +685,16 @@ func (s *service) snapshotRecord(ctx context.Context, kind, objectID string, hou
 			return projectionSnapshotRecord{}, false, costErr
 		}
 	}
-	return projectionSnapshotRecord{projectionID, revision, record}, true, nil
+	return projectionSnapshotRecord{ProjectionID: projectionID, CanonicalRevision: revision, Replacement: record}, true, nil
 }
 
-func (s *service) projectionSnapshotBatch(ctx context.Context, manifest projectionManifest, cursor, limit int) ([]map[string]any, []string, bool, error) {
+// projectionSnapshotBatch returns the records of the snapshot chunk that holds
+// cursor, from cursor to the end of that chunk.
+func (s *service) projectionSnapshotBatch(ctx context.Context, manifest *projectionManifest, cursor int) (records []map[string]any, ids []string, more bool, err error) {
 	if cursor >= manifest.SnapshotCount {
 		return []map[string]any{}, []string{}, false, nil
 	}
-	index := cursor / 500
+	index := cursor / snapshotChunkSize
 	object, err := s.readObject(ctx, s.projectionSnapshotObject(manifest.Hour, manifest.SnapshotID, index))
 	if err != nil {
 		return nil, nil, false, err
@@ -664,16 +703,16 @@ func (s *service) projectionSnapshotBatch(ctx context.Context, manifest projecti
 	if json.Unmarshal(object.Data, &chunk) != nil || chunk.SnapshotID != manifest.SnapshotID || chunk.Generation != manifest.Generation {
 		return nil, nil, false, errors.New("projection snapshot chunk is invalid")
 	}
-	start := cursor % 500
+	start := cursor % snapshotChunkSize
 	if start > len(chunk.Records) {
 		return nil, nil, false, errors.New("projection snapshot cursor is invalid")
 	}
-	end := start + limit
+	end := start + snapshotChunkSize
 	if end > len(chunk.Records) {
 		end = len(chunk.Records)
 	}
-	records := make([]map[string]any, 0, end-start)
-	ids := make([]string, 0, end-start)
+	records = make([]map[string]any, 0, end-start)
+	ids = make([]string, 0, end-start)
 	for _, record := range chunk.Records[start:end] {
 		records = append(records, record.Replacement)
 		ids = append(ids, record.ProjectionID)
@@ -692,10 +731,10 @@ func (s *service) completeProjectionOperations(ctx context.Context, hour time.Ti
 			return err
 		}
 		var operation mutationOperation
-		if json.Unmarshal(object.Data, &operation) != nil || !operation.AffectedHour.Equal(hour) || operation.Generation > generation || operation.Phase != "projection_pending" {
+		if json.Unmarshal(object.Data, &operation) != nil || !operation.AffectedHour.Equal(hour) || operation.Generation > generation || operation.Phase != opProjectionPending {
 			continue
 		}
-		operation.Phase, operation.Error, operation.UpdatedAt = "complete", "", time.Now().UTC()
+		operation.Phase, operation.Error, operation.UpdatedAt = opComplete, "", time.Now().UTC()
 		if _, err = s.writeObject(ctx, id, operation, object.Revision); err != nil && !errors.Is(err, errPrecondition) {
 			return err
 		}

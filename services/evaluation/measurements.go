@@ -29,8 +29,50 @@ const (
 	jobPrefix        = "measurement-jobs"
 )
 
+// The kinds of measurement. Each kind is stored under its own prefix.
+const (
+	kindUsage     = "usage"
+	kindExecution = "execution"
+	kindJudge     = "judge"
+)
+
+// How a measurement's value came about.
+const (
+	statusReported  = "reported"
+	statusDerived   = "derived"
+	statusMissing   = "missing"
+	statusInvalid   = "invalid"
+	statusEstimated = "estimated"
+)
+
+// Whether a cost could be calculated from usage, price and conversion.
+const (
+	costAvailable   = "available"
+	costUnavailable = "unavailable"
+)
+
+// The currencies a price or a display amount can be in.
+const (
+	currencyEUR = "EUR"
+	currencyUSD = "USD"
+)
+
+// The phases of a mutation operation, in the order it passes through them.
+// A usage measurement goes through the two cost phases; the other kinds go
+// from intent straight to projection_pending.
+const (
+	opIntent             = "intent"
+	opCalculationPending = "calculation_pending"
+	opCostIntent         = "cost_intent"
+	opProjectionPending  = "projection_pending"
+	opComplete           = "complete"
+	opCancelled          = "cancelled"
+	opConflict           = "conflict"
+)
+
+// Measurement is one usage, execution or judge record. What a source did not
+// report is left out and named in Missing; it is never stored as zero.
 type Measurement struct {
-	SchemaVersion       int                `json:"schema_version"`
 	ID                  string             `json:"id"`
 	Kind                string             `json:"kind"`
 	Revision            string             `json:"revision,omitempty"`
@@ -67,8 +109,11 @@ type Measurement struct {
 	Status              string             `json:"status"`
 	Missing             []string           `json:"missing"`
 	RawUsage            json.RawMessage    `json:"raw_usage,omitempty"`
+	SchemaVersion       int                `json:"schema_version"`
 }
 
+// Price is what one vendor, model, effort and set of modes costs per
+// UnitTokens tokens, from From until To.
 type Price struct {
 	ID            string            `json:"id"`
 	Revision      string            `json:"revision,omitempty"`
@@ -79,12 +124,13 @@ type Price struct {
 	From          time.Time         `json:"from"`
 	To            *time.Time        `json:"to"`
 	Currency      string            `json:"currency"`
-	UnitTokens    int64             `json:"unit_tokens"`
 	InputUncached string            `json:"input_uncached"`
 	InputCached   string            `json:"input_cached"`
 	Output        string            `json:"output"`
+	UnitTokens    int64             `json:"unit_tokens"`
 }
 
+// Conversion is the configured rate from one currency to another.
 type Conversion struct {
 	ID           string `json:"id"`
 	Revision     string `json:"revision,omitempty"`
@@ -93,6 +139,8 @@ type Conversion struct {
 	Rate         string `json:"rate"`
 }
 
+// CurrentCost is the cost of one usage measurement, calculated from the price
+// and conversion that applied at Generation. The usage record is not changed.
 type CurrentCost struct {
 	UsageID              string    `json:"usage_id"`
 	Amount               string    `json:"amount,omitempty"`
@@ -107,27 +155,27 @@ type CurrentCost struct {
 	PriceRevision        string    `json:"price_revision,omitempty"`
 	ConversionID         string    `json:"conversion_id,omitempty"`
 	ConversionRevision   string    `json:"conversion_revision,omitempty"`
-	Generation           int64     `json:"generation"`
 	Status               string    `json:"status"`
-	Missing              []string  `json:"missing"`
 	CalculatedAt         time.Time `json:"calculated_at"`
+	Missing              []string  `json:"missing"`
+	Generation           int64     `json:"generation"`
 }
 
 type mutationOperation struct {
-	SchemaVersion        int             `json:"schema_version"`
 	ID                   string          `json:"id"`
 	ObjectID             string          `json:"object_id"`
 	MeasurementID        string          `json:"measurement_id"`
 	ExpectedRevision     string          `json:"expected_revision,omitempty"`
-	Replacement          json.RawMessage `json:"replacement"`
 	CostReplacement      *CurrentCost    `json:"cost_replacement,omitempty"`
 	CostExpectedRevision string          `json:"cost_expected_revision,omitempty"`
 	AffectedHour         time.Time       `json:"affected_hour"`
-	Generation           int64           `json:"generation"`
 	Phase                string          `json:"phase"`
 	Error                string          `json:"error,omitempty"`
 	CreatedAt            time.Time       `json:"created_at"`
 	UpdatedAt            time.Time       `json:"updated_at"`
+	Replacement          json.RawMessage `json:"replacement"`
+	SchemaVersion        int             `json:"schema_version"`
+	Generation           int64           `json:"generation"`
 }
 
 func (s *service) measurementRoutes(mux *http.ServeMux) {
@@ -173,7 +221,7 @@ func validateMeasurement(m *Measurement, pathID string) error {
 	if m.SchemaVersion != 1 || m.ID != pathID || !validRecordID(m.ID) {
 		return errors.New("schema_version must be 1 and id must match the path")
 	}
-	if m.Kind != "usage" && m.Kind != "execution" && m.Kind != "judge" {
+	if m.Kind != kindUsage && m.Kind != kindExecution && m.Kind != kindJudge {
 		return errors.New("kind must be usage, execution, or judge")
 	}
 	if m.OccurredAt.IsZero() {
@@ -185,10 +233,10 @@ func validateMeasurement(m *Measurement, pathID string) error {
 	if m.RunID == "" && !hasMissingField(m.Missing, "run_id") || m.ExecutionID == "" && !hasMissingField(m.Missing, "execution_id") {
 		return errors.New("missing run/execution attribution requires explicit missing reasons")
 	}
-	if m.Kind != "usage" && (m.RunID == "" || m.ExecutionID == "") {
+	if m.Kind != kindUsage && (m.RunID == "" || m.ExecutionID == "") {
 		return errors.New("execution and judge measurements require run_id and execution_id")
 	}
-	if m.Status != "reported" && m.Status != "derived" && m.Status != "missing" && m.Status != "invalid" && m.Status != "estimated" {
+	if m.Status != statusReported && m.Status != statusDerived && m.Status != statusMissing && m.Status != statusInvalid && m.Status != statusEstimated {
 		return errors.New("invalid status")
 	}
 	for _, value := range []*int64{m.InputTokens, m.OutputTokens, m.CachedInputTokens, m.UncachedInputTokens, m.ReasoningTokens, m.DurationMS} {
@@ -202,14 +250,14 @@ func validateMeasurement(m *Measurement, pathID string) error {
 	if m.UncachedInputTokens != nil && m.CachedInputTokens != nil && m.InputTokens != nil && *m.UncachedInputTokens+*m.CachedInputTokens != *m.InputTokens {
 		return errors.New("cached and uncached input must equal total input")
 	}
-	if m.Kind == "usage" {
+	if m.Kind == kindUsage {
 		for field, value := range map[string]bool{"vendor": m.Vendor != "", "model": m.Model != "", "effort": m.Effort != "", "modes": m.Modes != nil, "raw_usage": len(m.RawUsage) > 0} {
 			if !value && !hasMissingField(m.Missing, field) {
 				return errors.New("unavailable usage dimensions require explicit missing reasons")
 			}
 		}
 	}
-	if m.Kind == "judge" && (m.ProducerRunID == "" || m.ArtifactID == "" || m.MappingVersion == "" || m.MetricName == "") {
+	if m.Kind == kindJudge && (m.ProducerRunID == "" || m.ArtifactID == "" || m.MappingVersion == "" || m.MetricName == "") {
 		return errors.New("judge measurement identity is incomplete")
 	}
 	return nil
@@ -268,7 +316,7 @@ func (s *service) putMeasurement(w http.ResponseWriter, r *http.Request) {
 		s.dependencyFailure(w, err)
 		return
 	}
-	op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: measurementObject(m.Kind, m.ID), MeasurementID: m.ID, ExpectedRevision: condition, Replacement: data, AffectedHour: m.OccurredAt.UTC().Truncate(time.Hour), Generation: generation, Phase: "intent", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	op := mutationOperation{SchemaVersion: 1, ID: uuid.NewString(), ObjectID: measurementObject(m.Kind, m.ID), MeasurementID: m.ID, ExpectedRevision: condition, Replacement: data, AffectedHour: m.OccurredAt.UTC().Truncate(time.Hour), Generation: generation, Phase: opIntent, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	opRevision, err := s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, "*")
 	if err != nil {
 		s.dependencyFailure(w, err)
@@ -276,7 +324,7 @@ func (s *service) putMeasurement(w http.ResponseWriter, r *http.Request) {
 	}
 	revision, err := s.writeObject(r.Context(), op.ObjectID, m, condition)
 	if errors.Is(err, errPrecondition) {
-		op.Phase, op.UpdatedAt = "cancelled", time.Now().UTC()
+		op.Phase, op.UpdatedAt = opCancelled, time.Now().UTC()
 		_, _ = s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, opRevision)
 		s.fail(w, 412, err)
 		return
@@ -285,10 +333,10 @@ func (s *service) putMeasurement(w http.ResponseWriter, r *http.Request) {
 		s.dependencyFailure(w, err)
 		return
 	}
-	if m.Kind == "usage" {
-		op.Phase = "calculation_pending"
+	if m.Kind == kindUsage {
+		op.Phase = opCalculationPending
 	} else {
-		op.Phase = "projection_pending"
+		op.Phase = opProjectionPending
 	}
 	op.UpdatedAt = time.Now().UTC()
 	_, _ = s.writeObject(r.Context(), operationPrefix+"/"+op.ID+".json", op, opRevision)
@@ -320,7 +368,7 @@ func requestCondition(r *http.Request) (string, error) {
 
 func (s *service) getMeasurement(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	for _, kind := range []string{"usage", "execution", "judge"} {
+	for _, kind := range []string{kindUsage, kindExecution, kindJudge} {
 		object, err := s.readObject(r.Context(), measurementObject(kind, id))
 		if errors.Is(err, errNotFound) {
 			continue
@@ -349,7 +397,7 @@ type measurementCursor struct {
 
 func (s *service) listMeasurements(w http.ResponseWriter, r *http.Request) {
 	kind := r.URL.Query().Get("kind")
-	if kind != "" && kind != "usage" && kind != "execution" && kind != "judge" {
+	if kind != "" && kind != kindUsage && kind != kindExecution && kind != kindJudge {
 		s.fail(w, 400, errors.New("invalid kind"))
 		return
 	}
@@ -383,7 +431,7 @@ func (s *service) listMeasurements(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	kinds := []string{"usage", "execution", "judge"}
+	kinds := []string{kindUsage, kindExecution, kindJudge}
 	if kind != "" {
 		kinds = []string{kind}
 	}
@@ -437,12 +485,29 @@ func (s *service) dependencyFailure(w http.ResponseWriter, err error) {
 	s.fail(w, http.StatusServiceUnavailable, err)
 }
 
+// decimalPattern accepts a plain decimal: an optional sign, digits, and an
+// optional fraction. It accepts neither an exponent nor a fraction "a/b".
+var decimalPattern = regexp.MustCompile(`^-?\d+(?:\.\d+)?$`)
+
+// maxDecimalExponent is the largest power of ten a number may be scaled by.
+// It is the bound math/big applies when it parses a number, and keeps the
+// integers of an exact fraction from growing without limit.
+const maxDecimalExponent = 1_000_000
+
+// decimal reads a decimal string as an exact fraction. The fraction is built
+// from the digits themselves, so its size is bounded by the length of s.
 func decimal(s string, positive bool) (*big.Rat, error) {
-	if !regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`).MatchString(s) {
+	if !decimalPattern.MatchString(s) {
 		return nil, errors.New("invalid decimal string")
 	}
-	r, ok := new(big.Rat).SetString(s)
-	if !ok || positive && r.Sign() <= 0 || !positive && r.Sign() < 0 {
+	whole, fraction, _ := strings.Cut(s, ".")
+	numerator, ok := new(big.Int).SetString(whole+fraction, 10)
+	if !ok || numerator.Sign() != 0 && len(fraction) > maxDecimalExponent {
+		return nil, errors.New("invalid decimal string")
+	}
+	denominator := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(len(fraction))), nil)
+	r := new(big.Rat).SetFrac(numerator, denominator)
+	if positive && r.Sign() <= 0 || !positive && r.Sign() < 0 {
 		return nil, errors.New("invalid decimal string")
 	}
 	return r, nil
@@ -489,22 +554,7 @@ func hashID(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (s *service) replaceCost(ctx context.Context, cost CurrentCost, parent mutationOperation) (string, error) {
-	objectID := costPrefix + "/" + cost.UsageID + ".json"
-	condition := "*"
-	if old, err := s.readObject(ctx, objectID); err == nil {
-		var current CurrentCost
-		if json.Unmarshal(old.Data, &current) == nil && current.Generation > cost.Generation {
-			return "", nil
-		}
-		condition = old.Revision
-	} else if !errors.Is(err, errNotFound) {
-		return "", err
-	}
-	return s.writeObject(ctx, objectID, cost, condition)
-}
-
-func (s *service) calculateCost(ctx context.Context, m Measurement, display string, generation int64) (CurrentCost, error) {
+func (s *service) calculateCost(ctx context.Context, m *Measurement, display string, generation int64) (CurrentCost, error) {
 	prices, err := s.loadPrices(ctx)
 	if err != nil {
 		return CurrentCost{}, err
@@ -516,10 +566,11 @@ func (s *service) calculateCost(ctx context.Context, m Measurement, display stri
 	return calculateCostWith(m, display, generation, prices, conversions)
 }
 
-func calculateCostWith(m Measurement, display string, generation int64, prices []Price, convs []Conversion) (CurrentCost, error) {
-	cost := CurrentCost{UsageID: m.ID, DisplayCurrency: display, Generation: generation, Status: "unavailable", CalculatedAt: time.Now().UTC()}
-	var matches []Price
-	for _, p := range prices {
+func calculateCostWith(m *Measurement, display string, generation int64, prices []Price, convs []Conversion) (CurrentCost, error) {
+	cost := CurrentCost{UsageID: m.ID, DisplayCurrency: display, Generation: generation, Status: costUnavailable, CalculatedAt: time.Now().UTC()}
+	var matches []*Price
+	for i := range prices {
+		p := &prices[i]
 		if p.Vendor == m.Vendor && p.Model == m.Model && p.Effort == m.Effort && m.Modes != nil && modesKey(p.Modes) == modesKey(*m.Modes) && !m.OccurredAt.Before(p.From) && (p.To == nil || m.OccurredAt.Before(*p.To)) {
 			matches = append(matches, p)
 		}
@@ -575,6 +626,6 @@ func calculateCostWith(m Measurement, display string, generation int64, prices [
 	}
 	cost.ConvertedAmount = decimalString(converted)
 	cost.ConvertedNumerator, cost.ConvertedDenominator = converted.Num().String(), converted.Denom().String()
-	cost.Status = "available"
+	cost.Status = costAvailable
 	return cost, nil
 }

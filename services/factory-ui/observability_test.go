@@ -32,15 +32,11 @@ func TestObservabilityLogsAreFilteredAndNormalized(t *testing.T) {
 	client := &observabilityClient{base: upstream.URL, user: "ada", password: "secret", http: upstream.Client()}
 	ui := httptest.NewServer(observabilityHandler(client))
 	defer ui.Close()
-	resp, err := http.Get(ui.URL + "/api/observability/logs?run_id=11111111-1111-1111-1111-111111111111&trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&span_id=bbbbbbbbbbbbbbbb&step=review&attempt=2&start=2026-01-01T00%3A00%3A00Z&end=2026-01-01T00%3A00%3A02Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, ui.URL+"/api/observability/logs?run_id=11111111-1111-1111-1111-111111111111&trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&span_id=bbbbbbbbbbbbbbbb&step=review&attempt=2&start=2026-01-01T00%3A00%3A00Z&end=2026-01-01T00%3A00%3A02Z")
 	var result struct {
 		Logs []observabilityLog `json:"logs"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal([]byte(resp.body), &result); err != nil {
 		t.Fatal(err)
 	}
 	if auth != "ada:secret" || !strings.Contains(query, "run_id = '11111111-1111-1111-1111-111111111111'") || !strings.Contains(query, "span_id = 'bbbbbbbbbbbbbbbb'") || !strings.Contains(query, "attempt = 2 OR attempt IS NULL") || !strings.Contains(query, "_timestamp >=") {
@@ -58,13 +54,9 @@ func TestObservabilityLogsAreFilteredAndNormalized(t *testing.T) {
 func TestObservabilityRejectsInvalidRunID(t *testing.T) {
 	ui := httptest.NewServer(observabilityHandler(&observabilityClient{}))
 	defer ui.Close()
-	resp, err := http.Get(ui.URL + "/api/observability/logs?run_id='OR%201=1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d", resp.StatusCode)
+	resp := get(t, ui.URL+"/api/observability/logs?run_id='OR%201=1")
+	if resp.status != http.StatusBadRequest {
+		t.Fatalf("status = %d", resp.status)
 	}
 }
 
@@ -85,15 +77,11 @@ func TestObservabilitySpansAreRestrictedAndNormalized(t *testing.T) {
 	client := &observabilityClient{base: upstream.URL, user: "a", password: "b", http: upstream.Client(), retentionDays: 7}
 	ui := httptest.NewServer(observabilityHandler(client))
 	defer ui.Close()
-	resp, err := http.Get(ui.URL + "/api/observability/spans?trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, ui.URL+"/api/observability/spans?trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	var result struct {
 		Spans []observabilitySpan `json:"spans"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal([]byte(resp.body), &result); err != nil {
 		t.Fatal(err)
 	}
 	if path != "/api/default/_search?type=traces" || !strings.Contains(query, "trace_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'") || len(result.Spans) != 1 || result.Spans[0].Operation != "agent.process" || result.Spans[0].ParentSpanID != "cccccccccccccccc" {
@@ -125,14 +113,12 @@ func TestObservabilityHealthReportsDeliveryLoss(t *testing.T) {
 	}
 	ui := httptest.NewServer(observabilityHandler(client))
 	defer ui.Close()
-	resp, err := http.Get(ui.URL + "/api/observability/health")
-	if err != nil {
+	resp := get(t, ui.URL+"/api/observability/health")
+	var result map[string]any
+	if err := json.Unmarshal([]byte(resp.body), &result); err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	var result map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&result)
-	if result["status"] != "degraded" || result["retention_days"] != float64(7) {
+	if result["status"] != healthDegraded || result["retention_days"] != float64(7) {
 		t.Fatalf("health = %#v", result)
 	}
 }

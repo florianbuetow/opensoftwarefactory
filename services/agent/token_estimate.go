@@ -8,8 +8,8 @@ import (
 	tiktoken_loader "github.com/pkoukk/tiktoken-go-loader"
 )
 
-// tokenEstimationMethod names the tokenizer of the estimates. It is not provider usage.
-const tokenEstimationMethod = "tiktoken:cl100k_base"
+// estimationMethod names the tokenizer of the estimates. It is not provider usage.
+const estimationMethod = "tiktoken:cl100k_base"
 
 // tokenEncoder builds the cl100k_base encoder once. The vocabulary is embedded in the
 // binary, so nothing is downloaded at run time.

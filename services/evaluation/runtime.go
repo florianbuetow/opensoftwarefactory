@@ -16,13 +16,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func openObserveCredentials(path string) (string, string, error) {
-	file, err := os.Open(path)
+func openObserveCredentials(path string) (user, password string, err error) {
+	configPath := filepath.Clean(path)
+	file, err := os.Open(configPath)
 	if err != nil {
 		return "", "", err
 	}
-	defer file.Close()
-	var user, password string
+	defer func() { err = closeAfter(err, file) }()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		key, value, ok := strings.Cut(strings.TrimSpace(scanner.Text()), "=")
@@ -36,7 +36,8 @@ func openObserveCredentials(path string) (string, string, error) {
 			password = value
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	err = scanner.Err()
+	if err != nil {
 		return "", "", err
 	}
 	if user == "" || password == "" {
@@ -51,10 +52,11 @@ func acquireWriterLock(path string) (*writerLock, error) {
 	if path == "" {
 		return nil, errors.New("EVALUATION_LOCK_PATH is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	lockPath := filepath.Clean(path)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o640)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -99,14 +101,15 @@ func (s *service) projectPending(ctx context.Context) error {
 			return err
 		}
 		var operation mutationOperation
-		if json.Unmarshal(object.Data, &operation) != nil || operation.Phase == "complete" || operation.Phase == "cancelled" {
+		if json.Unmarshal(object.Data, &operation) != nil || operation.Phase == opComplete || operation.Phase == opCancelled {
 			continue
 		}
-		operation, err = s.recoverOperation(ctx, id, object.Revision, operation)
-		if err != nil {
+		// A failed recovery is kept in the operation's error field and tried
+		// again on the next pass.
+		if recoverErr := s.recoverOperation(ctx, id, object.Revision, &operation); recoverErr != nil {
 			continue
 		}
-		if operation.Phase != "projection_pending" {
+		if operation.Phase != opProjectionPending {
 			continue
 		}
 		hour := operation.AffectedHour.UTC().Truncate(time.Hour)
@@ -138,7 +141,9 @@ func (s *service) projectPending(ctx context.Context) error {
 	return nil
 }
 
-func (s *service) recoverOperation(ctx context.Context, id, revision string, op mutationOperation) (mutationOperation, error) {
+// recoverOperation carries an operation forward from the phase it was left in
+// and updates op as it goes, so the caller sees the phase it reached.
+func (s *service) recoverOperation(ctx context.Context, id, revision string, op *mutationOperation) error {
 	persist := func() error {
 		op.UpdatedAt = time.Now().UTC()
 		next, err := s.writeObject(ctx, id, op, revision)
@@ -149,104 +154,108 @@ func (s *service) recoverOperation(ctx context.Context, id, revision string, op 
 	}
 	nextPhase := func() string {
 		if strings.HasPrefix(op.ObjectID, usagePrefix+"/") {
-			return "calculation_pending"
+			return opCalculationPending
 		}
-		return "projection_pending"
+		return opProjectionPending
 	}
-	if op.Phase == "intent" {
+	if op.Phase == opIntent {
 		current, err := s.readObject(ctx, op.ObjectID)
 		if err == nil && jsonEquivalent(current.Data, op.Replacement) {
 			op.Phase = nextPhase()
 			op.Error = ""
-			if err = persist(); err != nil {
-				return op, err
+			err = persist()
+			if err != nil {
+				return err
 			}
 		}
 		if errors.Is(err, errNotFound) || err == nil && !jsonEquivalent(current.Data, op.Replacement) {
-			_, writeErr := s.writeObject(ctx, op.ObjectID, json.RawMessage(op.Replacement), op.ExpectedRevision)
+			_, writeErr := s.writeObject(ctx, op.ObjectID, op.Replacement, op.ExpectedRevision)
 			if errors.Is(writeErr, errPrecondition) {
 				latest, readErr := s.readObject(ctx, op.ObjectID)
 				if readErr != nil || !jsonEquivalent(latest.Data, op.Replacement) {
-					op.Phase = "conflict"
+					op.Phase = opConflict
 					op.Error = "canonical precondition failed during recovery"
 					_ = persist()
-					return op, errPrecondition
+					return errPrecondition
 				}
 			}
 			if writeErr != nil && !errors.Is(writeErr, errPrecondition) {
 				op.Error = writeErr.Error()
 				_ = persist()
-				return op, writeErr
+				return writeErr
 			}
 			op.Phase = nextPhase()
 			op.Error = ""
-			if err = persist(); err != nil {
-				return op, err
+			err = persist()
+			if err != nil {
+				return err
 			}
 		} else if err != nil {
-			return op, err
+			return err
 		}
 	}
-	if op.Phase == "calculation_pending" {
-		measurement, err := s.loadMeasurement(ctx, "usage", op.MeasurementID)
+	if op.Phase == opCalculationPending {
+		measurement, err := s.loadMeasurement(ctx, kindUsage, op.MeasurementID)
 		if err != nil {
 			op.Error = err.Error()
 			_ = persist()
-			return op, err
+			return err
 		}
-		cost, err := s.calculateCost(ctx, measurement, "", op.Generation)
+		cost, err := s.calculateCost(ctx, &measurement, "", op.Generation)
 		if err != nil {
 			op.Error = err.Error()
 			_ = persist()
-			return op, err
+			return err
 		}
 		condition := "*"
 		if current, readErr := s.readObject(ctx, costPrefix+"/"+op.MeasurementID+".json"); readErr == nil {
 			var old CurrentCost
 			if json.Unmarshal(current.Data, &old) == nil && old.Generation > op.Generation {
-				op.Phase = "projection_pending"
+				op.Phase = opProjectionPending
 				op.Error = ""
 				_ = persist()
-				return op, nil
+				return nil
 			}
 			condition = current.Revision
 		} else if !errors.Is(readErr, errNotFound) {
 			op.Error = readErr.Error()
 			_ = persist()
-			return op, readErr
+			return readErr
 		}
 		op.CostReplacement = &cost
 		op.CostExpectedRevision = condition
-		op.Phase = "cost_intent"
+		op.Phase = opCostIntent
 		op.Error = ""
-		if err = persist(); err != nil {
-			return op, err
+		err = persist()
+		if err != nil {
+			return err
 		}
 	}
-	if op.Phase == "cost_intent" {
+	if op.Phase == opCostIntent {
 		_, err := s.writeObject(ctx, costPrefix+"/"+op.MeasurementID+".json", op.CostReplacement, op.CostExpectedRevision)
 		if errors.Is(err, errPrecondition) {
 			current, readErr := s.readObject(ctx, costPrefix+"/"+op.MeasurementID+".json")
 			expected, _ := json.Marshal(op.CostReplacement)
 			if readErr != nil || !jsonEquivalent(current.Data, expected) {
-				op.Phase = "conflict"
+				op.Phase = opConflict
 				op.Error = "cost precondition failed during recovery"
 				_ = persist()
-				return op, errPrecondition
+				return errPrecondition
 			}
 		}
 		if err != nil && !errors.Is(err, errPrecondition) {
 			op.Error = err.Error()
 			_ = persist()
-			return op, err
+			return err
 		}
-		op.Phase = "projection_pending"
+		op.Phase = opProjectionPending
 		op.Error = ""
-		if err = persist(); err != nil {
-			return op, err
+		err = persist()
+		if err != nil {
+			return err
 		}
 	}
-	return op, nil
+	return nil
 }
 
 func jsonEquivalent(a, b []byte) bool {

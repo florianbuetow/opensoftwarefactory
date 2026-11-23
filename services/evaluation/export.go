@@ -78,12 +78,24 @@ type exportFile struct {
 }
 
 type exportManifest struct {
-	RunSnapshot
+	*RunSnapshot
 	Input       string       `json:"input,omitempty"`
 	FinalOutput string       `json:"final_output,omitempty"`
 	Note        string       `json:"note,omitempty"`
 	Files       []exportFile `json:"files"`
 }
+
+// The roles of an exported file that more than one rule assigns.
+const (
+	roleInput        = "input"
+	roleStepOutput   = "step output"
+	roleAgentRecord  = "agent record"
+	roleGateDecision = "gate decision"
+	roleTeamResult   = "team result"
+)
+
+// inputObject is the name of a run's input, in the store and in the export.
+const inputObject = "input"
 
 var (
 	attemptRecord = regexp.MustCompile(`^(.+)\.attempt-(\d+)\.run\.json$`)
@@ -100,8 +112,8 @@ var (
 func classify(trace, id string) (file, role, description, step string) {
 	if rest, ok := strings.CutPrefix(id, "runs/"+trace+"/"); ok {
 		switch {
-		case rest == "input":
-			return "input", "input", "The input the run was started with.", ""
+		case rest == inputObject:
+			return inputObject, roleInput, "The input the run was started with.", ""
 		case rest == "run.json":
 			return "run.json", "run record", "Workflow, who started the run, and when.", ""
 		case rest == "metadata.json":
@@ -114,21 +126,21 @@ func classify(trace, id string) (file, role, description, step string) {
 		}
 		if m := attemptRecord.FindStringSubmatch(rest); m != nil {
 			dir, step, pass := stepFolder(m[1])
-			return dir + "/attempt-" + m[2] + ".agent-record.json", "agent record",
+			return dir + "/attempt-" + m[2] + ".agent-record.json", roleAgentRecord,
 				"Record of attempt " + m[2] + pass + ": every message, tool call, token count and timing. Not an output.", step
 		}
 		if s, ok := strings.CutSuffix(rest, ".run.json"); ok {
 			dir, step, pass := stepFolder(s)
-			return dir + "/agent-record.json", "agent record",
+			return dir + "/agent-record.json", roleAgentRecord,
 				"Record of the agent's last attempt" + pass + ": every message, tool call, token count and timing. Not an output.", step
 		}
 		if m := gateRound.FindStringSubmatch(rest); m != nil {
 			dir, step, pass := stepFolder(m[1])
-			return dir + "/decision-round-" + m[2], "gate decision",
+			return dir + "/decision-round-" + m[2], roleGateDecision,
 				"The gate's decision in round " + m[2] + pass + ", before its last one.", step
 		}
 		dir, step, pass := stepFolder(rest)
-		return dir + "/output", "step output", "What the step handed to the steps after it" + pass + ".", step
+		return dir + "/output", roleStepOutput, "What the step handed to the steps after it" + pass + ".", step
 	}
 	if rest, ok := strings.CutPrefix(id, "user-sessions/"+trace+"/"); ok {
 		step, part := rest, ""
@@ -156,7 +168,7 @@ func classify(trace, id string) (file, role, description, step string) {
 		case part == "team.json":
 			return "teams/" + rest, "team manifest", "The team's members and channels.", step
 		case part == "finished.json":
-			return "teams/" + rest, "team result", "The lead's final summary and the result files it named.", step
+			return "teams/" + rest, roleTeamResult, "The lead's final summary and the result files it named.", step
 		case strings.HasPrefix(part, "channels/"):
 			return "teams/" + rest, "channel queue", "The messages one member sent on one channel.", step
 		case strings.HasPrefix(part, "members/"):
@@ -182,8 +194,8 @@ func stepFolder(step string) (dir, plain, pass string) {
 }
 
 // refine names what a step output is when its content tells.
-func refine(role, description string, data []byte) (string, string) {
-	if role != "step output" {
+func refine(role, description string, data []byte) (refinedRole, refinedDescription string) {
+	if role != roleStepOutput {
 		return role, description
 	}
 	var doc map[string]json.RawMessage
@@ -191,12 +203,12 @@ func refine(role, description string, data []byte) (string, string) {
 		return role, description
 	}
 	if _, ok := doc["decision"]; ok {
-		return "gate decision", "The step's output: the gate's last decision, with the question, the inputs it was shown, and who decided."
+		return roleGateDecision, "The step's output: the gate's last decision, with the question, the inputs it was shown, and who decided."
 	}
 	_, team := doc["team"]
 	_, files := doc["files"]
 	if team && files {
-		return "team result", "The step's output: the team's summary and the result files it named."
+		return roleTeamResult, "The step's output: the team's summary and the result files it named."
 	}
 	return role, description
 }
@@ -221,8 +233,8 @@ func safeName(s string) string {
 	return s
 }
 
-func (s *service) getBytes(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (s *service) getBytes(ctx context.Context, url string) (data []byte, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +242,7 @@ func (s *service) getBytes(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == 404 {
 		return nil, errNotFound
 	}
@@ -260,7 +272,13 @@ func (s *service) exportSet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.zip"`, name))
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	// The archive's directory is written on Close. If that fails the download
+	// is already under way, so the failure can only be logged.
+	defer func() {
+		if closeErr := zw.Close(); closeErr != nil {
+			s.log.Error("closing the evaluation export archive failed", "set", set.ID, "error", closeErr)
+		}
+	}()
 	add := func(file string, data []byte, modified time.Time) error {
 		if modified.IsZero() {
 			modified = set.Updated
@@ -284,7 +302,8 @@ func (s *service) exportSet(w http.ResponseWriter, r *http.Request) {
 	if err := add("set.json", stored, time.Time{}); err != nil {
 		return
 	}
-	for i, run := range set.Runs {
+	for i := range set.Runs {
+		run := &set.Runs[i]
 		short := run.TraceID
 		if len(short) > 8 {
 			short = short[:8]
@@ -344,7 +363,7 @@ func (s *service) exportRun(ctx context.Context, trace string, manifest *exportM
 			Object: o.ID, Creator: o.Creator, Created: o.Created, Size: len(data),
 		})
 		switch {
-		case role == "input":
+		case role == roleInput:
 			manifest.Input = file
 		case strings.HasPrefix(file, "steps/") && strings.HasPrefix(path.Base(file), "output.") && !strings.Contains(step, "/"):
 			// The top-level step that wrote its output last ended the run.

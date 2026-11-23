@@ -67,17 +67,17 @@ func TestFindDefinitionNewestAndPinReferences(t *testing.T) {
 	if d, ok := FindDefinition(defs, "inner"); !ok || d.Version != 2 {
 		t.Errorf("newest %+v %v", d, ok)
 	}
-	if d, ok := FindDefinition(defs, "inner@v1"); !ok || d.Steps[0].ID != "old" {
+	if d, ok := FindDefinition(defs, "inner@v1"); !ok || d.Steps[0].ID != oldStep {
 		t.Errorf("pinned %+v %v", d, ok)
 	}
 	// A definition without a version is v1.
-	if d, ok := FindDefinition(defs, "legacy@v1"); !ok || d.Name != "legacy" {
+	if d, ok := FindDefinition(defs, "legacy@v1"); !ok || d.Name != legacyWorkflow {
 		t.Errorf("unversioned %+v %v", d, ok)
 	}
 	if _, ok := FindDefinition(defs, "inner@v3"); ok {
 		t.Error("found a version that does not exist")
 	}
-	if newest := Newest(defs); len(newest) != 3 || newest[0].Version != 2 || newest[1].Name != "legacy" || newest[2].Name != "outer" {
+	if newest := Newest(defs); len(newest) != 3 || newest[0].Version != 2 || newest[1].Name != legacyWorkflow || newest[2].Name != "outer" {
 		t.Errorf("newest %+v", newest)
 	}
 	PinReferences(defs)
@@ -85,8 +85,8 @@ func TestFindDefinitionNewestAndPinReferences(t *testing.T) {
 	if outer[0].Workflow != "inner@v2" || outer[1].Workflow != "inner@v1" || strings.Join(outer[2].Workflows, ",") != "legacy@v1,gone" {
 		t.Errorf("pinned %+v", outer)
 	}
-	nested := NestedDefinitions(defs, defs[3])
-	if len(nested) != 3 || nested[0].Version != 2 || nested[1].Steps[0].ID != "old" || nested[2].Name != "legacy" {
+	nested := NestedDefinitions(defs, &defs[3])
+	if len(nested) != 3 || nested[0].Version != 2 || nested[1].Steps[0].ID != oldStep || nested[2].Name != legacyWorkflow {
 		t.Errorf("nested %+v", nested)
 	}
 	if refs := AgentRefs(defs[3], defs[3]); len(refs) != 1 || refs[0] != "lead@v1" {
@@ -100,7 +100,7 @@ func TestWorkflowStepRunsThePinnedVersion(t *testing.T) {
 		env, store, _ := teamEnv(t, defs, cooperative)
 		_ = store.Put(context.Background(), "runs/p1/input", []byte("hello"), Meta{})
 		outer := Definition{Name: "outer", Steps: []Step{{ID: "nested", Service: WorkflowService, Workflow: ref}}}
-		env.ExecuteWorkflow(Pipeline, Input{TraceID: "p1", Definition: outer, Inputs: runInput("runs/p1/input")})
+		env.ExecuteWorkflow(Pipeline, &Input{TraceID: "p1", Definition: outer, Inputs: runInput("runs/p1/input")})
 		if err := env.GetWorkflowError(); err != nil {
 			t.Fatalf("%s: %v", ref, err)
 		}
@@ -113,7 +113,7 @@ func TestWorkflowStepRunsThePinnedVersion(t *testing.T) {
 	env, store, _ := teamEnv(t, defs, cooperative)
 	_ = store.Put(context.Background(), "runs/p2/input", []byte("hello"), Meta{})
 	outer := Definition{Name: "outer", Steps: []Step{{ID: "nested", Service: WorkflowService, Workflow: "inner@v3"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "p2", Definition: outer, Inputs: runInput("runs/p2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "p2", Definition: outer, Inputs: runInput("runs/p2/input")})
 	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), `workflow "inner@v3" is not a configured workflow`) {
 		t.Fatalf("error %v", err)
 	}
@@ -128,10 +128,10 @@ func TestTeamWorkflowMemberRunsThePinnedVersionUnderItsPlainName(t *testing.T) {
 	step.Workflows = []string{"echo@v1"}
 	step.Channels = [][]string{{"lead", "coder"}, {"lead", "echo"}}
 	def := Definition{Name: "solo", Steps: []Step{step}}
-	if err := Validate(def); err != nil {
+	if err := Validate(&def); err != nil {
 		t.Fatal(err)
 	}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "p3", Definition: def, Inputs: runInput("runs/p3/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "p3", Definition: def, Inputs: runInput("runs/p3/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestTeamWorkflowMemberRunsThePinnedVersionUnderItsPlainName(t *testing.T) {
 	}
 	var member teamMemberFile
 	_, _ = f.a.getJSON(ctx, "teams/p3/build/members/echo.json", &member)
-	if member.Member != "echo" || member.Agent != "echo@v1" {
+	if member.Member != echoMember || member.Agent != "echo@v1" {
 		t.Errorf("member file %+v", member)
 	}
 }
@@ -153,17 +153,17 @@ func TestTeamWorkflowMemberRunsThePinnedVersionUnderItsPlainName(t *testing.T) {
 func TestValidatePinnedReferences(t *testing.T) {
 	node := func(id, ref string) Step { return Step{ID: id, Service: WorkflowService, Workflow: ref} }
 	for _, bad := range []string{"inner@1", "inner@v0", "inner@", "a//b@v1", "a/b/c/d/e@v1"} {
-		if err := Validate(Definition{Name: "w", Steps: []Step{node("n", bad)}}); err == nil {
+		if err := Validate(&Definition{Name: "w", Steps: []Step{node("n", bad)}}); err == nil {
 			t.Errorf("workflow step accepted %q", bad)
 		}
 		team := Step{ID: "t", Service: TeamService, Agent: "lead@v1", Workflows: []string{bad}}
-		if err := Validate(Definition{Name: "w", Steps: []Step{team}}); err == nil {
+		if err := Validate(&Definition{Name: "w", Steps: []Step{team}}); err == nil {
 			t.Errorf("team accepted %q", bad)
 		}
 	}
 	// Two versions of one workflow would be two members of the same name.
 	twice := Step{ID: "t", Service: TeamService, Agent: "lead@v1", Workflows: []string{"docs@v1", "docs@v2"}}
-	if err := Validate(Definition{Name: "w", Steps: []Step{twice}}); err == nil || !strings.Contains(err.Error(), `two members named "docs"`) {
+	if err := Validate(&Definition{Name: "w", Steps: []Step{twice}}); err == nil || !strings.Contains(err.Error(), `two members named "docs"`) {
 		t.Errorf("two versions as members: %v", err)
 	}
 
@@ -228,10 +228,15 @@ func finishedMetadata(t *testing.T, data []byte) map[string]any {
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m["schema_version"] != float64(1) || m["workflow"].(map[string]any)["version"] != float64(2) {
+	workflow, ok := m["workflow"].(map[string]any)
+	if !ok || m["schema_version"] != float64(1) || workflow["version"] != float64(2) {
 		t.Fatalf("metadata %s", data)
 	}
-	if _, err := time.Parse(time.RFC3339, m["finished"].(string)); err != nil {
+	finished, ok := m["finished"].(string)
+	if !ok {
+		t.Fatalf("finished %v", m["finished"])
+	}
+	if _, err := time.Parse(time.RFC3339, finished); err != nil {
 		t.Fatalf("finished %v", m["finished"])
 	}
 	return m
@@ -243,7 +248,7 @@ func TestTopLevelRunCompletesItsMetadata(t *testing.T) {
 	_ = store.Put(ctx, "runs/m1/input", []byte("hello"), Meta{})
 	_ = store.Put(ctx, "runs/m1/metadata.json", []byte(startedMetadata), Meta{})
 	def := Definition{Name: "w", Steps: []Step{{ID: "say", Service: "echo"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m1", Definition: def, Inputs: runInput("runs/m1/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m1", Definition: def, Inputs: runInput("runs/m1/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -259,12 +264,12 @@ func TestFailedRunRecordsStatusAndError(t *testing.T) {
 	_ = store.Put(ctx, "runs/m2/metadata.json", []byte(startedMetadata), Meta{})
 	// The input artifact is missing, so the step fails.
 	def := Definition{Name: "w", Steps: []Step{{ID: "say", Service: "echo"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m2", Definition: def, Inputs: runInput("runs/m2/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m2", Definition: def, Inputs: runInput("runs/m2/input")})
 	if err := env.GetWorkflowError(); err == nil {
 		t.Fatal("the run did not fail")
 	}
 	m := finishedMetadata(t, store.m["runs/m2/metadata.json"])
-	if m["status"] != RunFailed || !strings.Contains(m["error"].(string), `step "say" failed`) {
+	if failure, ok := m["error"].(string); m["status"] != RunFailed || !ok || !strings.Contains(failure, `step "say" failed`) {
 		t.Fatalf("metadata %v", m)
 	}
 }
@@ -275,7 +280,7 @@ func TestCancelledRunRecordsCancelled(t *testing.T) {
 	_ = store.Put(ctx, "runs/m3/metadata.json", []byte(startedMetadata), Meta{})
 	def := Definition{Name: "w", Steps: []Step{{ID: "ask", Service: GateService}}}
 	env.RegisterDelayedCallback(env.CancelWorkflow, time.Second)
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m3", Definition: def, Inputs: runInput("runs/m3/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m3", Definition: def, Inputs: runInput("runs/m3/input")})
 	if err := env.GetWorkflowError(); err == nil {
 		t.Fatal("the run did not end with an error")
 	}
@@ -293,7 +298,7 @@ func TestNestedRunDoesNotFinishTheMetadata(t *testing.T) {
 	// A nested run stores its artifacts under the step, where no metadata belongs.
 	_ = store.Put(ctx, "runs/m4/nested/metadata.json", []byte(startedMetadata), Meta{})
 	outer := Definition{Name: "outer", Steps: []Step{{ID: "nested", Service: WorkflowService, Workflow: "inner@v1"}}}
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: "m4", Definition: outer, Inputs: runInput("runs/m4/input")})
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: "m4", Definition: outer, Inputs: runInput("runs/m4/input")})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}

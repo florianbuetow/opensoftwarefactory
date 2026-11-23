@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -22,12 +23,19 @@ var (
 	stepPattern    = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,255}$`)
 )
 
+// The states of the health report and of each of its components.
+const (
+	healthOK          = "ok"
+	healthDegraded    = "degraded"
+	healthUnavailable = "unavailable"
+)
+
 type observabilityClient struct {
+	http                                         *http.Client
 	base, user, password                         string
 	collectorBase, tracingHealth, tracingMetrics string
 	retentionDays                                int
 	retentionKnown                               bool
-	http                                         *http.Client
 }
 
 type observabilityLog struct {
@@ -51,17 +59,17 @@ type observabilitySpan struct {
 	ParentSpanID string `json:"parent_span_id,omitempty"`
 	Operation    string `json:"operation,omitempty"`
 	Service      string `json:"service,omitempty"`
-	Status       string `json:"status,omitempty"`
 	Start        any    `json:"start,omitempty"`
 	End          any    `json:"end,omitempty"`
 	Duration     any    `json:"duration,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 type observabilitySearch struct {
+	Error   string           `json:"function_error"`
 	Hits    []map[string]any `json:"hits"`
 	Total   int              `json:"total"`
 	Partial bool             `json:"is_partial"`
-	Error   string           `json:"function_error"`
 }
 
 func loadObservability(base, configPath, collectorBase, tracingHealth, tracingMetrics string) *observabilityClient {
@@ -70,7 +78,7 @@ func loadObservability(base, configPath, collectorBase, tracingHealth, tracingMe
 		tracingHealth: strings.TrimRight(tracingHealth, "/"), tracingMetrics: strings.TrimRight(tracingMetrics, "/"),
 		http: &http.Client{Timeout: 15 * time.Second},
 	}
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(filepath.Clean(configPath))
 	if err != nil {
 		return client
 	}
@@ -100,7 +108,7 @@ func (o *observabilityClient) search(ctx context.Context, sql string, start, end
 	return o.searchType(ctx, sql, start, end, size, "")
 }
 
-func (o *observabilityClient) searchType(ctx context.Context, sql string, start, end time.Time, size int, signal string) (observabilitySearch, error) {
+func (o *observabilityClient) searchType(ctx context.Context, sql string, start, end time.Time, size int, signal string) (_ observabilitySearch, err error) {
 	if !o.configured() {
 		return observabilitySearch{}, errors.New("log search is not configured")
 	}
@@ -121,13 +129,14 @@ func (o *observabilityClient) searchType(ctx context.Context, sql string, start,
 	if err != nil {
 		return observabilitySearch{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		return observabilitySearch{}, fmt.Errorf("log search returned %s", resp.Status)
 	}
 	var result observabilitySearch
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
+	err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result)
+	if err != nil {
 		return observabilitySearch{}, fmt.Errorf("decoding log search: %w", err)
 	}
 	if result.Error != "" {
@@ -261,57 +270,57 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 	})
 	mux.HandleFunc("GET /api/observability/health", func(w http.ResponseWriter, r *http.Request) {
 		components := map[string]map[string]any{}
-		status := "ok"
+		status := healthOK
 		if !client.configured() {
-			components["logs"] = map[string]any{"status": "unavailable", "reason": "Log search is not configured"}
-			status = "unavailable"
+			components["logs"] = map[string]any{"status": healthUnavailable, "reason": "Log search is not configured"}
+			status = healthUnavailable
 		} else {
 			now := time.Now().UTC()
 			_, err := client.search(r.Context(), `SELECT _timestamp FROM "factory" ORDER BY _timestamp DESC`, now.Add(-10*time.Minute), now, 1)
 			if err != nil {
-				components["logs"] = map[string]any{"status": "unavailable", "reason": "Cannot query collected logs"}
-				status = "unavailable"
+				components["logs"] = map[string]any{"status": healthUnavailable, "reason": "Cannot query collected logs"}
+				status = healthUnavailable
 			} else {
-				components["logs"] = map[string]any{"status": "ok"}
+				components["logs"] = map[string]any{"status": healthOK}
 			}
 		}
 		collector := client.componentHealth(r.Context(), client.collectorBase+"/api/v1/health")
-		if collector["status"] == "ok" {
+		if collector["status"] == healthOK {
 			metrics, err := client.getText(r.Context(), client.collectorBase+"/api/v1/metrics/prometheus")
 			if err != nil {
-				collector = map[string]any{"status": "unavailable", "reason": "Cannot read log delivery metrics"}
+				collector = map[string]any{"status": healthUnavailable, "reason": "Cannot read log delivery metrics"}
 			} else if value := failedDeliveryCount(metrics); value > 0 {
-				collector = map[string]any{"status": "degraded", "reason": "Collected logs were dropped or exhausted delivery retries", "lost_records": value}
+				collector = map[string]any{"status": healthDegraded, "reason": "Collected logs were dropped or exhausted delivery retries", "lost_records": value}
 			}
 			if storage, err := client.getText(r.Context(), client.collectorBase+"/api/v1/storage"); err == nil {
 				pending, over := storagePressure(storage)
 				collector["pending_chunks"] = pending
 				if over {
-					collector["status"], collector["reason"] = "degraded", "The log delivery buffer is over its configured limit"
+					collector["status"], collector["reason"] = healthDegraded, "The log delivery buffer is over its configured limit"
 				}
 			}
 		}
 		components["log_delivery"] = collector
 		traces := client.componentHealth(r.Context(), client.tracingHealth)
-		if traces["status"] == "ok" {
+		if traces["status"] == healthOK {
 			metrics, err := client.getText(r.Context(), client.tracingMetrics)
 			if err != nil {
-				traces = map[string]any{"status": "unavailable", "reason": "Cannot read trace delivery metrics"}
+				traces = map[string]any{"status": healthUnavailable, "reason": "Cannot read trace delivery metrics"}
 			} else if value := failedTraceCount(metrics); value > 0 {
-				traces = map[string]any{"status": "degraded", "reason": "Trace export failures or refused spans were reported", "affected_spans": value}
+				traces = map[string]any{"status": healthDegraded, "reason": "Trace export failures or refused spans were reported", "affected_spans": value}
 			} else if size, capacity := traceQueue(metrics); capacity > 0 {
 				traces["queued_batches"], traces["queue_capacity"] = size, capacity
 				if size/capacity >= .8 {
-					traces["status"], traces["reason"] = "degraded", "The trace delivery queue is near capacity"
+					traces["status"], traces["reason"] = healthDegraded, "The trace delivery queue is near capacity"
 				}
 			}
 		}
 		components["traces"] = traces
 		for _, component := range components {
-			if component["status"] == "unavailable" {
-				status = "unavailable"
-			} else if component["status"] == "degraded" && status == "ok" {
-				status = "degraded"
+			if component["status"] == healthUnavailable {
+				status = healthUnavailable
+			} else if component["status"] == healthDegraded && status == healthOK {
+				status = healthDegraded
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": status, "components": components, "retention_days": client.retentionDays, "retention_known": client.retentionKnown || client.retentionDays > 0})
@@ -319,11 +328,11 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 	return mux
 }
 
-func (o *observabilityClient) getText(ctx context.Context, endpoint string) (string, error) {
+func (o *observabilityClient) getText(ctx context.Context, endpoint string) (_ string, err error) {
 	if endpoint == "" {
 		return "", errors.New("endpoint is not configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +340,7 @@ func (o *observabilityClient) getText(ctx context.Context, endpoint string) (str
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("health endpoint returned %s", resp.Status)
 	}
@@ -342,16 +351,16 @@ func (o *observabilityClient) getText(ctx context.Context, endpoint string) (str
 func (o *observabilityClient) componentHealth(ctx context.Context, endpoint string) map[string]any {
 	body, err := o.getText(ctx, endpoint)
 	if err != nil {
-		return map[string]any{"status": "unavailable", "reason": "Telemetry component is unreachable"}
+		return map[string]any{"status": healthUnavailable, "reason": "Telemetry component is unreachable"}
 	}
 	var result map[string]any
 	if json.Unmarshal([]byte(body), &result) == nil {
 		state := strings.ToLower(fmt.Sprint(result["status"]))
 		if state != "" && state != "ok" && state != "healthy" && state != "ready" && state != "server available" {
-			return map[string]any{"status": "degraded", "reason": "Telemetry component reports " + state}
+			return map[string]any{"status": healthDegraded, "reason": "Telemetry component reports " + state}
 		}
 	}
-	return map[string]any{"status": "ok"}
+	return map[string]any{"status": healthOK}
 }
 
 func failedDeliveryCount(metrics string) float64 {

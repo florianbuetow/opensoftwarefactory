@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func TestSaveRefusesAVersionThatReachesItself(t *testing.T) {
 	if code != http.StatusUnprocessableEntity || !strings.Contains(out, "a@v1 -\\u003e a@v1") {
 		t.Fatalf("%d %s", code, out)
 	}
-	if after, _ := workflowObjects(workflows); string(before) != string(after) {
+	if after, _ := workflowObjects(workflows); !bytes.Equal(before, after) {
 		t.Fatal("an invalid version changed config.yaml")
 	}
 }

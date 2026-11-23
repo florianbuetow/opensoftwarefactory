@@ -42,7 +42,7 @@ func run() error {
 		}
 	}()
 	tracedHTTP := &http.Client{Timeout: 10 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)}
-	g := newGateway(blobStore{base, tracedHTTP}, log)
+	g := newGateway(blobStore{base: base, client: tracedHTTP}, log)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// Blobstore may start after this deployment. Failed startup never creates an

@@ -15,8 +15,16 @@ var errNotFound = errors.New("not found")
 
 // blobClient reads and writes objects of the blob store over HTTP.
 type blobClient struct {
-	base string
 	http *http.Client
+	base string
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }
 
 func (b blobClient) get(ctx context.Context, id string) ([]byte, error) {
@@ -24,8 +32,8 @@ func (b blobClient) get(ctx context.Context, id string) ([]byte, error) {
 	return data, err
 }
 
-func (b blobClient) getWithRevision(ctx context.Context, id string) ([]byte, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/blobs/"+id, nil)
+func (b blobClient) getWithRevision(ctx context.Context, id string) (data []byte, revision string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/blobs/"+id, http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}
@@ -33,14 +41,14 @@ func (b blobClient) getWithRevision(ctx context.Context, id string) ([]byte, str
 	if err != nil {
 		return nil, "", fmt.Errorf("the blob store is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, "", errNotFound
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, "", fmt.Errorf("reading %s from the blob store: %s", id, resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return nil, "", err
 	}
@@ -49,7 +57,7 @@ func (b blobClient) getWithRevision(ctx context.Context, id string) ([]byte, str
 
 var errPrecondition = errors.New("precondition failed")
 
-func (b blobClient) putConditionalJSON(ctx context.Context, id string, v any, revision string, create bool) (string, error) {
+func (b blobClient) putConditionalJSON(ctx context.Context, id string, v any, revision string, create bool) (stored string, err error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return "", err
@@ -69,7 +77,7 @@ func (b blobClient) putConditionalJSON(ctx context.Context, id string, v any, re
 	if err != nil {
 		return "", fmt.Errorf("the blob store is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusPreconditionFailed {
 		return "", errPrecondition
 	}
@@ -87,7 +95,7 @@ func (b blobClient) getJSON(ctx context.Context, id string, out any) error {
 	return json.Unmarshal(data, out)
 }
 
-func (b blobClient) put(ctx context.Context, id string, data []byte, contentType, creator, trace string) error {
+func (b blobClient) put(ctx context.Context, id string, data []byte, contentType, creator, trace string) (err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, b.base+"/blobs/"+id, bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -101,7 +109,7 @@ func (b blobClient) put(ctx context.Context, id string, data []byte, contentType
 	if err != nil {
 		return fmt.Errorf("the blob store is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("writing %s to the blob store: %s", id, resp.Status)
 	}
@@ -116,8 +124,8 @@ func (b blobClient) putJSON(ctx context.Context, id string, v any, creator, trac
 	return b.put(ctx, id, data, "application/json", creator, trace)
 }
 
-func (b blobClient) delete(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, b.base+"/blobs/"+id, nil)
+func (b blobClient) delete(ctx context.Context, id string) (err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, b.base+"/blobs/"+id, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -125,7 +133,7 @@ func (b blobClient) delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("the blob store is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("deleting %s from the blob store: %s", id, resp.Status)
 	}
@@ -134,8 +142,8 @@ func (b blobClient) delete(ctx context.Context, id string) error {
 
 // list returns the IDs of the objects directly under a prefix; a prefix that does not exist
 // has none.
-func (b blobClient) list(ctx context.Context, prefix string) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/list/"+prefix, nil)
+func (b blobClient) list(ctx context.Context, prefix string) (ids []string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/list/"+prefix, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +151,7 @@ func (b blobClient) list(ctx context.Context, prefix string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the blob store is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
 	}
@@ -155,10 +163,11 @@ func (b blobClient) list(ctx context.Context, prefix string) ([]string, error) {
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&listing); err != nil {
+	err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&listing)
+	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(listing.Objects))
+	ids = make([]string, 0, len(listing.Objects))
 	for _, o := range listing.Objects {
 		ids = append(ids, o.ID)
 	}

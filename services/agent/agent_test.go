@@ -24,9 +24,9 @@ import (
 // fakes bundles httptest servers for the registry, blobstore, LLM gateway and MCP gateway.
 type fakes struct {
 	t                *testing.T
+	svc              *Service
 	agent            string // agent.json
-	llm              []func(w http.ResponseWriter, body map[string]any)
-	mu               sync.Mutex
+	llm              []llmHandler
 	blobs            map[string][]byte
 	putMeta          map[string][2]string
 	putMetricHeaders map[string]http.Header
@@ -36,17 +36,71 @@ type fakes struct {
 	mcpHeads         []http.Header
 	mcpFailMethod    string
 	mcpToolText      string
-	mcpToolError     bool
 	prompt           string
 	policyContent    string
 	policyVersion    string
-	policyStatus     int
 	policyRequests   []string
-	svc              *Service
+	policyStatus     int
+	mu               sync.Mutex
+	mcpToolError     bool
 }
 
-func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter, body map[string]any)) *fakes {
-	f := &fakes{t: t, agent: agentJSON, llm: llm, prompt: "You are intake.", policyContent: "Follow the security policy.", policyVersion: "v1", blobs: map[string][]byte{
+// llmHandler answers one request to the fake LLM gateway. The fake reports the error it
+// returns to the test.
+type llmHandler func(w http.ResponseWriter, body map[string]any) error
+
+// Values the tests use again and again.
+const (
+	intakeRef      = "intake@v1"
+	intakePrompt   = "You are intake."
+	planArtifact   = "runs/t1/plan"
+	planAnswer     = "the plan"
+	firstCallID    = "call_1"
+	effortHigh     = "high"
+	mcpDocsPath    = "/mcp/docs"
+	llmGatewayName = "llm_gateway"
+)
+
+// jsonObject returns a decoded JSON value as an object and fails the test when it is none.
+func jsonObject(t *testing.T, v any) map[string]any {
+	t.Helper()
+	object, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("%v (%T) is not a JSON object", v, v)
+	}
+	return object
+}
+
+// jsonList returns a decoded JSON value as an array and fails the test when it is none.
+func jsonList(t *testing.T, v any) []any {
+	t.Helper()
+	list, ok := v.([]any)
+	if !ok {
+		t.Fatalf("%v (%T) is not a JSON array", v, v)
+	}
+	return list
+}
+
+// jsonString returns a decoded JSON value as a string and fails the test when it is none.
+func jsonString(t *testing.T, v any) string {
+	t.Helper()
+	text, ok := v.(string)
+	if !ok {
+		t.Fatalf("%v (%T) is not a JSON string", v, v)
+	}
+	return text
+}
+
+// writeBody writes a response body and reports a failed write to the test.
+func writeBody(t *testing.T, w io.Writer, body string) {
+	t.Helper()
+	if _, err := io.WriteString(w, body); err != nil {
+		t.Error(err)
+	}
+}
+
+func newFakes(t *testing.T, agentJSON string, llm ...llmHandler) *fakes {
+	f := &fakes{t: t, agent: agentJSON, llm: llm, prompt: intakePrompt, policyContent: "Follow the security policy.", policyVersion: "v1", blobs: map[string][]byte{
 		"runs/t1/input":  []byte("please build a thing"),
 		"runs/t1/intake": []byte("intent record"),
 	}, putMeta: map[string][2]string{}, putMetricHeaders: map[string]http.Header{}, mcpToolText: "found 3 hits"}
@@ -110,7 +164,9 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 				http.NotFound(w, r)
 				return
 			}
-			w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				t.Error(err)
+			}
 		case http.MethodPut:
 			data, _ := io.ReadAll(r.Body)
 			f.blobs[id] = data
@@ -128,7 +184,9 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 			return
 		}
 		var body map[string]any
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
 		f.mu.Lock()
 		n := len(f.llmReqs)
 		f.llmReqs = append(f.llmReqs, body)
@@ -137,10 +195,12 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 		if n >= len(f.llm) {
 			n = len(f.llm) - 1
 		}
-		f.llm[n](w, body)
+		if err := f.llm[n](w, body); err != nil {
+			t.Error(err)
+		}
 	}))
 	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/mcp/docs" && r.URL.Path != "/mcp/code" {
+		if r.URL.Path != mcpDocsPath && r.URL.Path != "/mcp/code" {
 			http.NotFound(w, r)
 			return
 		}
@@ -153,7 +213,10 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 			return
 		}
 		var msg map[string]any
-		json.NewDecoder(r.Body).Decode(&msg)
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			t.Error(err)
+			return
+		}
 		f.mu.Lock()
 		msg["_path"] = r.URL.Path
 		f.mcpCalls = append(f.mcpCalls, msg)
@@ -164,7 +227,7 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 			http.Error(w, "forced MCP failure", http.StatusBadGateway)
 			return
 		}
-		if method != "initialize" {
+		if method != mcpInitialize {
 			if r.Header.Get("MCP-Protocol-Version") != mcpProtocolVersion || r.Header.Get("Mcp-Session-Id") != session {
 				t.Errorf("%s headers: version=%q session=%q", method, r.Header.Get("MCP-Protocol-Version"), r.Header.Get("Mcp-Session-Id"))
 			}
@@ -172,21 +235,21 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 		id, _ := json.Marshal(msg["id"])
 		reply := func(result string) {
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(id)+`,"result":`+result+`}`)
+			writeBody(t, w, `{"jsonrpc":"2.0","id":`+string(id)+`,"result":`+result+`}`)
 		}
 		switch msg["method"] {
-		case "initialize":
+		case mcpInitialize:
 			w.Header().Set("Mcp-Session-Id", session)
 			reply(`{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}`)
-		case "notifications/initialized", "notifications/cancelled":
+		case mcpInitialized, "notifications/cancelled":
 			w.WriteHeader(http.StatusAccepted)
-		case "tools/list":
+		case mcpToolsList:
 			reply(`{"tools":[{"name":"search","description":"Search docs","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}}},{"name":"delete_all","description":"Dangerous"},{"name":"noschema","description":"No schema"}]}`)
-		case "tools/call":
+		case mcpToolsCall:
 			// Answer as an event stream to exercise SSE parsing.
 			w.Header().Set("Content-Type", "text/event-stream")
 			text, _ := json.Marshal(f.mcpToolText)
-			io.WriteString(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":"+string(id)+",\"result\":{\"content\":[{\"type\":\"text\",\"text\":"+string(text)+"}],\"isError\":"+strconv.FormatBool(f.mcpToolError)+"}}\n\n")
+			writeBody(t, w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":"+string(id)+",\"result\":{\"content\":[{\"type\":\"text\",\"text\":"+string(text)+"}],\"isError\":"+strconv.FormatBool(f.mcpToolError)+"}}\n\n")
 		}
 	}))
 	for _, s := range []*httptest.Server{registry, policySrv, blob, llmSrv, mcpSrv} {
@@ -204,18 +267,19 @@ func newFakes(t *testing.T, agentJSON string, llm ...func(w http.ResponseWriter,
 	return f
 }
 
-func request() StepRequest {
-	return StepRequest{
-		TraceID: "t1", Workflow: "feature", StepID: "plan", Agent: "intake@v1",
+func request() *StepRequest {
+	return &StepRequest{
+		TraceID: "t1", Workflow: "feature", StepID: "plan", Agent: intakeRef,
 		Inputs:         []InputItem{{Source: "input", Artifact: "runs/t1/input", Round: 1}, {Source: "intake", Artifact: "runs/t1/intake", Round: 1}},
-		OutputArtifact: "runs/t1/plan",
+		OutputArtifact: planArtifact,
 	}
 }
 
-func respond(js string) func(http.ResponseWriter, map[string]any) {
-	return func(w http.ResponseWriter, _ map[string]any) {
+func respond(js string) llmHandler {
+	return func(w http.ResponseWriter, _ map[string]any) error {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, js)
+		_, err := io.WriteString(w, js)
+		return err
 	}
 }
 
@@ -245,8 +309,8 @@ func TestProcessCompilesLatestPoliciesThroughPolicyService(t *testing.T) {
 	if got := len(f.policyRequests); got != 2 {
 		t.Fatalf("policy requests = %d, want one per run despite repeated reference", got)
 	}
-	firstSystem := f.llmReqs[0]["messages"].([]any)[0].(map[string]any)["content"]
-	secondSystem := f.llmReqs[1]["messages"].([]any)[0].(map[string]any)["content"]
+	firstSystem := jsonObject(t, jsonList(t, f.llmReqs[0]["messages"])[0])["content"]
+	secondSystem := jsonObject(t, jsonList(t, f.llmReqs[1]["messages"])[0])["content"]
 	if firstSystem != "Start\nPolicy v1 contains {{policy::missing}} literally.\nAgain: Policy v1 contains {{policy::missing}} literally.\nEnd" {
 		t.Fatalf("first compiled system = %q", firstSystem)
 	}
@@ -310,7 +374,7 @@ func TestProcessMissingOrMalformedRequiredPolicyFailsBeforeModel(t *testing.T) {
 			if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 				t.Fatal(err)
 			}
-			if rec.Status != "failed" || len(rec.Events) != 1 || rec.Events[0].Kind != "policy_compilation" || rec.Events[0].Status != "failed" {
+			if rec.Status != statusFailed || len(rec.Events) != 1 || rec.Events[0].Kind != "policy_compilation" || rec.Events[0].Status != statusFailed {
 				t.Fatalf("failed record = %+v", rec)
 			}
 			if rec.PromptEvidence == nil || string(f.blobs[rec.PromptEvidence.SourcePromptArtifact]) != test.prompt || rec.PromptEvidence.EffectivePromptArtifact != "" {
@@ -330,85 +394,85 @@ func TestProcessHappyPathWithToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Artifact != "runs/t1/plan" {
+	if res.Artifact != planArtifact {
 		t.Fatalf("artifact = %q", res.Artifact)
 	}
-	if got := string(f.blobs["runs/t1/plan"]); got != "the plan" {
+	if got := string(f.blobs[planArtifact]); got != planAnswer {
 		t.Fatalf("stored answer = %q", got)
 	}
 	want := [2]string{"agent:intake@v1", "t1"}
-	if f.putMeta["runs/t1/plan"] != want || f.putMeta["runs/t1/plan.run.json"] != want {
+	if f.putMeta[planArtifact] != want || f.putMeta["runs/t1/plan.run.json"] != want {
 		t.Fatalf("put metadata = %v", f.putMeta)
 	}
-	artifactHeaders := f.putMetricHeaders["runs/t1/plan"]
-	if artifactHeaders.Get("X-Estimated-Input-Tokens") == "" || artifactHeaders.Get("X-Estimated-Output-Tokens") != "2" || artifactHeaders.Get("X-Processing-Time-Ms") == "" || artifactHeaders.Get("X-Estimation-Method") != tokenEstimationMethod {
+	artifactHeaders := f.putMetricHeaders[planArtifact]
+	if artifactHeaders.Get("X-Estimated-Input-Tokens") == "" || artifactHeaders.Get("X-Estimated-Output-Tokens") != "2" || artifactHeaders.Get("X-Processing-Time-Ms") == "" || artifactHeaders.Get("X-Estimation-Method") != estimationMethod {
 		t.Fatalf("handoff metric headers = %v", artifactHeaders)
 	}
 
 	// MCP initialization, ready notification, tools/list, and tools/call.
-	var methods []string
+	methods := make([]string, 0, len(f.mcpCalls))
 	for _, c := range f.mcpCalls {
-		methods = append(methods, c["method"].(string))
+		methods = append(methods, jsonString(t, c["method"]))
 	}
 	if strings.Join(methods, ",") != "initialize,notifications/initialized,tools/list,tools/call" {
 		t.Fatalf("mcp methods = %v", methods)
 	}
-	params := f.mcpCalls[3]["params"].(map[string]any)
-	if params["name"] != "search" || params["arguments"].(map[string]any)["q"] != "auth" {
+	params := jsonObject(t, f.mcpCalls[3]["params"])
+	if params["name"] != "search" || jsonObject(t, params["arguments"])["q"] != "auth" {
 		t.Fatalf("tools/call params = %v", params)
 	}
 
 	// First model request: model, effort, filtered tools, system and user messages.
 	first := f.llmReqs[0]
-	if first["model"] != "m1" || first["reasoning_effort"] != "high" || first["stream"] != false {
+	if first["model"] != "m1" || first["reasoning_effort"] != effortHigh || first["stream"] != false {
 		t.Fatalf("request = %v", first)
 	}
-	tools := first["tools"].([]any)
-	if len(tools) != 1 || tools[0].(map[string]any)["function"].(map[string]any)["name"] != "docs__search" {
+	tools := jsonList(t, first["tools"])
+	if len(tools) != 1 || jsonObject(t, jsonObject(t, tools[0])["function"])["name"] != "docs__search" {
 		t.Fatalf("tools = %v", tools)
 	}
-	msgs := first["messages"].([]any)
-	if msgs[0].(map[string]any)["content"] != "You are intake." {
+	msgs := jsonList(t, first["messages"])
+	if jsonObject(t, msgs[0])["content"] != intakePrompt {
 		t.Fatalf("system = %v", msgs[0])
 	}
 	wantUser := "Trace: t1\nWorkflow: feature\nStep: plan\nOutput artifact: runs/t1/plan\n\n" +
 		"## Input \"input\" (object runs/t1/input)\nplease build a thing\n\n" +
 		"## Input \"intake\" (object runs/t1/intake)\nintent record"
-	if got := msgs[1].(map[string]any)["content"]; got != wantUser {
+	if got := jsonObject(t, msgs[1])["content"]; got != wantUser {
 		t.Fatalf("user message =\n%q\nwant\n%q", got, wantUser)
 	}
 
 	// Second request carries the assistant tool call and the tool result.
-	second := f.llmReqs[1]["messages"].([]any)
+	second := jsonList(t, f.llmReqs[1]["messages"])
 	if len(second) != 4 {
 		t.Fatalf("second request has %d messages", len(second))
 	}
-	tool := second[3].(map[string]any)
-	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" || tool["content"] != "found 3 hits" {
+	tool := jsonObject(t, second[3])
+	if tool["role"] != roleTool || tool["tool_call_id"] != firstCallID || tool["content"] != "found 3 hits" {
 		t.Fatalf("tool message = %v", tool)
 	}
 
 	var rec struct {
-		Agent                 string     `json:"agent"`
-		Model                 string     `json:"model"`
-		Effort                string     `json:"effort"`
-		ModelCalls            int        `json:"model_calls"`
-		Messages              []any      `json:"messages"`
-		Usage                 usage      `json:"usage"`
 		EstimatedInputTokens  *int64     `json:"estimated_input_tokens"`
 		EstimatedOutputTokens *int64     `json:"estimated_output_tokens"`
 		ProcessingTimeMS      *int64     `json:"processing_time_ms"`
+		Agent                 string     `json:"agent"`
+		Model                 string     `json:"model"`
+		Effort                string     `json:"effort"`
 		EstimationMethod      string     `json:"estimation_method"`
 		Status                string     `json:"status"`
-		Attempt               int32      `json:"attempt"`
 		TraceID               string     `json:"trace_id"`
 		SpanID                string     `json:"span_id"`
+		Messages              []any      `json:"messages"`
 		Events                []RunEvent `json:"events"`
+		Usage                 usage      `json:"usage"`
+		ModelCalls            int        `json:"model_calls"`
+		Attempt               int32      `json:"attempt"`
 	}
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Agent != "intake@v1" || rec.Model != "m1" || rec.Effort != "high" || rec.ModelCalls != 2 || len(rec.Messages) != 5 {
+	if rec.Agent != intakeRef || rec.Model != "m1" || rec.Effort != effortHigh || rec.ModelCalls != 2 || len(rec.Messages) != 5 {
 		t.Fatalf("run record = %+v", rec)
 	}
 	if valueOf(rec.Usage.PromptTokens) != 30 || valueOf(rec.Usage.CompletionTokens) != 12 || valueOf(rec.Usage.TotalTokens) != 42 {
@@ -417,7 +481,7 @@ func TestProcessHappyPathWithToolCall(t *testing.T) {
 	if rec.Events[1].EstimatedInputTokens == nil || rec.Events[1].EstimatedOutputTokens == nil || rec.Events[1].ProcessingTimeMS == nil || rec.Events[2].EstimatedInputTokens == nil || rec.Events[2].EstimatedOutputTokens == nil || rec.Events[2].ProcessingTimeMS == nil || rec.Events[3].EstimatedOutputTokens == nil {
 		t.Fatalf("operation metrics missing: %+v", rec.Events)
 	}
-	if rec.EstimatedInputTokens == nil || rec.EstimatedOutputTokens == nil || rec.EstimationMethod != tokenEstimationMethod || rec.ProcessingTimeMS == nil {
+	if rec.EstimatedInputTokens == nil || rec.EstimatedOutputTokens == nil || rec.EstimationMethod != estimationMethod || rec.ProcessingTimeMS == nil {
 		t.Fatalf("run estimate metrics missing: %+v", rec)
 	}
 	if *rec.EstimatedInputTokens != *rec.Events[1].EstimatedInputTokens+*rec.Events[3].EstimatedInputTokens || *rec.EstimatedOutputTokens != *rec.Events[1].EstimatedOutputTokens+*rec.Events[3].EstimatedOutputTokens {
@@ -426,14 +490,14 @@ func TestProcessHappyPathWithToolCall(t *testing.T) {
 	if artifactHeaders.Get("X-Estimated-Input-Tokens") != strconv.FormatInt(*rec.Events[1].EstimatedInputTokens, 10) {
 		t.Fatalf("artifact initial request estimate = %q, want %d", artifactHeaders.Get("X-Estimated-Input-Tokens"), *rec.Events[1].EstimatedInputTokens)
 	}
-	if rec.Status != "completed" || rec.Attempt != 1 || rec.TraceID != "" || rec.SpanID != "" || len(rec.Events) != 4 {
+	if rec.Status != statusCompleted || rec.Attempt != 1 || rec.TraceID != "" || rec.SpanID != "" || len(rec.Events) != 4 {
 		t.Fatalf("record observability = status %q attempt %d trace/span %q/%q events %+v", rec.Status, rec.Attempt, rec.TraceID, rec.SpanID, rec.Events)
 	}
 	if _, ok := f.blobs["runs/t1/plan.attempt-1.run.json"]; !ok {
 		t.Fatal("immutable attempt record missing")
 	}
 	for _, headers := range append(f.llmHeads, f.mcpHeads...) {
-		if headers.Get("X-Trace-Id") != "t1" || headers.Get("X-Step-Id") != "plan" || headers.Get("X-Agent-Ref") != "intake@v1" || !regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`).MatchString(headers.Get("Traceparent")) {
+		if headers.Get("X-Trace-Id") != "t1" || headers.Get("X-Step-Id") != "plan" || headers.Get("X-Agent-Ref") != intakeRef || !regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`).MatchString(headers.Get("Traceparent")) {
 			t.Fatalf("correlation headers = %v", headers)
 		}
 	}
@@ -458,10 +522,10 @@ func TestNoToolsNeverCallsMCP(t *testing.T) {
 
 func TestModelCallCheckpointIsDurableBeforeExternalCallCompletes(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":[]}`, func(w http.ResponseWriter, _ map[string]any) {
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":[]}`, func(w http.ResponseWriter, _ map[string]any) error {
 		close(started)
 		<-release
-		respond(finalResponse)(w, nil)
+		return respond(finalResponse)(w, nil)
 	})
 	done := make(chan error, 1)
 	go func() { _, err := f.svc.Process(context.Background(), request()); done <- err }()
@@ -473,7 +537,7 @@ func TestModelCallCheckpointIsDurableBeforeExternalCallCompletes(t *testing.T) {
 	if err := json.Unmarshal(checkpoint, &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != "running" || len(rec.Events) != 1 || rec.Events[0].Status != "running" || rec.Events[0].Kind != "model_call" || len(rec.Messages) != 2 {
+	if rec.Status != statusRunning || len(rec.Events) != 1 || rec.Events[0].Status != statusRunning || rec.Events[0].Kind != kindModelCall || len(rec.Messages) != 2 {
 		t.Fatalf("in-flight checkpoint = %+v", rec)
 	}
 	close(release)
@@ -528,11 +592,11 @@ func TestDuplicateToolNamesRouteToSelectedServers(t *testing.T) {
 	}
 	called := map[string]bool{}
 	for _, call := range f.mcpCalls {
-		if call["method"] == "tools/call" {
-			called[call["_path"].(string)] = true
+		if call["method"] == mcpToolsCall {
+			called[jsonString(t, call["_path"])] = true
 		}
 	}
-	if !called["/mcp/docs"] || !called["/mcp/code"] || len(called) != 2 {
+	if !called[mcpDocsPath] || !called["/mcp/code"] || len(called) != 2 {
 		t.Fatalf("tool calls routed to %v", called)
 	}
 }
@@ -552,12 +616,12 @@ func TestAllowlistFiltersAndDefaultsSchema(t *testing.T) {
 	if _, err := f.svc.Process(context.Background(), request()); err != nil {
 		t.Fatal(err)
 	}
-	tools := f.llmReqs[0]["tools"].([]any)
+	tools := jsonList(t, f.llmReqs[0]["tools"])
 	if len(tools) != 1 {
 		t.Fatalf("tools = %v", tools)
 	}
-	fn := tools[0].(map[string]any)["function"].(map[string]any)
-	if fn["name"] != "docs__noschema" || fn["parameters"].(map[string]any)["type"] != "object" {
+	fn := jsonObject(t, jsonObject(t, tools[0])["function"])
+	if fn["name"] != "docs__noschema" || jsonObject(t, fn["parameters"])["type"] != "object" {
 		t.Fatalf("function = %v", fn)
 	}
 }
@@ -571,13 +635,13 @@ func TestDisallowedAndInvalidToolCallsBecomeToolErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range f.mcpCalls {
-		if c["method"] == "tools/call" {
+		if c["method"] == mcpToolsCall {
 			t.Fatalf("unexpected tools/call: %v", c)
 		}
 	}
-	msgs := f.llmReqs[1]["messages"].([]any)
+	msgs := jsonList(t, f.llmReqs[1]["messages"])
 	for _, i := range []int{3, 4} {
-		if content := msgs[i].(map[string]any)["content"].(string); !strings.HasPrefix(content, "Error: ") {
+		if content := jsonString(t, jsonObject(t, msgs[i])["content"]); !strings.HasPrefix(content, "Error: ") {
 			t.Fatalf("tool message %d = %q", i, content)
 		}
 	}
@@ -592,14 +656,14 @@ func TestMaxRetriesExceeded(t *testing.T) {
 	if len(f.llmReqs) != 2 {
 		t.Fatalf("model calls = %d", len(f.llmReqs))
 	}
-	if _, ok := f.blobs["runs/t1/plan"]; ok {
+	if _, ok := f.blobs[planArtifact]; ok {
 		t.Fatal("output stored despite failure")
 	}
 	var rec RunRecord
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != "failed" || !strings.Contains(rec.Error, "max_retries=1") || rec.ModelCalls != 2 || len(rec.Messages) < 4 {
+	if rec.Status != statusFailed || !strings.Contains(rec.Error, "max_retries=1") || rec.ModelCalls != 2 || len(rec.Messages) < 4 {
 		t.Fatalf("failure record = %+v", rec)
 	}
 	if _, ok := f.blobs["runs/t1/plan.attempt-1.run.json"]; !ok {
@@ -618,16 +682,17 @@ func TestOneModelCallByDefault(t *testing.T) {
 }
 
 func TestGatewayErrorIncludesUpstreamMessage(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"]}`, func(w http.ResponseWriter, _ map[string]any) {
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"]}`, func(w http.ResponseWriter, _ map[string]any) error {
 		w.WriteHeader(http.StatusInternalServerError)
-		io.WriteString(w, `{"error":{"message":"upstream exploded","type":"api_error"}}`)
+		_, err := io.WriteString(w, `{"error":{"message":"upstream exploded","type":"api_error"}}`)
+		return err
 	})
 	_, err := f.svc.Process(context.Background(), request())
 	if err == nil || !strings.Contains(err.Error(), "upstream exploded") || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("err = %v", err)
 	}
 	var rec RunRecord
-	if json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec) != nil || rec.Status != "failed" || len(rec.Events) != 1 || rec.Events[0].Status != "failed" || rec.Events[0].Category != "llm_gateway" {
+	if json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec) != nil || rec.Status != statusFailed || len(rec.Events) != 1 || rec.Events[0].Status != statusFailed || rec.Events[0].Category != llmGatewayName {
 		t.Fatalf("gateway failure record = %+v", rec)
 	}
 	if rec.Events[0].EstimatedInputTokens == nil || rec.Events[0].EstimatedOutputTokens != nil || rec.Events[0].ProcessingTimeMS == nil || rec.EstimatedInputTokens == nil || rec.EstimatedOutputTokens != nil || rec.ProcessingTimeMS == nil {
@@ -636,7 +701,7 @@ func TestGatewayErrorIncludesUpstreamMessage(t *testing.T) {
 }
 
 func TestErrorCategoriesDistinguishGatewayAndTransport(t *testing.T) {
-	if got := errorCategory(categorizedError{"llm_gateway", "404"}); got != "llm_gateway" {
+	if got := errorCategory(categorizedError{llmGatewayName, "404"}); got != llmGatewayName {
 		t.Fatalf("gateway category = %q", got)
 	}
 	if got := errorCategory(errors.New("connection reset")); got != "transport" {
@@ -646,7 +711,7 @@ func TestErrorCategoriesDistinguishGatewayAndTransport(t *testing.T) {
 
 func TestMCPTransportFailurePersistsTimeline(t *testing.T) {
 	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`, respond(toolCallResponse))
-	f.mcpFailMethod = "tools/call"
+	f.mcpFailMethod = mcpToolsCall
 	_, err := f.svc.Process(context.Background(), request())
 	if err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("err = %v", err)
@@ -655,7 +720,7 @@ func TestMCPTransportFailurePersistsTimeline(t *testing.T) {
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != "failed" || len(rec.Events) != 3 || rec.Events[2].Kind != "tool_call" || rec.Events[2].Status != "failed" || rec.Events[2].ToolCallID != "call_1" {
+	if rec.Status != statusFailed || len(rec.Events) != 3 || rec.Events[2].Kind != kindToolCall || rec.Events[2].Status != statusFailed || rec.Events[2].ToolCallID != firstCallID {
 		t.Fatalf("MCP failure record = %+v", rec)
 	}
 }
@@ -670,17 +735,23 @@ func TestSuccessfulToolTextStartingWithErrorIsNotMisclassified(t *testing.T) {
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.Events) != 4 || rec.Events[2].Status != "completed" || rec.Events[2].Error != "" {
+	if len(rec.Events) != 4 || rec.Events[2].Status != statusCompleted || rec.Events[2].Error != "" {
 		t.Fatalf("successful tool response was misclassified: %+v", rec.Events)
 	}
 }
 
 func TestCorrelationSpanDistinguishesNestedStepsWithSameID(t *testing.T) {
 	first := request()
-	second := first
+	second := request()
 	second.OutputArtifact = "runs/t1/route/plan"
-	one := withCorrelation(context.Background(), first, first.Agent, 1).Value(correlationKey{}).(correlation)
-	two := withCorrelation(context.Background(), second, second.Agent, 1).Value(correlationKey{}).(correlation)
+	one, ok := withCorrelation(context.Background(), first, first.Agent, 1).Value(correlationKey{}).(correlation)
+	if !ok {
+		t.Fatal("first context carries no correlation")
+	}
+	two, ok := withCorrelation(context.Background(), second, second.Agent, 1).Value(correlationKey{}).(correlation)
+	if !ok {
+		t.Fatal("second context carries no correlation")
+	}
 	if strings.Split(one.traceparent, "-")[1] != strings.Split(two.traceparent, "-")[1] {
 		t.Fatal("one run must share one trace ID")
 	}
@@ -694,7 +765,10 @@ func TestCorrelationHeadersCarryExecutionActivityAndTurn(t *testing.T) {
 	req.ExecutionID = "execution-1"
 	req.ParentExecutionID = "parent-1"
 	ctx := withModelTurn(withCorrelation(context.Background(), req, "judge@v3", 2), 4)
-	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.test", nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.test", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
 	setCorrelationHeaders(httpReq)
 	if httpReq.Header.Get("X-Execution-Id") != "execution-1" || httpReq.Header.Get("X-Parent-Execution-Id") != "parent-1" || httpReq.Header.Get("X-Activity-Attempt") != "2" || httpReq.Header.Get("X-Turn") != "4" {
 		t.Fatalf("headers %v", httpReq.Header)
@@ -713,7 +787,7 @@ func TestCanceledAttemptPersistsWithBackgroundContext(t *testing.T) {
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != "canceled" || rec.Error == "" {
+	if rec.Status != statusCanceled || rec.Error == "" {
 		t.Fatalf("cancel record = %+v", rec)
 	}
 }
@@ -752,15 +826,16 @@ func TestSuccessfulWorkWithRecordFailureLogsFailedStatus(t *testing.T) {
 			terminal = entry
 		}
 	}
-	if terminal["status"] != "failed" || !strings.Contains(fmt.Sprint(terminal["error"]), "final record unavailable") {
+	if terminal["status"] != statusFailed || !strings.Contains(fmt.Sprint(terminal["error"]), "final record unavailable") {
 		t.Fatalf("terminal log = %v", terminal)
 	}
 }
 
 func TestStartCheckpointFailureStopsBeforeExternalCall(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"]}`, func(w http.ResponseWriter, _ map[string]any) {
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"]}`, func(w http.ResponseWriter, _ map[string]any) error {
 		w.WriteHeader(http.StatusBadGateway)
-		io.WriteString(w, `{"error":{"message":"original model failure"}}`)
+		_, err := io.WriteString(w, `{"error":{"message":"original model failure"}}`)
+		return err
 	})
 	f.svc.Store = failingPutStore{Store: f.svc.Store}
 	_, err := f.svc.Process(context.Background(), request())

@@ -33,7 +33,6 @@ type usage struct {
 func (u *usage) UnmarshalJSON(data []byte) error {
 	type wire usage
 	var decoded struct {
-		wire
 		InputTokens   *int64 `json:"input_tokens"`
 		OutputTokens  *int64 `json:"output_tokens"`
 		PromptDetails struct {
@@ -42,6 +41,7 @@ func (u *usage) UnmarshalJSON(data []byte) error {
 		CompletionDetails struct {
 			Reasoning *int64 `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
+		wire
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
@@ -74,10 +74,10 @@ func (u usage) MarshalJSON() ([]byte, error) {
 type chatRequest struct {
 	Model           string            `json:"model"`
 	Messages        []any             `json:"messages"`
-	Tools           []any             `json:"tools,omitempty"`
 	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 	Temperature     *float64          `json:"temperature,omitempty"`
 	ResponseFormat  map[string]string `json:"response_format,omitempty"`
+	Tools           []any             `json:"tools,omitempty"`
 	// MaxTokens limits one answer, so a model that does not stop cannot hold a step for minutes.
 	MaxTokens int  `json:"max_tokens,omitempty"`
 	Stream    bool `json:"stream"`
@@ -88,12 +88,12 @@ type chatRequest struct {
 type completion struct {
 	Message       json.RawMessage
 	Content       string
-	ToolCalls     []toolCall
 	Usage         *usage
 	MeasurementID string
+	ToolCalls     []toolCall
 }
 
-func chat(ctx context.Context, client *http.Client, baseURL string, req chatRequest) (completion, error) {
+func chat(ctx context.Context, client *http.Client, baseURL string, req *chatRequest) (c completion, err error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return completion{}, err
@@ -108,7 +108,7 @@ func chat(ctx context.Context, client *http.Client, baseURL string, req chatRequ
 	if err != nil {
 		return completion{}, fmt.Errorf("llm gateway: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return completion{}, fmt.Errorf("llm gateway: %w", err)
@@ -125,12 +125,13 @@ func chat(ctx context.Context, client *http.Client, baseURL string, req chatRequ
 		return completion{}, categorizedError{"llm_gateway", fmt.Sprintf("llm gateway: %s", resp.Status)}
 	}
 	var out struct {
+		Usage   *usage `json:"usage"`
 		Choices []struct {
 			Message json.RawMessage `json:"message"`
 		} `json:"choices"`
-		Usage *usage `json:"usage"`
 	}
-	if err := json.Unmarshal(body, &out); err != nil {
+	err = json.Unmarshal(body, &out)
+	if err != nil {
 		return completion{}, fmt.Errorf("llm gateway: invalid response: %w", err)
 	}
 	if len(out.Choices) == 0 || len(out.Choices[0].Message) == 0 {
@@ -140,10 +141,11 @@ func chat(ctx context.Context, client *http.Client, baseURL string, req chatRequ
 		Content   *string    `json:"content"`
 		ToolCalls []toolCall `json:"tool_calls"`
 	}
-	if err := json.Unmarshal(out.Choices[0].Message, &msg); err != nil {
+	err = json.Unmarshal(out.Choices[0].Message, &msg)
+	if err != nil {
 		return completion{}, fmt.Errorf("llm gateway: invalid message: %w", err)
 	}
-	c := completion{Message: out.Choices[0].Message, ToolCalls: msg.ToolCalls, Usage: out.Usage, MeasurementID: resp.Header.Get("X-Usage-Measurement-Id")}
+	c = completion{Message: out.Choices[0].Message, ToolCalls: msg.ToolCalls, Usage: out.Usage, MeasurementID: resp.Header.Get("X-Usage-Measurement-Id")}
 	if msg.Content != nil {
 		c.Content = *msg.Content
 	}

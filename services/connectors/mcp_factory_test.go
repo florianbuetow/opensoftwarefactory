@@ -30,7 +30,7 @@ func TestFactoryMCPRegistrationIsReadOnlyAndPreservesExisting(t *testing.T) {
 		}
 		return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}
-	s := newService(config{mcpURL: "http://tool-gateway:8080/mcp"}, nil, client, nil)
+	s := newService(&config{mcpURL: "http://tool-gateway:8080/mcp"}, nil, client, nil)
 	s.mcpGateway = "http://mcp-gateway"
 	created, err := s.registerFactory(context.Background())
 	if err != nil || !created {
@@ -39,7 +39,7 @@ func TestFactoryMCPRegistrationIsReadOnlyAndPreservesExisting(t *testing.T) {
 	if !reflect.DeepEqual(saved["allowlist"], []any{"read_trace", "read_trace_artifact"}) {
 		t.Fatalf("allowlist=%v", saved["allowlist"])
 	}
-	denied := saved["denylist"].([]any)
+	denied := as[[]any](t, saved["denylist"])
 	if len(denied) == 0 {
 		t.Fatal("write denylist is empty")
 	}

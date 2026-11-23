@@ -38,14 +38,7 @@ func skillFakes(t *testing.T, f *fakes) *podGateway {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		var req struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			} `json:"params"`
-		}
+		var req toolRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -53,15 +46,15 @@ func skillFakes(t *testing.T, f *fakes) *podGateway {
 		}
 		var result any
 		switch req.Method {
-		case "initialize":
+		case mcpInitialize:
 			w.Header().Set("Mcp-Session-Id", "skill-session")
 			result = json.RawMessage(`{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}`)
-		case "tools/list":
+		case mcpToolsList:
 			result = json.RawMessage(`{"tools":[
 				{"name":"read_skill","inputSchema":{"type":"object","properties":{"skill":{"type":"string"},"file":{"type":"string"},"pod":{"type":"string"},"agent":{"type":"string"},"run":{"type":"string"},"version":{"type":"string"}},"required":["skill","pod","agent","run","version"]}},
 				{"name":"run_skill_script","inputSchema":{"type":"object","properties":{"skill":{"type":"string"},"script":{"type":"string"},"args":{"type":"array"},"pod":{"type":"string"},"agent":{"type":"string"},"run":{"type":"string"},"version":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["skill","script","pod","agent","run","version","timeout_seconds"]}}
 			]}`)
-		case "tools/call":
+		case mcpToolsCall:
 			f.mu.Lock()
 			g.names = append(g.names, req.Params.Name)
 			g.calls = append(g.calls, req.Params.Arguments)
@@ -98,8 +91,8 @@ func TestSkillPromptToolsAndEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]any{
-		"skill": "tools/git", "script": "test.sh", "pod": "pod-1",
-		"agent": "intake@v1", "run": "t1", "version": "v3", "timeout_seconds": float64(75),
+		"skill": "tools/git", "script": "test.sh", "pod": testPod,
+		"agent": intakeRef, "run": "t1", "version": "v3", "timeout_seconds": float64(75),
 	}
 	if len(g.calls) != 1 || !reflect.DeepEqual(g.calls[0], want) {
 		t.Fatalf("forwarded calls: %v", g.calls)
@@ -110,7 +103,7 @@ func TestSkillPromptToolsAndEvidence(t *testing.T) {
 		if !reflect.DeepEqual(schema["required"], keys) {
 			t.Fatalf("%s required: %v", name, schema["required"])
 		}
-		props := schema["properties"].(map[string]any)
+		props := jsonObject(t, schema["properties"])
 		for _, hidden := range skillIdentity {
 			if _, ok := props[hidden]; ok {
 				t.Errorf("%s exposes %s", name, hidden)
@@ -179,7 +172,7 @@ func TestSkillScriptRequiresAPodInEveryTurn(t *testing.T) {
 				_, err = f.svc.Process(context.Background(), req)
 			case "chat":
 				body := chatBody()
-				req := sessionChatRequest{
+				req := &sessionChatRequest{
 					TraceID: body["trace_id"], StepID: body["step_id"], Session: body["session"],
 					Tab: body["tab"], Agent: body["agent"], Message: body["message"], Skills: versions,
 				}
@@ -209,7 +202,7 @@ func TestReadSkillWorksWithoutPod(t *testing.T) {
 	}
 	want := map[string]any{
 		"skill": "tools/git", "file": "release/SKILL.md", "pod": "",
-		"agent": "intake@v1", "run": "t1", "version": "v3",
+		"agent": intakeRef, "run": "t1", "version": "v3",
 	}
 	if len(g.calls) != 1 || !reflect.DeepEqual(g.calls[0], want) {
 		t.Fatalf("forwarded calls: %v", g.calls)

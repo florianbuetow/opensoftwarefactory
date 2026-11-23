@@ -49,7 +49,7 @@ const (
 )
 
 // IsNode reports whether the step is a merge or batch step.
-func (s Step) IsNode() bool {
+func (s *Step) IsNode() bool {
 	return s.Service == MergeService || s.Service == BatchService
 }
 
@@ -61,9 +61,9 @@ func PassName(step string, pass int) string {
 // Release is one message a merge or batch step forwarded. Timed marks a batch that the
 // input timeout released before it was full.
 type Release struct {
-	Pass  int       `json:"pass"`
-	Items []Item    `json:"items"`
 	At    time.Time `json:"at"`
+	Items []Item    `json:"items"`
+	Pass  int       `json:"pass"`
 	Timed bool      `json:"timed,omitempty"`
 }
 
@@ -79,11 +79,11 @@ type MergeState struct {
 	Kind         string       `json:"kind"`
 	Sources      []string     `json:"sources"`
 	Waiting      []MergeEntry `json:"waiting"`
-	Forwarded    int          `json:"forwarded"`
 	Expires      *time.Time   `json:"expires,omitempty"`
+	Releases     []Release    `json:"releases"`
+	Forwarded    int          `json:"forwarded"`
 	Capacity     int          `json:"capacity"`
 	InputTimeout int          `json:"input_timeout"`
-	Releases     []Release    `json:"releases"`
 }
 
 // BatchState is the state of a batch step. Collected lists the items that wait for the next
@@ -92,44 +92,45 @@ type BatchState struct {
 	Kind         string     `json:"kind"`
 	Sources      []string   `json:"sources"`
 	Collected    []Item     `json:"collected"`
+	Expires      *time.Time `json:"expires,omitempty"`
+	Releases     []Release  `json:"releases"`
 	Size         int        `json:"size"`
 	Released     int        `json:"released"`
-	Expires      *time.Time `json:"expires,omitempty"`
 	InputTimeout int        `json:"input_timeout"`
-	Releases     []Release  `json:"releases"`
 }
 
 // message is one result a source delivered to a merge step.
 type message struct {
-	items []Item
 	at    time.Time
+	items []Item
 }
 
 // node is the state of a merge or batch step during a run. It decides from its own queue
 // and its own timer only.
 type node struct {
-	step Step
-	// segment lists the steps that run once per release: those reached from the node
-	// without passing another merge or batch step.
-	segment []string
-	// queues holds, per source of a merge, the results that wait to be forwarded.
-	queues map[string][]message
-	// items holds the results a batch collected, and last is when the newest one arrived.
-	items    []Item
-	last     time.Time
-	releases []Release
+	// last is when the newest result of a batch arrived.
+	last time.Time
 	// armed is the expiry of the running timer; seq tells a current timer from a replaced one.
 	armed  time.Time
 	cancel workflow.CancelFunc
-	seq    int
+	// queues holds, per source of a merge, the results that wait to be forwarded.
+	queues map[string][]message
+	step   Step
+	// segment lists the steps that run once per release: those reached from the node
+	// without passing another merge or batch step.
+	segment []string
+	// items holds the results a batch collected.
+	items    []Item
+	releases []Release
+	seq      int
 }
 
 // newNodes returns the merge and batch steps of a definition in definition order.
-func newNodes(d Definition) []*node {
+func newNodes(d *Definition) []*node {
 	var nodes []*node
-	for _, s := range d.Steps {
-		if s.IsNode() {
-			nodes = append(nodes, &node{step: s, segment: segment(d, s.ID), queues: map[string][]message{}})
+	for i := range d.Steps {
+		if s := &d.Steps[i]; s.IsNode() {
+			nodes = append(nodes, &node{step: *s, segment: segment(d, s.ID), queues: map[string][]message{}})
 		}
 	}
 	return nodes
@@ -137,11 +138,12 @@ func newNodes(d Definition) []*node {
 
 // segment returns the steps reached from a merge or batch step without passing another one,
 // in definition order.
-func segment(d Definition, node string) []string {
+func segment(d *Definition, node string) []string {
 	reached := map[string]bool{node: true}
 	for changed := true; changed; {
 		changed = false
-		for _, s := range d.Steps {
+		for i := range d.Steps {
+			s := &d.Steps[i]
 			if reached[s.ID] || s.IsNode() {
 				continue
 			}
@@ -154,9 +156,9 @@ func segment(d Definition, node string) []string {
 		}
 	}
 	var steps []string
-	for _, s := range d.Steps {
-		if reached[s.ID] && s.ID != node {
-			steps = append(steps, s.ID)
+	for i := range d.Steps {
+		if id := d.Steps[i].ID; reached[id] && id != node {
+			steps = append(steps, id)
 		}
 	}
 	return steps

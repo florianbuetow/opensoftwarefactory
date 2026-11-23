@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-var ruleTools = map[string]bool{"write_file": true, "edit_file": true, "run_command": true}
+var ruleTools = map[string]bool{"write_file": true, "edit_file": true, toolRunCommand: true}
 
 func (r rule) check() error {
 	if !ruleTools[r.Tool] {
@@ -36,7 +36,7 @@ func (r rule) applies(tool, file, text string) bool {
 	if r.Tool != tool {
 		return false
 	}
-	if r.Path != "" && tool != "run_command" && !globMatch(r.Path, file) {
+	if r.Path != "" && tool != toolRunCommand && !globMatch(r.Path, file) {
 		return false
 	}
 	if r.Matches != "" {
@@ -49,9 +49,7 @@ func (r rule) applies(tool, file, text string) bool {
 // workspacePath turns a path an agent gave into one relative to the workspace.
 func workspacePath(p string) string {
 	p = strings.TrimSpace(p)
-	if strings.HasPrefix(p, "/workspace") {
-		p = strings.TrimPrefix(p, "/workspace")
-	}
+	p = strings.TrimPrefix(p, "/workspace")
 	p = path.Clean("/" + p)
 	return strings.TrimPrefix(p, "/")
 }
@@ -147,14 +145,14 @@ func commandAllowed(patterns []string, command string) error {
 }
 
 type cachedCommands struct {
-	patterns []string
 	read     time.Time
+	patterns []string
 }
 
 // allowedCommands reads the commands setting of an agent's agent.json from the agent
 // registry. A pinned version never changes, so it is read once; an unpinned agent is read
 // again after half a minute.
-func (s *service) allowedCommands(ctx context.Context, agent string) ([]string, error) {
+func (s *service) allowedCommands(ctx context.Context, agent string) (patterns []string, err error) {
 	name, version, pinned := strings.Cut(agent, "@")
 	if name == "" {
 		return nil, errors.New("the tool call does not say which agent makes it")
@@ -172,7 +170,7 @@ func (s *service) allowedCommands(ctx context.Context, agent string) ([]string, 
 	for i, part := range segments {
 		segments[i] = url.PathEscape(part)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.registry+"/agents/"+strings.Join(segments, "/")+"/"+url.PathEscape(version), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.registry+"/agents/"+strings.Join(segments, "/")+"/"+url.PathEscape(version), http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +178,7 @@ func (s *service) allowedCommands(ctx context.Context, agent string) ([]string, 
 	if err != nil {
 		return nil, errors.New("the agent registry is not reachable")
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("the agent registry does not know the agent %s", agent)
 	}
@@ -198,7 +196,7 @@ func (s *service) allowedCommands(ctx context.Context, agent string) ([]string, 
 		return nil, errors.New("the agent registry returned an agent.json that cannot be read")
 	}
 	s.mu.Lock()
-	s.commands[agent] = cachedCommands{entry.Files.Definition.Commands, s.now()}
+	s.commands[agent] = cachedCommands{patterns: entry.Files.Definition.Commands, read: s.now()}
 	s.mu.Unlock()
 	return entry.Files.Definition.Commands, nil
 }

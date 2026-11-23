@@ -15,10 +15,13 @@ import (
 	"time"
 )
 
+// searchPath is the OpenObserve endpoint the projector queries.
+const searchPath = "/api/default/_search"
+
 func TestProjectorWaitsForRemoteDeleteStatusBeforeReplay(t *testing.T) {
 	f, blob, orch := newFixture(t)
 	hour := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	m := Measurement{SchemaVersion: 1, ID: "u1", Kind: "usage", RunID: runA, ExecutionID: "e1", OccurredAt: hour.Add(time.Minute), Vendor: "v", Model: "m", Effort: "none", Modes: modesPtr(), Status: "reported", Missing: []string{}}
+	m := Measurement{SchemaVersion: 1, ID: "u1", Kind: "usage", RunID: runA, ExecutionID: "e1", OccurredAt: hour.Add(time.Minute), Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, Status: "reported", Missing: []string{}}
 	f.mu.Lock()
 	f.objects[measurementObject("usage", "u1")], _ = json.Marshal(m)
 	f.mu.Unlock()
@@ -99,7 +102,7 @@ func TestProjectorFailsClosedWhenDeleteIdentityIsAmbiguous(t *testing.T) {
 			writeJSON(w, 200, map[string]int{"records": 0})
 			return
 		}
-		if r.URL.Path == "/api/default/_search" {
+		if r.URL.Path == searchPath {
 			writeJSON(w, 200, map[string]any{"hits": []map[string]int{{"record_count": 0}}, "total": 1, "is_partial": false})
 			return
 		}
@@ -150,7 +153,7 @@ func TestProjectorPersistsInflightAndUsesExactHourBoundary(t *testing.T) {
 			writeJSON(w, 200, map[string]int{"records": 0})
 			return
 		}
-		if r.URL.Path == "/api/default/_search" {
+		if r.URL.Path == searchPath {
 			writeJSON(w, 200, map[string]any{"hits": []map[string]int{{"record_count": 0}}, "total": 1, "is_partial": false})
 			return
 		}
@@ -278,11 +281,11 @@ func TestProjectionSnapshotIsFrozenAcrossBatchesAndNextGenerationCatchesUp(t *te
 	f.revisions[measurementObject("execution", updated.ID)] = fmt.Sprintf("r%d", f.nextRevision)
 	f.mu.Unlock()
 	manifest := projectionManifest{Hour: hour, Generation: 1, SnapshotID: "snapshot-one", SnapshotChunks: chunks, SnapshotCount: count}
-	records, ids, more, err := s.projectionSnapshotBatch(t.Context(), manifest, 0, 500)
+	records, ids, more, err := s.projectionSnapshotBatch(t.Context(), &manifest, 0)
 	if err != nil || len(records) != 500 || len(ids) != 500 || !more {
 		t.Fatalf("first snapshot batch records=%d more=%v err=%v", len(records), more, err)
 	}
-	records, ids, more, err = s.projectionSnapshotBatch(t.Context(), manifest, 500, 500)
+	records, ids, more, err = s.projectionSnapshotBatch(t.Context(), &manifest, 500)
 	if err != nil || len(records) != 100 || len(ids) != 100 || more {
 		t.Fatalf("second snapshot batch records=%d more=%v err=%v", len(records), more, err)
 	}
@@ -301,7 +304,7 @@ func TestProjectionSnapshotIsFrozenAcrossBatchesAndNextGenerationCatchesUp(t *te
 	nextManifest := projectionManifest{Hour: hour, Generation: 2, SnapshotID: "snapshot-two", SnapshotCount: nextCount}
 	foundInsert, foundUpdate := false, false
 	for cursor := 0; cursor < nextCount; cursor += 500 {
-		batch, batchIDs, _, e := s.projectionSnapshotBatch(t.Context(), nextManifest, cursor, 500)
+		batch, batchIDs, _, e := s.projectionSnapshotBatch(t.Context(), &nextManifest, cursor)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -364,11 +367,15 @@ func TestDeleteWaitsForWALToPersistOwnedHour(t *testing.T) {
 func TestPersistenceBarrierRejectsMissingCountsAndPartialSearch(t *testing.T) {
 	hour := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name      string
 		full      map[string]any
 		partition map[string]any
+		name      string
 		wantErr   bool
-	}{{"missing-visible", map[string]any{"hits": []map[string]any{{}}, "total": 1, "is_partial": false}, map[string]any{"records": 0}, true}, {"missing-partition", map[string]any{"hits": []map[string]any{{"record_count": 0}}, "total": 1, "is_partial": false}, map[string]any{"file_num": 0}, true}, {"partial-visible", map[string]any{"hits": []map[string]any{{"record_count": 0}}, "total": 1, "is_partial": true}, map[string]any{"records": 0}, false}}
+	}{
+		{name: "missing-visible", full: map[string]any{"hits": []map[string]any{{}}, "total": 1, "is_partial": false}, partition: map[string]any{"records": 0}, wantErr: true},
+		{name: "missing-partition", full: map[string]any{"hits": []map[string]any{{"record_count": 0}}, "total": 1, "is_partial": false}, partition: map[string]any{"file_num": 0}, wantErr: true},
+		{name: "partial-visible", full: map[string]any{"hits": []map[string]any{{"record_count": 0}}, "total": 1, "is_partial": true}, partition: map[string]any{"records": 0}, wantErr: false},
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +410,7 @@ func TestMissingStreamRequiresConfirmedSchema404(t *testing.T) {
 				case r.Method == http.MethodDelete:
 					deletes++
 					writeJSON(w, 200, map[string]string{"id": "job"})
-				case r.URL.Path == "/api/default/_search":
+				case r.URL.Path == searchPath:
 					searches++
 					http.Error(w, "search missing", 400)
 				default:
@@ -443,7 +450,7 @@ func TestPersistedDeletionVerificationRecoversWhenSchemaIsConfirmedAbsent(t *tes
 		case strings.HasSuffix(r.URL.Path, "/_json"):
 			schemaExists = true
 			writeJSON(w, 200, map[string]any{"status": []map[string]int{{"successful": 1, "failed": 0}}})
-		case r.URL.Path == "/api/default/_search":
+		case r.URL.Path == searchPath:
 			writeJSON(w, 200, map[string]any{"hits": []map[string]any{{"projection_id": "execution/recover-absent", "generation": 1}}, "total": 1, "is_partial": false})
 		default:
 			http.NotFound(w, r)
@@ -485,14 +492,11 @@ func TestEvidenceFiltersTargetExecutionSubtreeAndExcludesSibling(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/evidence?run_id=" + runA + "&execution_id=target-exec&from=2026-11-01T11:00:00Z&to=2026-11-01T13:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, server.URL+"/api/evidence?run_id="+runA+"&execution_id=target-exec&from=2026-11-01T11:00:00Z&to=2026-11-01T13:00:00Z")
+	defer closeBody(t, resp.Body)
 	var result struct {
-		Spans        []map[string]any `json:"spans"`
 		SourceStatus string           `json:"source_status"`
+		Spans        []map[string]any `json:"spans"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
 		t.Fatal("decode evidence")

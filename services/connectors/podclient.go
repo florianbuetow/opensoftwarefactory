@@ -27,19 +27,19 @@ type commit struct {
 
 // helperResult is the answer of git-helper; each endpoint fills its own fields.
 type helperResult struct {
-	OK          bool     `json:"ok"`
 	Output      string   `json:"output"`
 	Error       string   `json:"error"`
 	StartCommit string   `json:"start_commit"`
 	Patch       string   `json:"patch"`
 	Commits     []commit `json:"commits"`
+	OK          bool     `json:"ok"`
 }
 
 // commandResult is the result of the tool server's run_command.
 type commandResult struct {
-	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
 }
 
 // conn finds the pod's address and the tokens of its servers, and remembers them.
@@ -78,18 +78,18 @@ func (s *service) forget(id string) {
 }
 
 // callPod sends one request to a server of the pod. The context limits its time.
-func (s *service) callPod(ctx context.Context, id string, port int, method, path string, in any) (int, []byte, error) {
+func (s *service) callPod(ctx context.Context, id string, port int, method, path string, in any) (status int, data []byte, err error) {
 	c, err := s.conn(ctx, id)
 	if err != nil {
 		return 0, nil, err
 	}
 	var body io.Reader
 	if in != nil {
-		data, err := json.Marshal(in)
-		if err != nil {
-			return 0, nil, err
+		encoded, marshalErr := json.Marshal(in)
+		if marshalErr != nil {
+			return 0, nil, marshalErr
 		}
-		body = bytes.NewReader(data)
+		body = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, s.podURL(c.ip, port)+path, body)
 	if err != nil {
@@ -109,12 +109,12 @@ func (s *service) callPod(ctx context.Context, id string, port int, method, path
 		s.forget(id)
 		return 0, nil, fmt.Errorf("dev pod %s does not answer: %w", id, err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	var response io.Reader = resp.Body
-	if path != "/skill-script" {
+	if path != skillScriptPath {
 		response = io.LimitReader(response, 64<<20)
 	}
-	data, err := io.ReadAll(response)
+	data, err = io.ReadAll(response)
 	return resp.StatusCode, data, err
 }
 
@@ -129,18 +129,18 @@ func (s *service) opWithin(ctx context.Context, id, name string, args any, limit
 	}
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	path := "/op"
-	if name == "run_skill_script" {
-		path = "/skill-script"
+	path := opPath
+	if name == toolRunSkillScript {
+		path = skillScriptPath
 	}
 	status, data, err := s.callPod(ctx, id, workPort, http.MethodPost, path, map[string]any{"op": name, "args": args})
 	if err != nil {
 		return nil, err
 	}
 	var answer struct {
-		OK     bool            `json:"ok"`
-		Result json.RawMessage `json:"result"`
 		Error  string          `json:"error"`
+		Result json.RawMessage `json:"result"`
+		OK     bool            `json:"ok"`
 	}
 	if json.Unmarshal(data, &answer) != nil || (status != 200 && answer.Error == "") {
 		return nil, fmt.Errorf("the dev pod's tool server answered %s with status %d: %s", name, status, tail(string(data), 500))
@@ -161,7 +161,7 @@ func (s *service) runCommand(ctx context.Context, id, command string, timeoutSec
 	if timeoutSeconds > 0 {
 		args["timeout_seconds"] = timeoutSeconds
 	}
-	raw, err := s.op(ctx, id, "run_command", args)
+	raw, err := s.op(ctx, id, toolRunCommand, args)
 	if err != nil {
 		return out, err
 	}
@@ -281,12 +281,12 @@ func (s *service) viewFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, content)
 }
 
-func (s *service) viewGit(w http.ResponseWriter, r *http.Request, args func(devPod) []string) {
+func (s *service) viewGit(w http.ResponseWriter, r *http.Request, args func(*devPod) []string) {
 	p, ok := s.ready(w, r)
 	if !ok {
 		return
 	}
-	out, err := s.helper(r.Context(), p.ID, "/git", map[string]any{"args": args(p)})
+	out, err := s.helper(r.Context(), p.ID, "/git", map[string]any{"args": args(&p)})
 	if err != nil {
 		s.podFailure(w, err)
 		return
@@ -295,18 +295,18 @@ func (s *service) viewGit(w http.ResponseWriter, r *http.Request, args func(devP
 }
 
 func (s *service) viewLog(w http.ResponseWriter, r *http.Request) {
-	s.viewGit(w, r, func(devPod) []string { return []string{"log", "-n", "200", "--date=iso", "--decorate"} })
+	s.viewGit(w, r, func(*devPod) []string { return []string{"log", "-n", "200", "--date=iso", "--decorate"} })
 }
 
 // viewDiff shows everything the pod changed since it was created from the source branch,
 // committed or not.
 func (s *service) viewDiff(w http.ResponseWriter, r *http.Request) {
-	s.viewGit(w, r, func(p devPod) []string { return []string{"diff", p.base()} })
+	s.viewGit(w, r, func(p *devPod) []string { return []string{"diff", p.base()} })
 }
 
 // base is the commit the work branch started from; the source branch stands in for it when
 // the clone did not report one.
-func (p devPod) base() string {
+func (p *devPod) base() string {
 	if p.StartCommit != "" {
 		return p.StartCommit
 	}

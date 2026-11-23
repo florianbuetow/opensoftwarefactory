@@ -33,7 +33,7 @@ func TestManualStartReturnsAcceptedIdentityAndLeavesRecoveryObligation(t *testin
 	runner := &fakeRunner{}
 	s := &server{workflows: workflows, blobs: store, runner: runner, logger: slog.New(slog.DiscardHandler)}
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/sample/runs", strings.NewReader("hello"))
-	req.SetPathValue("name", "sample")
+	req.SetPathValue("name", sampleWorkflow)
 	rec := httptest.NewRecorder()
 	s.startRun(rec, req)
 	if rec.Code != http.StatusAccepted {

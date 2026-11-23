@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +10,11 @@ import (
 )
 
 const (
-	teamPath     = "teams/t1/build"
-	teamMemberID = teamPath + "/members/lead.json"
+	teamPath         = "teams/t1/build"
+	teamMemberID     = teamPath + "/members/lead.json"
+	leadMember       = "lead"
+	coderMember      = "coder"
+	coderLeadChannel = "coder--lead"
 )
 
 const teamJSON = `{"lead":"lead","members":[
@@ -22,7 +24,7 @@ const teamJSON = `{"lead":"lead","members":[
 	"channels":[{"id":"coder--lead","members":["coder","lead"]},{"id":"lead--tester","members":["lead","tester"]},{"id":"coder--tester","members":["coder","tester"]}],
 	"trace_id":"t1","step_id":"build"}`
 
-func teamFakes(t *testing.T, agentJSON string, llm ...func(http.ResponseWriter, map[string]any)) *fakes {
+func teamFakes(t *testing.T, agentJSON string, llm ...llmHandler) *fakes {
 	f := newFakes(t, agentJSON, llm...)
 	f.blobs[teamPath+"/team.json"] = []byte(teamJSON)
 	// One queue per sender: a channel is <id>/<sender>.json for each side, seq counting per queue.
@@ -39,20 +41,19 @@ func teamFakes(t *testing.T, agentJSON string, llm ...func(http.ResponseWriter, 
 	return f
 }
 
-func leadTurn() TeamTurnRequest {
-	return TeamTurnRequest{TraceID: "t1", StepID: "build", Team: teamPath, Member: "lead", Agent: "intake@v1"}
+func leadTurn() *TeamTurnRequest {
+	return &TeamTurnRequest{TraceID: "t1", StepID: "build", Team: teamPath, Member: leadMember, Agent: intakeRef}
 }
 
-func storedMember(t *testing.T, f *fakes, id string) (teamMemberLog, []map[string]any) {
+func storedMember(t *testing.T, f *fakes, id string) (log teamMemberLog, messages []map[string]any) {
 	t.Helper()
 	f.mu.Lock()
 	data := f.blobs[id]
 	f.mu.Unlock()
-	var log teamMemberLog
 	if err := json.Unmarshal(data, &log); err != nil {
 		t.Fatalf("stored member history: %v: %s", err, data)
 	}
-	messages := make([]map[string]any, len(log.Messages))
+	messages = make([]map[string]any, len(log.Messages))
 	for i, m := range log.Messages {
 		if err := json.Unmarshal(m, &messages[i]); err != nil {
 			t.Fatal(err)
@@ -69,13 +70,13 @@ func TestTeamTurnFirstTurnDeliversUnreadOldestFirst(t *testing.T) {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
 	log, messages := storedMember(t, f, teamMemberID)
-	if log.Member != "lead" || log.Agent != "intake@v1" {
+	if log.Member != leadMember || log.Agent != intakeRef {
 		t.Fatalf("header = %+v", log)
 	}
-	if len(log.Read) != 3 || log.Read["lead--workflow"] != 1 || log.Read["coder--lead"] != 1 || log.Read["lead--tester"] != 1 {
+	if len(log.Read) != 3 || log.Read["lead--workflow"] != 1 || log.Read[coderLeadChannel] != 1 || log.Read["lead--tester"] != 1 {
 		t.Fatalf("read markers = %v", log.Read)
 	}
-	if len(messages) != 5 || messages[0]["role"] != "system" || messages[4]["role"] != "assistant" {
+	if len(messages) != 5 || messages[0]["role"] != roleSystem || messages[4]["role"] != roleAssistant {
 		t.Fatalf("messages = %v", messages)
 	}
 	for i, want := range []string{
@@ -83,11 +84,11 @@ func TestTeamTurnFirstTurnDeliversUnreadOldestFirst(t *testing.T) {
 		"[Message from tester on channel lead--tester]\nwrote test_parser.py",
 		"[Message from coder on channel coder--lead]\nwrote parser.py",
 	} {
-		if messages[i+1]["role"] != "user" || messages[i+1]["content"] != want {
+		if messages[i+1]["role"] != roleUser || messages[i+1]["content"] != want {
 			t.Fatalf("message %d = %v, want %q", i+1, messages[i+1], want)
 		}
 	}
-	system := messages[0]["content"].(string)
+	system := jsonString(t, messages[0]["content"])
 	if !strings.HasPrefix(system, "You are the lead. Follow the security policy.") {
 		t.Fatalf("system prompt was not compiled: %q", system)
 	}
@@ -112,11 +113,11 @@ func TestTeamTurnFirstTurnDeliversUnreadOldestFirst(t *testing.T) {
 	if want := [2]string{"agent:intake@v1", "t1"}; f.putMeta[teamMemberID] != want {
 		t.Fatalf("put metadata = %v", f.putMeta[teamMemberID])
 	}
-	if sent := f.llmReqs[0]["messages"].([]any); len(sent) != 4 {
+	if sent := jsonList(t, f.llmReqs[0]["messages"]); len(sent) != 4 {
 		t.Fatalf("sent messages = %v", sent)
 	}
 	head := f.llmHeads[0]
-	if head.Get("X-Trace-Id") != "t1" || head.Get("X-Step-Id") != "build" || head.Get("X-Agent-Ref") != "intake@v1" || head.Get("Traceparent") == "" {
+	if head.Get("X-Trace-Id") != "t1" || head.Get("X-Step-Id") != "build" || head.Get("X-Agent-Ref") != intakeRef || head.Get("Traceparent") == "" {
 		t.Fatalf("correlation headers = %v", head)
 	}
 }
@@ -125,7 +126,7 @@ func TestTeamTurnNoteForAMemberThatIsNotTheLead(t *testing.T) {
 	f := teamFakes(t, teamToolsJSON, respond(finalResponse))
 	factoryMCP(t, f, true)
 	req := leadTurn()
-	req.Member = "coder"
+	req.Member = coderMember
 	res, err := f.svc.TeamTurn(context.Background(), req)
 	if err != nil || res.ModelCalls != 1 {
 		t.Fatalf("result = %+v, %v", res, err)
@@ -134,10 +135,10 @@ func TestTeamTurnNoteForAMemberThatIsNotTheLead(t *testing.T) {
 	if len(messages) != 3 || messages[1]["content"] != "[Message from lead on channel coder--lead]\nwrite it" {
 		t.Fatalf("messages = %v", messages)
 	}
-	if len(log.Read) != 1 || log.Read["coder--lead"] != 1 {
+	if len(log.Read) != 1 || log.Read[coderLeadChannel] != 1 {
 		t.Fatalf("read markers = %v", log.Read)
 	}
-	system := messages[0]["content"].(string)
+	system := jsonString(t, messages[0]["content"])
 	for _, want := range []string{"The lead of this team is `lead`", "channel `coder--tester` -> reaches `tester`", "Never send messages that only say you are waiting.", "You cannot finish the team's work", "If you end your turn without calling send_message, your final answer is sent as your reply"} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("team note misses %q:\n%s", want, system)
@@ -187,11 +188,11 @@ func TestTeamTurnLaterTurnDeliversOnlyNewMessages(t *testing.T) {
 		t.Fatalf("a later turn compiled the prompt again: %v", f.policyRequests)
 	}
 	log, messages := storedMember(t, f, teamMemberID)
-	if len(messages) != 5 || messages[0]["content"] != "stored system" || messages[2]["extra"] == nil ||
+	if len(messages) != 5 || messages[0]["content"] != storedSystem || messages[2]["extra"] == nil ||
 		messages[3]["content"] != "[Message from coder on channel coder--lead]\nwrote parser.py" {
 		t.Fatalf("messages = %v", messages)
 	}
-	if log.Read["coder--lead"] != 1 || log.Read["lead--workflow"] != 1 || log.Read["lead--tester"] != 1 {
+	if log.Read[coderLeadChannel] != 1 || log.Read["lead--workflow"] != 1 || log.Read["lead--tester"] != 1 {
 		t.Fatalf("read markers = %v", log.Read)
 	}
 }
@@ -203,11 +204,11 @@ func TestTeamTurnToolRoundCountsModelCalls(t *testing.T) {
 	if err != nil || res.ModelCalls != 2 {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
-	if _, messages := storedMember(t, f, teamMemberID); len(messages) != 7 || messages[5]["role"] != "tool" {
+	if _, messages := storedMember(t, f, teamMemberID); len(messages) != 7 || messages[5]["role"] != roleTool {
 		t.Fatalf("messages = %v", messages)
 	}
 	for i, c := range f.mcpCalls {
-		if h := f.mcpHeads[i]; c["method"] == "tools/call" && (h.Get("X-Trace-Id") != "t1" || h.Get("X-Step-Id") != "build" || h.Get("X-Agent-Ref") != "intake@v1") {
+		if h := f.mcpHeads[i]; c["method"] == mcpToolsCall && (h.Get("X-Trace-Id") != "t1" || h.Get("X-Step-Id") != "build" || h.Get("X-Agent-Ref") != intakeRef) {
 			t.Fatalf("mcp correlation headers = %v", h)
 		}
 	}
@@ -221,7 +222,7 @@ func TestTeamTurnBudgetEndsTheTurnAndKeepsTheMarkers(t *testing.T) {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
 	log, messages := storedMember(t, f, teamMemberID)
-	if len(messages) != 6 || messages[5]["role"] != "tool" || log.Read["coder--lead"] != 1 {
+	if len(messages) != 6 || messages[5]["role"] != roleTool || log.Read[coderLeadChannel] != 1 {
 		t.Fatalf("history after the budget = %v %v", log.Read, messages)
 	}
 	if res, err := f.svc.TeamTurn(context.Background(), leadTurn()); err != nil || res.ModelCalls != 0 || len(f.llmReqs) != 1 {
@@ -230,15 +231,16 @@ func TestTeamTurnBudgetEndsTheTurnAndKeepsTheMarkers(t *testing.T) {
 }
 
 func TestTeamTurnModelFailureFailsTheTurnAndKeepsTheMarkers(t *testing.T) {
-	f := teamFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) {
+	f := teamFakes(t, chatAgentJSON, func(w http.ResponseWriter, _ map[string]any) error {
 		http.Error(w, `{"error":{"message":"model overloaded"}}`, http.StatusServiceUnavailable)
+		return nil
 	})
 	res, err := f.svc.TeamTurn(context.Background(), leadTurn())
 	if err == nil || !strings.Contains(err.Error(), "model overloaded") || res.ModelCalls != 0 {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
 	log, messages := storedMember(t, f, teamMemberID)
-	if len(messages) != 4 || log.Read["lead--workflow"] != 1 || log.Read["coder--lead"] != 1 {
+	if len(messages) != 4 || log.Read["lead--workflow"] != 1 || log.Read[coderLeadChannel] != 1 {
 		t.Fatalf("history after the failure = %v %v", log.Read, messages)
 	}
 }
@@ -258,7 +260,7 @@ func TestTeamTurnRefusesInvalidRequests(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := teamFakes(t, chatAgentJSON, respond(finalResponse))
 			req := leadTurn()
-			change(&req)
+			change(req)
 			if _, err := f.svc.TeamTurn(context.Background(), req); err == nil {
 				t.Fatal("no error")
 			}
@@ -295,7 +297,7 @@ func factoryMCP(t *testing.T, f *fakes, offerSend bool) *factorySends {
 	t.Helper()
 	sends := &factorySends{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/mcp/factory" {
+		if r.URL.Path != mcpFactoryPath {
 			http.NotFound(w, r)
 			return
 		}
@@ -303,30 +305,26 @@ func factoryMCP(t *testing.T, f *fakes, offerSend bool) *factorySends {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		var msg struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			} `json:"params"`
+		var msg toolRequest
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			t.Error(err)
+			return
 		}
-		json.NewDecoder(r.Body).Decode(&msg)
 		reply := func(result string) {
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":`+result+`}`)
+			writeBody(t, w, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":`+result+`}`)
 		}
 		switch msg.Method {
-		case "initialize":
+		case mcpInitialize:
 			w.Header().Set("Mcp-Session-Id", "session-factory")
 			reply(`{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}`)
-		case "tools/list":
+		case mcpToolsList:
 			if offerSend {
 				reply(`{"tools":[{"name":"send_message","description":"Send a message","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}},{"name":"write_session_file","description":"Write"},{"name":"finish_team","description":"Finish"},{"name":"other","description":"Other"}]}`)
 			} else {
 				reply(`{"tools":[]}`)
 			}
-		case "tools/call":
+		case mcpToolsCall:
 			f.mu.Lock()
 			sends.calls = append(sends.calls, msg.Params.Arguments)
 			sends.names = append(sends.names, msg.Params.Name)
@@ -346,9 +344,9 @@ func factoryMCP(t *testing.T, f *fakes, offerSend bool) *factorySends {
 	return sends
 }
 
-func coderTurn() TeamTurnRequest {
+func coderTurn() *TeamTurnRequest {
 	req := leadTurn()
-	req.Member = "coder"
+	req.Member = coderMember
 	return req
 }
 
@@ -364,11 +362,11 @@ func TestTeamTurnAutoReplySendsTheFinalAnswer(t *testing.T) {
 	if len(sends.calls) != 1 {
 		t.Fatalf("send_message calls = %v", sends.calls)
 	}
-	if c := sends.calls[0]; c["team"] != teamPath || c["member"] != "coder" || c["channel"] != "coder--tester" || c["text"] != "the plan" {
+	if c := sends.calls[0]; c["team"] != teamPath || c["member"] != coderMember || c["channel"] != "coder--tester" || c["text"] != planAnswer {
 		t.Fatalf("send_message arguments = %v", c)
 	}
 	// The history keeps the assistant message as it is and gains nothing else.
-	if _, messages := storedMember(t, f, teamPath+"/members/coder.json"); len(messages) != 4 || messages[3]["role"] != "assistant" || messages[3]["content"] != "the plan" {
+	if _, messages := storedMember(t, f, teamPath+"/members/coder.json"); len(messages) != 4 || messages[3]["role"] != roleAssistant || messages[3]["content"] != planAnswer {
 		t.Fatalf("messages = %v", messages)
 	}
 }
@@ -393,10 +391,10 @@ func TestTeamTurnAutoReplyAfterAFailedSendMessage(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	// The model's own call failed, so the harness tried to send the final answer.
-	if len(sends.calls) != 2 || sends.calls[1]["text"] != "the plan" || sends.calls[1]["channel"] != "coder--lead" {
+	if len(sends.calls) != 2 || sends.calls[1]["text"] != planAnswer || sends.calls[1]["channel"] != coderLeadChannel {
 		t.Fatalf("send_message calls = %v", sends.calls)
 	}
-	if log, _ := storedMember(t, f, teamPath+"/members/coder.json"); log.Read["coder--lead"] != 1 {
+	if log, _ := storedMember(t, f, teamPath+"/members/coder.json"); log.Read[coderLeadChannel] != 1 {
 		t.Fatalf("read markers = %v", log.Read)
 	}
 }
@@ -409,7 +407,7 @@ func TestTeamTurnAutoReplyAfterBudgetExhaustion(t *testing.T) {
 	if err != nil || res.ModelCalls != 1 {
 		t.Fatalf("result = %+v, %v", res, err)
 	}
-	if len(sends.calls) != 2 || sends.names[1] != "send_message" || sends.calls[1]["text"] != "I wrote parser.py." || sends.calls[1]["channel"] != "coder--lead" {
+	if len(sends.calls) != 2 || sends.names[1] != teamSendTool || sends.calls[1]["text"] != "I wrote parser.py." || sends.calls[1]["channel"] != coderLeadChannel {
 		t.Fatalf("send_message calls = %v", sends.calls)
 	}
 }
@@ -438,12 +436,12 @@ func TestTeamTurnLeadGetsNoAutoReply(t *testing.T) {
 }
 
 // toolCalls is a model response that calls the given tools of the service `factory`.
-func toolCalls(calls ...[2]string) func(http.ResponseWriter, map[string]any) {
+func toolCalls(calls ...[2]string) llmHandler {
 	list := make([]map[string]any, len(calls))
 	for i, c := range calls {
 		list[i] = map[string]any{"id": "c" + string(rune('a'+i)), "type": "function", "function": map[string]string{"name": "factory__" + c[0], "arguments": c[1]}}
 	}
-	data, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": nil, "tool_calls": list}}}})
+	data, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": roleAssistant, "content": nil, "tool_calls": list}}}})
 	return respond(string(data))
 }
 
@@ -464,16 +462,16 @@ func TestTeamTurnOverwritesIdentityArguments(t *testing.T) {
 	if strings.Join(sends.names, ",") != "send_message,write_session_file,finish_team,other" {
 		t.Fatalf("forwarded tools = %v", sends.names)
 	}
-	if c := sends.calls[0]; c["team"] != teamPath || c["member"] != "coder" || c["channel"] != "coder--lead" || c["text"] != "done" {
+	if c := sends.calls[0]; c["team"] != teamPath || c["member"] != coderMember || c["channel"] != coderLeadChannel || c["text"] != "done" {
 		t.Fatalf("send_message arguments = %v", c)
 	}
 	if c := sends.calls[1]; c["session"] != teamPath || c["name"] != "a.py" || c["member"] != nil {
 		t.Fatalf("write_session_file arguments = %v", c)
 	}
-	if c := sends.calls[2]; c["team"] != teamPath || c["member"] != "coder" {
+	if c := sends.calls[2]; c["team"] != teamPath || c["member"] != coderMember {
 		t.Fatalf("finish_team arguments = %v", c)
 	}
-	if c := sends.calls[3]; c["member"] != "lead" || c["team"] != nil {
+	if c := sends.calls[3]; c["member"] != leadMember || c["team"] != nil {
 		t.Fatalf("a tool that is not a team tool was changed: %v", c)
 	}
 	// The stored tool call is what the model wrote.
@@ -502,11 +500,11 @@ func TestTeamTurnForwardsOneMessagePerChannelAndEndsAfterTwoRefusals(t *testing.
 	}
 	log, messages := storedMember(t, f, teamMemberID)
 	// system, 3 delivered, assistant, 3 tool answers, assistant, 2 tool answers
-	if len(messages) != 11 || log.Read["coder--lead"] != 1 {
+	if len(messages) != 11 || log.Read[coderLeadChannel] != 1 {
 		t.Fatalf("history = %v %v", log.Read, messages)
 	}
 	want := "Error: you already sent a message on channel coder--lead in this turn. End your turn now by answering without a tool call; you are woken when a reply arrives."
-	if messages[7]["content"] != want || messages[9]["content"] != want || messages[10]["role"] != "tool" || messages[5]["content"] != "sent" {
+	if messages[7]["content"] != want || messages[9]["content"] != want || messages[10]["role"] != roleTool || messages[5]["content"] != "sent" {
 		t.Fatalf("tool answers = %v", messages[5:])
 	}
 }
@@ -531,16 +529,19 @@ func TestTeamTurnAFailedSendDoesNotUseUpTheChannel(t *testing.T) {
 func TestTeamTurnStoresTheMarkersBeforeTheModelRuns(t *testing.T) {
 	var during teamMemberLog
 	var f *fakes
-	f = teamFakes(t, chatAgentJSON, func(w http.ResponseWriter, body map[string]any) {
+	f = teamFakes(t, chatAgentJSON, func(w http.ResponseWriter, body map[string]any) error {
 		f.mu.Lock()
-		_ = json.Unmarshal(f.blobs[teamMemberID], &during)
+		err := json.Unmarshal(f.blobs[teamMemberID], &during)
 		f.mu.Unlock()
-		respond(finalResponse)(w, body)
+		if err != nil {
+			return err
+		}
+		return respond(finalResponse)(w, body)
 	})
 	if _, err := f.svc.TeamTurn(context.Background(), leadTurn()); err != nil {
 		t.Fatal(err)
 	}
-	if during.Read["lead--workflow"] != 1 || during.Read["coder--lead"] != 1 || during.Read["lead--tester"] != 1 || len(during.Messages) != 4 {
+	if during.Read["lead--workflow"] != 1 || during.Read[coderLeadChannel] != 1 || during.Read["lead--tester"] != 1 || len(during.Messages) != 4 {
 		t.Fatalf("member file during the model call: read = %v, %d messages", during.Read, len(during.Messages))
 	}
 	if _, messages := storedMember(t, f, teamMemberID); len(messages) != 5 {
@@ -559,9 +560,9 @@ func TestTeamTurnAFailedToolCallsMessageReachesTheModel(t *testing.T) {
 	if _, err := f.svc.TeamTurn(context.Background(), leadTurn()); err != nil {
 		t.Fatal(err)
 	}
-	sent := f.llmReqs[1]["messages"].([]any)
-	last := sent[len(sent)-1].(map[string]any)
-	if last["role"] != "tool" || last["content"] != "Error: channel refused" {
+	sent := jsonList(t, f.llmReqs[1]["messages"])
+	last := jsonObject(t, sent[len(sent)-1])
+	if last["role"] != roleTool || last["content"] != "Error: channel refused" {
 		t.Fatalf("tool message = %v", last)
 	}
 }

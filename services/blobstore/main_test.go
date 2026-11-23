@@ -15,14 +15,14 @@ import (
 	"time"
 )
 
-func newTestServer(t *testing.T) (*httptest.Server, string) {
+func newTestServer(t *testing.T) (srv *httptest.Server, root string) {
 	t.Helper()
-	root := t.TempDir()
+	root = t.TempDir()
 	h, err := newHandler(root, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(h)
+	srv = httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, root
 }
@@ -38,16 +38,16 @@ func TestPutGetDelete(t *testing.T) {
 	if put.StatusCode != http.StatusNoContent || put.Header.Get("ETag") == "" {
 		t.Fatalf("PUT: %d ETag %q", put.StatusCode, put.Header.Get("ETag"))
 	}
-	if data, _ := os.ReadFile(filepath.Join(root, "objects", "runs", "abc", "top")); string(data) != "hello" {
-		t.Fatalf("file content %q", data)
+	data, err := os.ReadFile(filepath.Clean(filepath.Join(root, "objects", "runs", "abc", "top")))
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("file content %q: %v", data, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "meta", "runs", "abc", "top.json")); err != nil {
+	if _, err = os.Stat(filepath.Join(root, "meta", "runs", "abc", "top.json")); err != nil {
 		t.Fatalf("metadata file: %v", err)
 	}
 	resp := do(t, http.MethodGet, url, "", nil)
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || string(body) != "hello" {
-		t.Fatalf("GET: %d %q", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK || string(resp.Body) != "hello" {
+		t.Fatalf("GET: %d %q", resp.StatusCode, resp.Body)
 	}
 	if resp.Header.Get(headerCreated) == "" {
 		t.Fatal("GET lacks created header")
@@ -61,7 +61,7 @@ func TestPutGetDelete(t *testing.T) {
 	if got := do(t, http.MethodDelete, url, "", nil); got.StatusCode != http.StatusNotFound {
 		t.Fatalf("DELETE again: %d", got.StatusCode)
 	}
-	if _, err := os.Stat(filepath.Join(root, "meta", "runs", "abc", "top.json")); !os.IsNotExist(err) {
+	if _, err = os.Stat(filepath.Join(root, "meta", "runs", "abc", "top.json")); !os.IsNotExist(err) {
 		t.Fatalf("metadata survived delete: %v", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestMetadataFromHeaders(t *testing.T) {
 	}
 	resp := do(t, http.MethodGet, srv.URL+"/meta/runs/t-1/intake", "", nil)
 	var m Meta
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil || resp.StatusCode != http.StatusOK {
+	if err := json.Unmarshal(resp.Body, &m); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("meta: %d %v", resp.StatusCode, err)
 	}
 	if m.ID != "runs/t-1/intake" || m.Size != 1 || m.Creator != "agent:intake@v1" || m.TraceID != "t-1" || m.Created.IsZero() || m.EstimatedInputTokens == nil || *m.EstimatedInputTokens != 12 || m.EstimatedOutputTokens == nil || *m.EstimatedOutputTokens != 3 || m.ProcessingTimeMS == nil || *m.ProcessingTimeMS != 456 || m.EstimationMethod != "chars_div_4" {
@@ -130,9 +130,8 @@ func TestDotPrefixedSkillPathsAreStoredAndListed(t *testing.T) {
 			t.Fatalf("PUT %s: %d", id, got.StatusCode)
 		}
 		got := do(t, http.MethodGet, srv.URL+"/blobs/"+id, "", nil)
-		data, _ := io.ReadAll(got.Body)
-		if got.StatusCode != http.StatusOK || string(data) != id {
-			t.Fatalf("GET %s: %d %q", id, got.StatusCode, data)
+		if got.StatusCode != http.StatusOK || string(got.Body) != id {
+			t.Fatalf("GET %s: %d %q", id, got.StatusCode, got.Body)
 		}
 	}
 	version := listing(t, srv.URL+"/list/skills/git/v1")
@@ -196,7 +195,7 @@ func TestTraceListsObjectsInCreationOrder(t *testing.T) {
 		TraceID string `json:"trace_id"`
 		Objects []Meta `json:"objects"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK {
+	if err := json.Unmarshal(resp.Body, &out); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("trace: %d %v", resp.StatusCode, err)
 	}
 	if out.TraceID != "t-9" || len(out.Objects) != 3 {
@@ -227,7 +226,7 @@ func TestTraceIndexMatchesScanAcrossPrefixes(t *testing.T) {
 		t.Fatalf("trace %+v", got)
 	}
 	// The index answers exactly what the scan over all metadata answered before.
-	scanned, err := store{meta: filepath.Join(root, "meta")}.scanTrace("t-1")
+	scanned, err := (&store{meta: filepath.Join(root, "meta")}).scanTrace("t-1")
 	if err != nil || len(scanned) != len(got) {
 		t.Fatalf("scan: %v %+v", err, scanned)
 	}
@@ -244,8 +243,8 @@ func TestTraceIndexMatchesScanAcrossPrefixes(t *testing.T) {
 		t.Fatalf("unknown trace %+v", got)
 	}
 	resp := do(t, http.MethodGet, srv.URL+"/trace/t-0", "", nil)
-	if body, _ := io.ReadAll(resp.Body); strings.TrimSpace(string(body)) != `{"objects":[],"trace_id":"t-0"}` {
-		t.Fatalf("empty trace body %s", body)
+	if strings.TrimSpace(string(resp.Body)) != `{"objects":[],"trace_id":"t-0"}` {
+		t.Fatalf("empty trace body %s", resp.Body)
 	}
 }
 
@@ -372,14 +371,20 @@ func TestConcurrentWritesKeepEveryTraceEntry(t *testing.T) {
 	srv, _ := newTestServer(t)
 	const writers = 32
 	request := func(method, id string) {
-		req, _ := http.NewRequest(method, srv.URL+"/blobs/"+id, strings.NewReader("x"))
+		req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+"/blobs/"+id, strings.NewReader("x"))
+		if err != nil {
+			t.Errorf("%s %s: %v", method, id, err)
+			return
+		}
 		req.Header.Set(headerTrace, "t-8")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Errorf("%s %s: %v", method, id, err)
 			return
 		}
-		resp.Body.Close()
+		if err = resp.Body.Close(); err != nil {
+			t.Errorf("%s %s: %v", method, id, err)
+		}
 		if resp.StatusCode != http.StatusNoContent {
 			t.Errorf("%s %s: %d", method, id, resp.StatusCode)
 		}
@@ -419,7 +424,7 @@ func TestConcurrentWritesKeepEveryTraceEntry(t *testing.T) {
 func TestTraceIndexIsNotAnObject(t *testing.T) {
 	srv, root := newTestServer(t)
 	do(t, http.MethodPut, srv.URL+"/blobs/runs/t-9/input", "x", map[string]string{headerTrace: "t-9"})
-	entry := store{traces: filepath.Join(root, "traces")}.traceEntry("t-9", "runs/t-9/input")
+	entry := (&store{traces: filepath.Join(root, "traces")}).traceEntry("t-9", "runs/t-9/input")
 	if _, err := os.Stat(entry); err != nil {
 		t.Fatalf("index entry: %v", err)
 	}
@@ -454,7 +459,7 @@ func BenchmarkTrace(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/trace/wanted", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/trace/wanted", http.NoBody))
 		if rec.Code != http.StatusOK {
 			b.Fatalf("trace: %d", rec.Code)
 		}
@@ -480,7 +485,7 @@ func listing(t *testing.T, url string) Listing {
 	t.Helper()
 	resp := do(t, http.MethodGet, url, "", nil)
 	var out Listing
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK {
+	if err := json.Unmarshal(resp.Body, &out); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("list %s: %d %v", url, resp.StatusCode, err)
 	}
 	return out
@@ -494,7 +499,7 @@ func traced(t *testing.T, base, trace string) []Meta {
 		TraceID string `json:"trace_id"`
 		Objects []Meta `json:"objects"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK || out.TraceID != trace || out.Objects == nil {
+	if err := json.Unmarshal(resp.Body, &out); err != nil || resp.StatusCode != http.StatusOK || out.TraceID != trace || out.Objects == nil {
 		t.Fatalf("trace %s: %d %v %+v", trace, resp.StatusCode, err, out)
 	}
 	return out.Objects
@@ -502,8 +507,8 @@ func traced(t *testing.T, base, trace string) []Meta {
 
 func objectIDs(objects []Meta) []string {
 	ids := []string{}
-	for _, m := range objects {
-		ids = append(ids, m.ID)
+	for i := range objects {
+		ids = append(ids, objects[i].ID)
 	}
 	return ids
 }
@@ -523,9 +528,20 @@ func waitForTraceIndex(t *testing.T, root string) {
 	}
 }
 
-func do(t *testing.T, method, url, body string, headers map[string]string) *http.Response {
+// httpResult is one finished HTTP exchange: do has read the whole body and closed it.
+type httpResult struct {
+	Header     http.Header
+	Status     string
+	Body       []byte
+	StatusCode int
+}
+
+func do(t *testing.T, method, url, body string, headers map[string]string) httpResult {
 	t.Helper()
-	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -533,32 +549,23 @@ func do(t *testing.T, method, url, body string, headers map[string]string) *http
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
-	return resp
+	data, readErr := io.ReadAll(resp.Body)
+	if err = resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return httpResult{Header: resp.Header, Status: resp.Status, Body: data, StatusCode: resp.StatusCode}
 }
 
 func TestDeleteRemovesEmptyFolders(t *testing.T) {
 	srv, dir := newTestServer(t)
 	for _, id := range []string{"agents/a/v1/systemprompt.md", "agents/b/v1/systemprompt.md"} {
-		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/blobs/"+id, strings.NewReader("x"))
-		if resp, err := http.DefaultClient.Do(req); err != nil {
-			t.Fatal(err)
-		} else {
-			resp.Body.Close()
-		}
+		do(t, http.MethodPut, srv.URL+"/blobs/"+id, "x", nil)
 	}
-	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/blobs/agents/a/v1/systemprompt.md", nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	resp, err = http.Get(srv.URL + "/list/agents")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	do(t, http.MethodDelete, srv.URL+"/blobs/agents/a/v1/systemprompt.md", "", nil)
+	body := do(t, http.MethodGet, srv.URL+"/list/agents", "", nil).Body
 	if strings.Contains(string(body), `"a"`) || !strings.Contains(string(body), `"b"`) {
 		t.Fatalf("listing after delete: %s", body)
 	}

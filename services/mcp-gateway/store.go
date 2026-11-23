@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,11 +16,19 @@ const configPrefix = "mcp-gateway/"
 var configFiles = []string{"mcpconfig.json", "allowlist.json", "denylist.json"}
 
 type blobStore struct {
-	base   string
 	client *http.Client
+	base   string
 }
 
-func (s blobStore) request(ctx context.Context, method, path string, data []byte) ([]byte, error) {
+// closeAfter closes c and adds a close failure to err.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
+}
+
+func (s blobStore) request(ctx context.Context, method, path string, data []byte) (body []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(s.base, "/")+path, bytes.NewReader(data))
 	if err != nil {
 		return nil, err
@@ -32,7 +41,7 @@ func (s blobStore) request(ctx context.Context, method, path string, data []byte
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer func() { err = closeAfter(err, res.Body) }()
 	if res.StatusCode == 404 {
 		return nil, errMissing
 	}
@@ -72,10 +81,11 @@ func (s blobStore) load(ctx context.Context, name string) (Config, error) {
 		}
 	}
 	c.normalize()
-	return c, c.validate()
+	err := c.validate()
+	return c, err
 }
 
-func (s blobStore) save(ctx context.Context, name string, c Config) error {
+func (s blobStore) save(ctx context.Context, name string, c *Config) error {
 	for i, v := range []any{c.MCPConfig, c.Allowlist, c.Denylist} {
 		data, err := json.MarshalIndent(v, "", "  ")
 		if err != nil {

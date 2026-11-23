@@ -58,7 +58,7 @@ func TestConnectionValidatesToolsCapabilityAndList(t *testing.T) {
 				config:   Config{MCPConfig: Connection{Transport: "streamable-http", URL: "http://example.invalid"}},
 				upstream: connectionUpstream{initialize: tc.initialize, tools: tc.tools},
 			}
-			req := httptest.NewRequest(http.MethodPost, "/api/services/sample/test-connection", nil)
+			req := httptest.NewRequest(http.MethodPost, "/api/services/sample/test-connection", http.NoBody)
 			res := httptest.NewRecorder()
 			g.routes().ServeHTTP(res, req)
 			if res.Code != tc.status {
@@ -85,7 +85,7 @@ func TestLoadReportsInvalidStoredServiceName(t *testing.T) {
 	if !strings.Contains(g.invalid[name], "invalid service name") {
 		t.Fatalf("invalid service not reported: %v", g.invalid)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/services", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/services", http.NoBody)
 	res := httptest.NewRecorder()
 	g.routes().ServeHTTP(res, req)
 	if res.Code != http.StatusOK || !bytes.Contains(res.Body.Bytes(), []byte(name)) {
@@ -96,7 +96,7 @@ func TestLoadReportsInvalidStoredServiceName(t *testing.T) {
 func TestToolsListAllowsLegacyResult(t *testing.T) {
 	req := rpcRequest{Method: "tools/list", ID: []byte(`1`)}
 	message := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`)
-	if _, err := filterResponse(message, req, Config{}); err != nil {
+	if _, err := filterResponse(message, req, &Config{}); err != nil {
 		t.Fatal(err)
 	}
 }

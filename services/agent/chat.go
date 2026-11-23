@@ -21,17 +21,17 @@ import (
 
 // sessionChatRequest is the body of POST /chat: one user message for one tab of a session.
 type sessionChatRequest struct {
-	TraceID   string `json:"trace_id"`
-	StepID    string `json:"step_id"`
-	Session   string `json:"session"`
-	Tab       string `json:"tab"`
-	Agent     string `json:"agent"`
-	Message   string `json:"message"`
-	CreatedBy string `json:"created_by"`
+	TraceID   string            `json:"trace_id"`
+	StepID    string            `json:"step_id"`
+	Session   string            `json:"session"`
+	Tab       string            `json:"tab"`
+	Agent     string            `json:"agent"`
+	Message   string            `json:"message"`
+	CreatedBy string            `json:"created_by"`
+	Skills    map[string]string `json:"skills,omitempty"`
 	// DevPod is the run's dev pod; empty when the run has none.
-	DevPod                    string            `json:"dev_pod,omitempty"`
-	Skills                    map[string]string `json:"skills,omitempty"`
-	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+	DevPod                    string `json:"dev_pod,omitempty"`
+	SkillScriptTimeoutSeconds int    `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // chatLog is the stored history of one tab, <session>/chats/<tab>.json. Messages is the
@@ -61,7 +61,6 @@ type TurnEvent struct {
 	Started               time.Time `json:"started"`
 	Finished              time.Time `json:"finished"`
 	Model                 string    `json:"model,omitempty"`
-	Turn                  int       `json:"turn,omitempty"` // number of the model call within one message or team turn
 	Usage                 *usage    `json:"usage,omitempty"`
 	EstimatedInputTokens  *int64    `json:"estimated_input_tokens,omitempty"`
 	EstimatedOutputTokens *int64    `json:"estimated_output_tokens,omitempty"`
@@ -69,20 +68,22 @@ type TurnEvent struct {
 	Error                 string    `json:"error,omitempty"`
 	Warning               string    `json:"warning,omitempty"`
 	MeasurementID         string    `json:"measurement_id,omitempty"`
+	Turn                  int       `json:"turn,omitempty"` // number of the model call within one message or team turn
 }
 
-// record stores a finished model or tool call.
-func (l *chatLog) record(event TurnEvent, status string, err error) {
-	event.Finished = time.Now().UTC()
-	event.Status = status
+// record stores a finished copy of a model or tool call.
+func (l *chatLog) record(event *TurnEvent, status string, err error) {
+	finished := *event
+	finished.Finished = time.Now().UTC()
+	finished.Status = status
 	if err != nil {
-		event.Error = err.Error()
+		finished.Error = err.Error()
 	}
-	l.Events = append(l.Events, event)
+	l.Events = append(l.Events, finished)
 }
 
 // setModelSettings notes the model and the model settings the agent runs with.
-func (l *chatLog) setModelSettings(def Definition) {
+func (l *chatLog) setModelSettings(def *Definition) {
 	l.Model, l.Temperature = def.Models[0], def.Temperature
 }
 
@@ -105,8 +106,8 @@ func (l *chatLog) modelMessages() []any {
 
 // chatError carries the HTTP status of a failed chat request.
 type chatError struct {
-	status int
 	text   string
+	status int
 }
 
 func (e chatError) Error() string { return e.text }
@@ -122,8 +123,8 @@ var chatTabPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
 // chatLocks allows one message at a time per chat log within this process.
 var chatLocks = struct {
-	mu    sync.Mutex
 	items map[string]*chatLock
+	mu    sync.Mutex
 }{items: map[string]*chatLock{}}
 
 type chatLock struct {
@@ -144,7 +145,8 @@ func lockChat(id string) (unlock func()) {
 	return func() {
 		l.mu.Unlock()
 		chatLocks.mu.Lock()
-		if l.waiters--; l.waiters == 0 {
+		l.waiters--
+		if l.waiters == 0 {
 			delete(chatLocks.items, id)
 		}
 		chatLocks.mu.Unlock()
@@ -173,7 +175,7 @@ func (s *Service) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeChatJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body: " + err.Error()})
 		return
 	}
-	reply, chatID, count, err := s.Chat(r.Context(), req)
+	reply, chatID, count, err := s.Chat(r.Context(), &req)
 	if err != nil {
 		status := http.StatusBadGateway
 		var ce chatError
@@ -191,9 +193,9 @@ func (s *Service) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateChat checks the request and returns the pinned agent reference and the chat log ID.
-func validateChat(req sessionChatRequest) (name, version, chatID string, err error) {
+func validateChat(req *sessionChatRequest) (name, version, chatID string, err error) {
 	bad := func(format string, args ...any) (string, string, string, error) {
-		return "", "", "", chatError{http.StatusBadRequest, fmt.Sprintf(format, args...)}
+		return "", "", "", chatError{status: http.StatusBadRequest, text: fmt.Sprintf(format, args...)}
 	}
 	if !segmentPattern.MatchString(req.TraceID) {
 		return bad("trace_id is missing or invalid")
@@ -232,7 +234,7 @@ func sessionNote(session string) string {
 
 // Chat runs one user message of one tab: it loads the tab's history, runs the agent's
 // model and tool loop, stores the grown history and returns the reply.
-func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chatID string, count int, retErr error) {
+func (s *Service) Chat(ctx context.Context, req *sessionChatRequest) (reply, chatID string, count int, retErr error) {
 	name, version, chatID, err := validateChat(req)
 	if err != nil {
 		return "", "", 0, err
@@ -241,7 +243,7 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 	ctx, span := otel.Tracer("opensoftwarefactory/agent").Start(ctx, "agent.chat",
 		trace.WithAttributes(attribute.String("factory.run_id", req.TraceID), attribute.String("factory.step", req.StepID), attribute.String("factory.agent", ref)))
 	defer span.End()
-	ctx = withCorrelation(ctx, StepRequest{TraceID: req.TraceID, StepID: req.StepID, Agent: ref, OutputArtifact: chatID}, ref, 1)
+	ctx = withCorrelation(ctx, &StepRequest{TraceID: req.TraceID, StepID: req.StepID, Agent: ref, OutputArtifact: chatID}, ref, 1)
 	ctx = withDevPod(ctx, req.DevPod, ref, req.TraceID)
 	ctx = withSkills(ctx, req.Skills, req.SkillScriptTimeoutSeconds)
 	ctx, cancel := context.WithTimeout(ctx, chatTurnTimeout)
@@ -255,7 +257,7 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 			log.Error("chat message failed", "error", retErr, "messages", count)
 			return
 		}
-		span.SetStatus(codes.Ok, "completed")
+		span.SetStatus(codes.Ok, statusCompleted)
 		log.Info("chat message completed", "messages", count, "processing_time_ms", time.Since(started).Milliseconds())
 	}()
 
@@ -269,11 +271,11 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 	case err != nil:
 		return "", chatID, 0, fmt.Errorf("reading chat log %q: %w", chatID, err)
 	default:
-		if err := json.Unmarshal(data, &history); err != nil {
-			return "", chatID, 0, fmt.Errorf("reading chat log %q: %w", chatID, err)
+		if decodeErr := json.Unmarshal(data, &history); decodeErr != nil {
+			return "", chatID, 0, fmt.Errorf("reading chat log %q: %w", chatID, decodeErr)
 		}
 		if history.Agent != ref {
-			return "", chatID, len(history.Messages), chatError{http.StatusConflict, fmt.Sprintf("tab %q already belongs to agent %s", req.Tab, history.Agent)}
+			return "", chatID, len(history.Messages), chatError{status: http.StatusConflict, text: fmt.Sprintf("tab %q already belongs to agent %s", req.Tab, history.Agent)}
 		}
 	}
 
@@ -281,22 +283,22 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 	if err != nil {
 		var app *temporal.ApplicationError
 		if errors.As(err, &app) && app.Type() == "AgentNotFound" {
-			return "", chatID, len(history.Messages), chatError{http.StatusNotFound, err.Error()}
+			return "", chatID, len(history.Messages), chatError{status: http.StatusNotFound, text: err.Error()}
 		}
 		if errors.As(err, &app) && app.Type() == "InvalidAgent" {
-			return "", chatID, len(history.Messages), chatError{http.StatusUnprocessableEntity, app.Message()}
+			return "", chatID, len(history.Messages), chatError{status: http.StatusUnprocessableEntity, text: app.Message()}
 		}
 		return "", chatID, len(history.Messages), err
 	}
-	history.setModelSettings(def)
+	history.setModelSettings(&def)
 	now := time.Now().UTC()
 	if len(history.Messages) == 0 {
 		if prompt, _, err = s.compilePrompt(ctx, prompt); err != nil {
 			return "", chatID, 0, err
 		}
-		skillNote, _, err := s.loadSkillNote(ctx, req.Skills)
-		if err != nil {
-			return "", chatID, 0, err
+		skillNote, _, skillErr := s.loadSkillNote(ctx, req.Skills)
+		if skillErr != nil {
+			return "", chatID, 0, skillErr
 		}
 		prompt += skillNote
 		history.Created = now
@@ -304,30 +306,30 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 		if strings.TrimSpace(req.DevPod) != "" {
 			note += devPodNote(def.Commands)
 		}
-		if err := history.add(map[string]string{"role": "system", "content": prompt + note}); err != nil {
-			return "", chatID, 0, err
+		if addErr := history.add(map[string]string{"role": roleSystem, "content": prompt + note}); addErr != nil {
+			return "", chatID, 0, addErr
 		}
 	}
-	if err := history.add(map[string]string{"role": "user", "content": req.Message}); err != nil {
-		return "", chatID, len(history.Messages), err
+	if addErr := history.add(map[string]string{"role": roleUser, "content": req.Message}); addErr != nil {
+		return "", chatID, len(history.Messages), addErr
 	}
 	// From here on the history is stored whatever happens, so a failed turn keeps its messages.
 	defer func() {
 		history.Updated = time.Now().UTC()
 		count = len(history.Messages)
-		if err := s.saveChat(ctx, chatID, history, Meta{Creator: "agent:" + ref, TraceID: req.TraceID}); err != nil {
-			log.Error("persisting chat log failed", "error", err)
+		if saveErr := s.saveChat(ctx, chatID, &history, Meta{Creator: "agent:" + ref, TraceID: req.TraceID}); saveErr != nil {
+			log.Error("persisting chat log failed", "error", saveErr)
 			if retErr == nil {
-				reply, retErr = "", err
+				reply, retErr = "", saveErr
 			}
 		}
 	}()
 
-	reply, err = s.chatTurn(ctx, ref, def, &history, log)
+	reply, err = s.chatTurn(ctx, ref, &def, &history, log)
 	return reply, chatID, len(history.Messages), err
 }
 
-func (s *Service) saveChat(ctx context.Context, chatID string, history chatLog, meta Meta) error {
+func (s *Service) saveChat(ctx context.Context, chatID string, history *chatLog, meta Meta) error {
 	data, err := json.MarshalIndent(history, "", "  ")
 	if err != nil {
 		return err
@@ -343,61 +345,61 @@ func (s *Service) saveChat(ctx context.Context, chatID string, history chatLog, 
 
 // chatTurn runs the model and tool loop of Process for one message and appends every
 // assistant and tool message to the history.
-func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, history *chatLog, log *slog.Logger) (string, error) {
+func (s *Service) chatTurn(ctx context.Context, ref string, def *Definition, history *chatLog, log *slog.Logger) (string, error) {
 	// One model call, plus max_retries more (each tool round needs one).
 	maxCalls := 1 + max(def.MaxRetries, 0)
 	var tools []any
 	routes := map[string]toolRoute{}
 	if selected := skillTools(ctx, def.Tools); len(selected) > 0 {
-		eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_discovery", Started: time.Now().UTC()}, "agent.tool_discovery")
+		eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: "tool_discovery", Started: time.Now().UTC()}, "agent.tool_discovery")
 		var err error
 		if tools, routes, err = s.discoverTools(eventCtx, selected, log); err != nil {
-			finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
+			finishEventSpan(&event, eventTrace, statusFailed, categorizedError{categoryMCPGateway, err.Error()})
 			return "", err
 		}
-		finishEventSpan(event, eventTrace, "completed", nil)
+		finishEventSpan(&event, eventTrace, statusCompleted, nil)
 		defer closeToolRoutes(routes, log)
 	}
 	for calls := 1; calls <= maxCalls; calls++ {
-		eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "model_call", Started: time.Now().UTC()}, "agent.model_call",
+		eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: kindModelCall, Started: time.Now().UTC()}, "agent.model_call",
 			attribute.String("gen_ai.request.model", def.Models[0]), attribute.Int("factory.turn", calls))
 		modelRequest := def.chatRequest(history.modelMessages(), tools)
 		inputEstimate := estimateJSONTokens(modelRequest)
 		modelEvent := TurnEvent{
-			Kind: "model_call", Name: "chat completion", Model: def.Models[0], Turn: calls, Started: event.Started,
-			EstimatedInputTokens: &inputEstimate, EstimationMethod: tokenEstimationMethod,
+			Kind: kindModelCall, Name: "chat completion", Model: def.Models[0], Turn: calls, Started: event.Started,
+			EstimatedInputTokens: &inputEstimate, EstimationMethod: estimationMethod,
 		}
-		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, modelRequest)
+		c, err := chat(withModelTurn(eventCtx, calls), s.HTTP, s.LLMURL, &modelRequest)
 		if err != nil {
-			finishEventSpan(event, eventTrace, "failed", err)
-			history.record(modelEvent, "failed", err)
+			finishEventSpan(&event, eventTrace, statusFailed, err)
+			history.record(&modelEvent, statusFailed, err)
 			return "", err
 		}
-		finishEventSpan(event, eventTrace, "completed", nil)
+		finishEventSpan(&event, eventTrace, statusCompleted, nil)
 		outputEstimate := estimateTokens(string(c.Message))
 		modelEvent.Usage, modelEvent.EstimatedOutputTokens = c.Usage, &outputEstimate
 		modelEvent.MeasurementID = c.MeasurementID
-		history.record(modelEvent, "completed", nil)
+		history.record(&modelEvent, statusCompleted, nil)
 		history.Messages = append(history.Messages, c.Message)
 		if len(c.ToolCalls) == 0 {
 			return c.Content, nil
 		}
 		for i, tc := range c.ToolCalls {
 			service := strings.SplitN(tc.Function.Name, "__", 2)[0]
-			eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_call", Started: time.Now().UTC()}, "agent.tool_call",
+			eventCtx, event, eventTrace := eventSpan(ctx, &RunEvent{Kind: kindToolCall, Started: time.Now().UTC()}, "agent.tool_call",
 				attribute.String("gen_ai.tool.name", tc.Function.Name), attribute.String("factory.mcp_service", service), attribute.Int("factory.turn", calls))
 			toolInputEstimate := estimateJSONTokens(map[string]string{"name": tc.Function.Name, "arguments": tc.Function.Arguments})
 			toolEvent := TurnEvent{
-				Kind: "tool_call", Name: tc.Function.Name, Turn: calls, Started: event.Started,
-				EstimatedInputTokens: &toolInputEstimate, EstimationMethod: tokenEstimationMethod,
+				Kind: kindToolCall, Name: tc.Function.Name, Turn: calls, Started: event.Started,
+				EstimatedInputTokens: &toolInputEstimate, EstimationMethod: estimationMethod,
 			}
 			text, toolFailed, err := s.runTurnTool(eventCtx, routes, tc)
 			if err != nil {
-				finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
-				history.record(toolEvent, "failed", err)
+				finishEventSpan(&event, eventTrace, statusFailed, categorizedError{categoryMCPGateway, err.Error()})
+				history.record(&toolEvent, statusFailed, err)
 				// Every tool call needs an answer, or the stored history could not be sent again.
 				for _, open := range c.ToolCalls[i:] {
-					_ = history.add(map[string]string{"role": "tool", "tool_call_id": open.ID, "content": "Error: the tool call did not complete: " + err.Error()})
+					_ = history.add(map[string]string{"role": roleTool, "tool_call_id": open.ID, "content": "Error: the tool call did not complete: " + err.Error()})
 				}
 				return "", err
 			}
@@ -405,21 +407,21 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 			toolEvent.EstimatedOutputTokens = &toolOutputEstimate
 			toolEvent.Warning = skillWarning(routes[tc.Function.Name], text)
 			if toolFailed {
-				finishEventSpan(event, eventTrace, "failed", categorizedError{"tool", text})
-				history.record(toolEvent, "failed", errors.New(text))
+				finishEventSpan(&event, eventTrace, statusFailed, categorizedError{categoryTool, text})
+				history.record(&toolEvent, statusFailed, errors.New(text))
 			} else {
-				finishEventSpan(event, eventTrace, "completed", nil)
-				history.record(toolEvent, "completed", nil)
+				finishEventSpan(&event, eventTrace, statusCompleted, nil)
+				history.record(&toolEvent, statusCompleted, nil)
 			}
 			log.Info("tool call completed", "tool", tc.Function.Name, "turn", calls, "failed", toolFailed)
-			if err := history.add(map[string]string{"role": "tool", "tool_call_id": tc.ID, "content": text}); err != nil {
+			if err := history.add(map[string]string{"role": roleTool, "tool_call_id": tc.ID, "content": text}); err != nil {
 				return "", err
 			}
 			// A successful report_blocked ends the turn at once: the reason is the answer.
 			if reason, ok := blockedReason(ctx); ok {
 				// Every tool call needs an answer, or the stored history could not be sent again.
 				for _, open := range c.ToolCalls[i+1:] {
-					_ = history.add(map[string]string{"role": "tool", "tool_call_id": open.ID, "content": "Not run: the turn ended because you reported that you are blocked."})
+					_ = history.add(map[string]string{"role": roleTool, "tool_call_id": open.ID, "content": "Not run: the turn ended because you reported that you are blocked."})
 				}
 				return reason, nil
 			}

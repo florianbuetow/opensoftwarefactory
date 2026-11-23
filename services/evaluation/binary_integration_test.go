@@ -73,7 +73,7 @@ func TestBinaryMeasurementJourney(t *testing.T) {
 	}
 	var cost CurrentCost
 	waitJSON(t, "http://"+blobAddr+"/blobs/measurement-costs/attempt.json", &cost)
-	if cost.Amount != "2" || cost.ConvertedAmount != "2" || cost.Currency != "EUR" || cost.DisplayCurrency != "EUR" || cost.Status != "available" {
+	if cost.Amount != "2" || cost.ConvertedAmount != "2" || cost.Currency != "EUR" || cost.DisplayCurrency != "EUR" || cost.Status != costAvailable {
 		t.Fatalf("current cost %+v prices=%+v", cost, prices.Prices)
 	}
 }
@@ -102,7 +102,11 @@ func waitHTTP(t *testing.T, url string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
 		resp, err := http.DefaultClient.Do(req)
 		cancel()
 		if err == nil {
@@ -116,9 +120,9 @@ func waitHTTP(t *testing.T, url string) {
 	t.Fatalf("%s did not become ready", url)
 }
 
-func integrationRequest(t *testing.T, method, url, body string) (int, string) {
+func integrationRequest(t *testing.T, method, url, body string) (status int, answer string) {
 	t.Helper()
-	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +132,7 @@ func integrationRequest(t *testing.T, method, url, body string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	var payload any
 	_ = json.NewDecoder(resp.Body).Decode(&payload)
 	return resp.StatusCode, fmt.Sprint(payload)
@@ -136,15 +140,12 @@ func integrationRequest(t *testing.T, method, url, body string) (int, string) {
 
 func integrationGET(t *testing.T, url string, out any) {
 	t.Helper()
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, url)
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET %s: %s", url, resp.Status)
 	}
-	if err = json.NewDecoder(resp.Body).Decode(out); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -153,7 +154,11 @@ func waitJSON(t *testing.T, url string, out any) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil && resp.StatusCode == 200 {
 			err = json.NewDecoder(resp.Body).Decode(out)
 			_ = resp.Body.Close()

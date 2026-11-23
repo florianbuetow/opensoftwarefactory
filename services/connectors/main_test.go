@@ -16,7 +16,7 @@ import (
 
 const (
 	builder = "course/builder@v1"
-	secret  = "ghp_the-secret-token"
+	secret  = "repository-token-of-the-test"
 )
 
 func TestRepositoriesAreStoredAndTheTokenIsNeverReturned(t *testing.T) {
@@ -112,10 +112,10 @@ func TestCreatingADevPodClonesSetsUpProtectsAndLimitsTheNetwork(t *testing.T) {
 		"protected": []string{"tests/**", "verify.sh"},
 		"rules":     []map[string]any{{"tool": "write_file", "path": "src/panel/**", "matches": "rejection ?reason", "message": "Blocked by CL-7."}},
 	})
-	if status != 200 || out["reused"] != false || out["start_commit"] != "5ta27c0" || out["work_branch"] != "agent/payment-date-1234abcd" {
+	if status != 200 || out["reused"] != false || out["start_commit"] != fakeStartCommit || out["work_branch"] != "agent/payment-date-1234abcd" {
 		t.Fatalf("status %d: %v", status, out)
 	}
-	id := out["id"].(string)
+	id := as[string](t, out["id"])
 	if got, want := w.pod.called(), []string{"clone", "run:pip install -r requirements.txt", "protect"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("calls into the pod = %v, want %v", got, want)
 	}
@@ -138,12 +138,12 @@ func TestCreatingADevPodClonesSetsUpProtectsAndLimitsTheNetwork(t *testing.T) {
 				Name, Image, ImagePullPolicy string
 				Command                      []string
 				Env                          []map[string]any
+				Resources                    struct{ Limits map[string]string }
+				VolumeMounts                 []struct{ Name, MountPath string }
 				SecurityContext              struct {
-					RunAsUser    int
 					Capabilities struct{ Add, Drop []string }
+					RunAsUser    int
 				}
-				Resources    struct{ Limits map[string]string }
-				VolumeMounts []struct{ Name, MountPath string }
 			}
 		}
 	}
@@ -197,13 +197,13 @@ func TestCreatingADevPodClonesSetsUpProtectsAndLimitsTheNetwork(t *testing.T) {
 
 	// The record survives in the blob store, and the pod is listed.
 	record := w.blobs.get("connectors/devpods/" + id + ".json")
-	mustContain(t, record, `"state": "ready"`, `"start_commit": "5ta27c0"`, `"tests/**"`, `"Blocked by CL-7."`, `"run-1"`)
+	mustContain(t, record, `"state": "ready"`, `"start_commit": "`+fakeStartCommit+`"`, `"tests/**"`, `"Blocked by CL-7."`, `"run-1"`)
 	pods := w.list("/api/devpods")
 	if len(pods) != 1 || pods[0]["id"] != id || pods[0]["repository"] != "claims-build" || pods[0]["phase"] != "Running" ||
 		fmt.Sprint(pods[0]["runs"]) != "[run-1]" || pods[0]["expires"] != "2026-11-17T09:30:00Z" || pods[0]["last_activity"] != "2026-11-17T09:00:00Z" {
 		t.Fatalf("listed %v", pods)
 	}
-	if status, detail := w.call("GET", "/api/devpods/"+id, nil); status != 200 || detail["start_commit"] != "5ta27c0" || detail["state"] != "ready" {
+	if status, detail := w.call("GET", "/api/devpods/"+id, nil); status != 200 || detail["start_commit"] != fakeStartCommit || detail["state"] != "ready" {
 		t.Fatalf("detail: status %d: %v", status, detail)
 	}
 	if len(w.kube.denied) != 0 {
@@ -213,7 +213,7 @@ func TestCreatingADevPodClonesSetsUpProtectsAndLimitsTheNetwork(t *testing.T) {
 
 func TestNetworkPolicyOfAnOutsideHostUsesItsAddresses(t *testing.T) {
 	w := newWorld(t)
-	policy, _ := json.Marshal(w.s.networkPolicy("abc", repository{Name: "claims", URL: "https://github.com/acme/claims.git"}))
+	policy, _ := json.Marshal(w.s.networkPolicy("abc", &repository{Name: "claims", URL: "https://github.com/acme/claims.git"}))
 	mustContain(t, string(policy), `"ipBlock":{"cidr":"140.82.121.3/32"}`, `{"port":443,"protocol":"TCP"}`)
 	if strings.Contains(string(policy), "0.0.0.0/0") {
 		t.Fatalf("the policy opens the internet: %s", policy)
@@ -230,7 +230,7 @@ func TestAWorkBranchThatIsTheSourceOrDefaultBranchIsRefused(t *testing.T) {
 		{"repository": "claims-build", "work_branch": "main", "run": "r1"},
 	} {
 		status, out := w.call("POST", "/api/devpods", body)
-		if status != 409 || !strings.Contains(out["error"].(string), "work branch") {
+		if status != 409 || !strings.Contains(as[string](t, out["error"]), "work branch") {
 			t.Fatalf("%v: status %d: %v", body, status, out)
 		}
 	}
@@ -256,7 +256,7 @@ func TestAFailedCreationLeavesNothingBehind(t *testing.T) {
 	w.repository("claims-build", nil)
 	w.pod.failClone = true
 	status, out := w.call("POST", "/api/devpods", map[string]any{"repository": "claims-build", "work_branch": "agent/x", "run": "r1"})
-	if status != 502 || !strings.Contains(out["error"].(string), "repository not found") {
+	if status != 502 || !strings.Contains(as[string](t, out["error"]), "repository not found") {
 		t.Fatalf("status %d: %v", status, out)
 	}
 	if len(w.kube.names(w.kube.pods))+len(w.kube.names(w.kube.secrets))+len(w.kube.names(w.kube.policies)) != 0 || len(w.list("/api/devpods")) != 0 {
@@ -271,7 +271,7 @@ func TestAFailedCreationLeavesNothingBehind(t *testing.T) {
 	w.repository("claims-build", map[string]any{"setup_command": "make deps"})
 	w.pod.exitCodes["make deps"] = 2
 	status, out = w.call("POST", "/api/devpods", map[string]any{"repository": "claims-build", "work_branch": "agent/x", "run": "r1"})
-	if status != 502 || !strings.Contains(out["error"].(string), "exit code 2") || len(w.kube.names(w.kube.pods)) != 0 {
+	if status != 502 || !strings.Contains(as[string](t, out["error"]), "exit code 2") || len(w.kube.names(w.kube.pods)) != 0 {
 		t.Fatalf("status %d: %v", status, out)
 	}
 }
@@ -285,7 +285,7 @@ func TestANamedPodIsReusedAndAnUnnamedOneIsNot(t *testing.T) {
 		"repository": "claims-build", "work_branch": "agent/b", "run": "run-2", "name": "shared",
 		"protected": []string{"verify.sh", "tests/**"}, "rules": []map[string]any{{"tool": "run_command", "matches": "push", "message": "No pushing."}},
 	})
-	if status != 200 || out["id"] != first || out["reused"] != true || out["work_branch"] != "agent/a" || out["start_commit"] != "5ta27c0" {
+	if status != 200 || out["id"] != first || out["reused"] != true || out["work_branch"] != "agent/a" || out["start_commit"] != fakeStartCommit {
 		t.Fatalf("reuse: status %d: %v", status, out)
 	}
 	if w.pod.count("clone") != 1 || w.pod.count("protect") != 2 {
@@ -380,16 +380,16 @@ func TestProtectedPathsAndRulesBlockWrites(t *testing.T) {
 		t.Fatalf("a refused call reached the pod: %v", w.pod.called()[before:])
 	}
 	allowed := []struct {
-		tool string
 		args map[string]any
+		tool string
 	}{
-		{"write_file", map[string]any{"path": "src/panel/view.py", "content": "show the payment date"}},
-		{"write_file", map[string]any{"path": "src/other.py", "content": "rejection reason"}},
-		{"edit_file", map[string]any{"path": "src/panel/view.py", "old_text": "rejection reason", "new_text": "payment date"}},
-		{"write_file", map[string]any{"path": "verify.sh.bak", "content": "x"}},
-		{"list_files", map[string]any{"path": "tests"}},
-		{"read_file", map[string]any{"path": "tests/test_panel.py", "start_line": 1, "end_line": 5}},
-		{"search", map[string]any{"pattern": "rejection reason"}},
+		{tool: "write_file", args: map[string]any{"path": "src/panel/view.py", "content": "show the payment date"}},
+		{tool: "write_file", args: map[string]any{"path": "src/other.py", "content": "rejection reason"}},
+		{tool: "edit_file", args: map[string]any{"path": "src/panel/view.py", "old_text": "rejection reason", "new_text": "payment date"}},
+		{tool: "write_file", args: map[string]any{"path": "verify.sh.bak", "content": "x"}},
+		{tool: "list_files", args: map[string]any{"path": "tests"}},
+		{tool: "read_file", args: map[string]any{"path": "tests/test_panel.py", "start_line": 1, "end_line": 5}},
+		{tool: "search", args: map[string]any{"pattern": "rejection reason"}},
 	}
 	for _, c := range allowed {
 		if ok, _, msg := w.tool(id, "run-1", builder, c.tool, c.args); !ok {
@@ -424,7 +424,7 @@ func TestOnlyAllowedCommandsRun(t *testing.T) {
 		if !ok {
 			t.Fatalf("%q was refused: %s", command, msg)
 		}
-		if out := result.(map[string]any); out["exit_code"] != 0.0 || out["stdout"] != "ran "+command {
+		if out := as[map[string]any](t, result); out["exit_code"] != 0.0 || out["stdout"] != "ran "+command {
 			t.Fatalf("%q: result %v", command, out)
 		}
 	}
@@ -575,11 +575,11 @@ func TestReportBlockedIsRecorded(t *testing.T) {
 		t.Fatalf("ok %v: %s", ok, msg)
 	}
 	ok, result, msg := w.tool(id, "run-1", builder, "report_blocked", map[string]any{"reason": "The test service is down."})
-	if !ok || !strings.HasPrefix(result.(string), "Recorded.") {
+	if !ok || !strings.HasPrefix(as[string](t, result), "Recorded.") {
 		t.Fatalf("ok %v: %v %s", ok, result, msg)
 	}
 	_, detail := w.call("GET", "/api/devpods/"+id, nil)
-	blocked := detail["blocked"].([]any)[0].(map[string]any)
+	blocked := as[map[string]any](t, as[[]any](t, detail["blocked"])[0])
 	if blocked["run"] != "run-1" || blocked["agent"] != builder || blocked["reason"] != "The test service is down." {
 		t.Fatalf("blocked = %v", blocked)
 	}
@@ -751,7 +751,7 @@ func TestReadOnlyViews(t *testing.T) {
 	w := newWorld(t)
 	w.repository("claims-build", nil)
 	id := w.devpod(map[string]any{"repository": "claims-build", "source_branch": "main", "work_branch": "agent/a", "run": "run-1"})
-	if status, out := w.call("GET", "/api/devpods/"+id+"/files?path=src", nil); status != 200 || out["path"] != "src" || len(out["entries"].([]any)) != 2 || out["truncated"] != false {
+	if status, out := w.call("GET", "/api/devpods/"+id+"/files?path=src", nil); status != 200 || out["path"] != "src" || len(as[[]any](t, out["entries"])) != 2 || out["truncated"] != false {
 		t.Fatalf("files: status %d: %v", status, out)
 	}
 	if status, out := w.call("GET", "/api/devpods/"+id+"/file?path=README.md", nil); status != 200 || out["content"] != "hello\n" || out["total_lines"] != 1.0 {
@@ -760,7 +760,7 @@ func TestReadOnlyViews(t *testing.T) {
 	if status, out := w.call("GET", "/api/devpods/"+id+"/file?path=missing.txt", nil); status != 422 || out["error"] != "missing.txt does not exist" {
 		t.Fatalf("missing file: status %d: %v", status, out)
 	}
-	if status, out := w.call("GET", "/api/devpods/"+id+"/log", nil); status != 200 || !strings.HasPrefix(out["output"].(string), "output of git log ") {
+	if status, out := w.call("GET", "/api/devpods/"+id+"/log", nil); status != 200 || !strings.HasPrefix(as[string](t, out["output"]), "output of git log ") {
 		t.Fatalf("log: status %d: %v", status, out)
 	}
 	if status, out := w.call("GET", "/api/devpods/"+id+"/diff", nil); status != 200 || out["output"] != "output of git diff 5ta27c0" {
@@ -796,7 +796,7 @@ func TestPlainRepositoryPushAndPullRequestRecord(t *testing.T) {
 	if !ok {
 		t.Fatal(msg)
 	}
-	if out := result.(map[string]any); out["pull_request"] != "runs/run-1/pull-request.json" || out["patch"] != "runs/run-1/pull-request.patch" || out["commits"] != 1.0 || out["pushed"] != false {
+	if out := as[map[string]any](t, result); out["pull_request"] != "runs/run-1/pull-request.json" || out["patch"] != "runs/run-1/pull-request.patch" || out["commits"] != 1.0 || out["pushed"] != false {
 		t.Fatalf("result = %v", out)
 	}
 	var record map[string]any
@@ -817,13 +817,13 @@ func TestPlainRepositoryPushAndPullRequestRecord(t *testing.T) {
 	if patch := w.blobs.get("runs/run-1/pull-request.patch"); !strings.HasPrefix(patch, "From c0ffee1") {
 		t.Fatalf("patch = %q", patch)
 	}
-	if base := w.pod.bodies["/patch"]["base"]; base != "5ta27c0" {
+	if base := w.pod.bodies["/patch"]["base"]; base != fakeStartCommit {
 		t.Fatalf("the patch starts at %v, not at the commit the pod was created from", base)
 	}
 
 	// The push goes through git-helper and shows in the record.
 	ok, result, msg = git("push_branch", nil)
-	if !ok || result.(map[string]any)["pushed"] != true || w.pod.count("push:agent/payment-date") != 1 {
+	if !ok || as[map[string]any](t, result)["pushed"] != true || w.pod.count("push:agent/payment-date") != 1 {
 		t.Fatalf("ok %v: %v %s", ok, result, msg)
 	}
 	mustContain(t, w.blobs.get("runs/run-1/pull-request.json"), `"pushed": true`)
@@ -842,7 +842,7 @@ func TestPlainRepositoryPushAndPullRequestRecord(t *testing.T) {
 	}
 	mustContain(t, w.blobs.get("runs/run-1/pull-request.json"), `"title": "Payment date"`, `"body": "Shows the payment date on the panel."`, `"Checks pass."`, `"created": "2026-11-17T09:00:00Z"`)
 	ok, result, msg = git("get_pull_request", nil)
-	if out := result.(map[string]any); !ok || out["title"] != "Payment date" || out["body"] != "Shows the payment date on the panel." || out["pushed"] != true || len(out["comments"].([]any)) != 1 {
+	if out := as[map[string]any](t, result); !ok || out["title"] != "Payment date" || out["body"] != "Shows the payment date on the panel." || out["pushed"] != true || len(as[[]any](t, out["comments"])) != 1 {
 		t.Fatalf("ok %v: %v %s", ok, result, msg)
 	}
 
@@ -902,7 +902,7 @@ func TestPublishingWaitsForApproval(t *testing.T) {
 
 	// Approving the push pushes.
 	status, out := w.call("POST", "/api/devpods/"+id+"/publish-requests/1/decision", map[string]any{"decision": "approve", "comment": "ok", "decided_by": "flo"})
-	if status != 200 || out["state"] != "done" || !strings.Contains(out["result"].(string), "Pushed the branch agent/a") || out["decided_by"] != "flo" || w.pod.count("push:agent/a") != 1 {
+	if status != 200 || out["state"] != requestDone || !strings.Contains(as[string](t, out["result"]), "Pushed the branch agent/a") || out["decided_by"] != "flo" || w.pod.count("push:agent/a") != 1 {
 		t.Fatalf("status %d: %v, calls %v", status, out, w.pod.called())
 	}
 	if status, out = w.call("POST", "/api/devpods/"+id+"/publish-requests/1/decision", map[string]any{"decision": "approve"}); status != 409 || w.pod.count("push") != 1 {
@@ -910,7 +910,7 @@ func TestPublishingWaitsForApproval(t *testing.T) {
 	}
 	// Approving the pull request stores the record, for the run and agent that asked.
 	status, out = w.call("POST", "/api/devpods/"+id+"/publish-requests/2/decision", map[string]any{"decision": "approve", "decided_by": "flo"})
-	if status != 200 || out["state"] != "done" || out["result"] != "Pull request recorded: runs/run-1/pull-request.json" {
+	if status != 200 || out["state"] != requestDone || out["result"] != "Pull request recorded: runs/run-1/pull-request.json" {
 		t.Fatalf("status %d: %v", status, out)
 	}
 	mustContain(t, w.blobs.get("runs/run-1/pull-request.json"), `"title": "Payment date"`, `"pushed": true`, `"created_by_agent": "course/builder@v1"`)
@@ -933,24 +933,24 @@ func TestPublishingWaitsForApproval(t *testing.T) {
 	w.tool(other, "run-2", builder, "push_branch", nil)
 	w.pod.failPush = true
 	status, out = w.call("POST", "/api/devpods/"+other+"/publish-requests/2/decision", map[string]any{"decision": "approve"})
-	if status != 502 || !strings.Contains(out["error"].(string), "Permission denied") {
+	if status != 502 || !strings.Contains(as[string](t, out["error"]), "Permission denied") {
 		t.Fatalf("status %d: %v", status, out)
 	}
-	if req := w.list("/api/devpods/" + other + "/publish-requests")[1]; req["state"] != "approved" || !strings.HasPrefix(req["result"].(string), "Failed: ") {
+	if req := w.list("/api/devpods/" + other + "/publish-requests")[1]; req["state"] != "approved" || !strings.HasPrefix(as[string](t, req["result"]), "Failed: ") {
 		t.Fatalf("request = %v", req)
 	}
 	w.pod.failPush = false
-	if status, out = w.call("POST", "/api/devpods/"+other+"/publish-requests/2/decision", map[string]any{"decision": "approve"}); status != 200 || out["state"] != "done" {
+	if status, out = w.call("POST", "/api/devpods/"+other+"/publish-requests/2/decision", map[string]any{"decision": "approve"}); status != 200 || out["state"] != requestDone {
 		t.Fatalf("status %d: %v", status, out)
 	}
 }
 
 // fakeGitHub is the part of the GitHub REST API the connector service calls.
 type fakeGitHub struct {
-	mu    sync.Mutex
-	calls []string
 	pull  map[string]any
 	srv   *httptest.Server
+	calls []string
+	mu    sync.Mutex
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -968,7 +968,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		var body map[string]any
 		_ = json.Unmarshal(data, &body)
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/repos/acme/claims/pulls":
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/claims/pulls":
 			if body["head"] == "agent/taken" {
 				w.WriteHeader(422)
 				_ = json.NewEncoder(w).Encode(map[string]string{"message": "A pull request already exists for acme:agent/taken."})
@@ -977,12 +977,12 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 			g.pull = map[string]any{"number": 7, "html_url": "https://github.com/acme/claims/pull/7", "state": "open", "title": body["title"], "body": body["body"], "merged": false}
 			w.WriteHeader(201)
 			_ = json.NewEncoder(w).Encode(g.pull)
-		case r.Method == "PATCH" && r.URL.Path == "/repos/acme/claims/pulls/7":
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/claims/pulls/7":
 			g.pull["title"], g.pull["body"] = body["title"], body["body"]
 			_ = json.NewEncoder(w).Encode(g.pull)
-		case r.Method == "GET" && r.URL.Path == "/repos/acme/claims/pulls/7":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/claims/pulls/7":
 			_ = json.NewEncoder(w).Encode(g.pull)
-		case r.Method == "POST" && r.URL.Path == "/repos/acme/claims/issues/7/comments":
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/claims/issues/7/comments":
 			w.WriteHeader(201)
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
 		default:
@@ -1014,7 +1014,7 @@ func TestGitHubPullRequests(t *testing.T) {
 	if !ok {
 		t.Fatal(msg)
 	}
-	if out := result.(map[string]any); out["url"] != "https://github.com/acme/claims/pull/7" || out["number"] != 7.0 || out["pull_request"] != "runs/run-1/pull-request.json" || out["patch"] != nil {
+	if out := as[map[string]any](t, result); out["url"] != "https://github.com/acme/claims/pull/7" || out["number"] != 7.0 || out["pull_request"] != "runs/run-1/pull-request.json" || out["patch"] != nil {
 		t.Fatalf("result = %v", out)
 	}
 	if want := `POST /repos/acme/claims/pulls {"base":"main","body":"Shows the payment date.","head":"agent/payment-date","title":"Payment date"}`; hub.calls[0] != want {
@@ -1032,7 +1032,7 @@ func TestGitHubPullRequests(t *testing.T) {
 		t.Fatal(msg)
 	}
 	ok, result, msg = git("get_pull_request", nil)
-	if out := result.(map[string]any); !ok || out["state"] != "open" || out["title"] != "Show the payment date" || out["body"] != "Shows the payment date." || out["merged"] != false || out["number"] != 7.0 {
+	if out := as[map[string]any](t, result); !ok || out["state"] != "open" || out["title"] != "Show the payment date" || out["body"] != "Shows the payment date." || out["merged"] != false || out["number"] != 7.0 {
 		t.Fatalf("ok %v: %v %s", ok, result, msg)
 	}
 	want := []string{
@@ -1067,7 +1067,7 @@ func TestGitHubWithApprovalPushesAndOpensThePullRequest(t *testing.T) {
 		t.Fatal("GitHub was called before the approval")
 	}
 	status, out := w.call("POST", "/api/devpods/"+id+"/publish-requests/1/decision", map[string]any{"decision": "approved", "decided_by": "flo"})
-	if status != 200 || out["state"] != "done" || out["result"] != "Pull request created: https://github.com/acme/claims/pull/7" || w.pod.count("push:agent/payment-date") != 1 {
+	if status != 200 || out["state"] != requestDone || out["result"] != "Pull request created: https://github.com/acme/claims/pull/7" || w.pod.count("push:agent/payment-date") != 1 {
 		t.Fatalf("status %d: %v", status, out)
 	}
 
@@ -1094,11 +1094,11 @@ func TestTheMCPServiceIsRegisteredWhenMissing(t *testing.T) {
 		case failures > 0:
 			failures--
 			rw.WriteHeader(503)
-		case r.Method == "GET" && stored == nil:
+		case r.Method == http.MethodGet && stored == nil:
 			rw.WriteHeader(404)
-		case r.Method == "GET":
+		case r.Method == http.MethodGet:
 			_, _ = rw.Write(stored)
-		case r.Method == "PUT":
+		case r.Method == http.MethodPut:
 			stored, _ = io.ReadAll(r.Body)
 			_, _ = rw.Write(stored)
 		}

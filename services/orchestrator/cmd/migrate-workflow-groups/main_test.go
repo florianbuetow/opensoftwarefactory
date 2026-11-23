@@ -61,8 +61,8 @@ func TestMigrateGroupsNamesAndRewritesReferences(t *testing.T) {
 
 // blobstore is a minimal /blobs server.
 type blobstore struct {
-	mu   sync.Mutex
 	data map[string][]byte
+	mu   sync.Mutex
 }
 
 func (b *blobstore) ServeHTTP(w http.ResponseWriter, r *http.Request) {

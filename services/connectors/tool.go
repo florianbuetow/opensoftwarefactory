@@ -24,6 +24,12 @@ type toolInput struct {
 	Run   string                     `json:"run"`
 }
 
+// The names of the tools the service treats in a way of their own.
+const (
+	toolRunCommand     = "run_command"
+	toolRunSkillScript = "run_skill_script"
+)
+
 // A reference such as course/builder@v3; it is put into a shell command, so it is checked.
 var agentRef = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@-]{0,199}$`)
 
@@ -76,16 +82,16 @@ func (s *service) runTool(ctx context.Context, id string, in toolInput) (any, er
 	case "list_files", "read_file", "search":
 		return s.op(ctx, id, in.Tool, in.Args)
 	case "write_file", "edit_file":
-		if err := checkWrite(p, in); err != nil {
+		if err := checkWrite(&p, in); err != nil {
 			return nil, err
 		}
 		return s.op(ctx, id, in.Tool, in.Args)
-	case "run_command":
-		return s.agentCommand(ctx, p, in)
+	case toolRunCommand:
+		return s.agentCommand(ctx, &p, in)
 	case "report_blocked":
-		return s.reportBlocked(ctx, p, in)
+		return s.reportBlocked(ctx, &p, in)
 	}
-	return s.gitTool(ctx, p, in)
+	return s.gitTool(ctx, &p, in)
 }
 
 // active records agent activity; the pod's idle time starts again.
@@ -96,7 +102,7 @@ func (s *service) active(ctx context.Context, id string) {
 }
 
 // checkWrite refuses a write to a protected path and a write a rule blocks.
-func checkWrite(p devPod, in toolInput) error {
+func checkWrite(p *devPod, in toolInput) error {
 	if strings.TrimSpace(in.text("path")) == "" {
 		return fmt.Errorf(`Refused: %s needs a path. Pass the file's path relative to the workspace, for example "src/panel.py".`, in.Tool)
 	}
@@ -118,17 +124,18 @@ func checkWrite(p devPod, in toolInput) error {
 
 // agentCommand runs a command for an agent when the agent's allowed commands and the pod's
 // rules let it.
-func (s *service) agentCommand(ctx context.Context, p devPod, in toolInput) (any, error) {
+func (s *service) agentCommand(ctx context.Context, p *devPod, in toolInput) (any, error) {
 	command := in.text("command")
 	patterns, err := s.allowedCommands(ctx, in.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("Refused: the command %q was not run, because the allowed commands of the agent %q could not be read: %v. Try again; if it keeps failing, call report_blocked with the reason.", command, in.Agent, err)
 	}
-	if err = commandAllowed(patterns, command); err != nil {
+	err = commandAllowed(patterns, command)
+	if err != nil {
 		return nil, err
 	}
 	for _, rl := range p.Rules {
-		if rl.applies("run_command", "", command) {
+		if rl.applies(toolRunCommand, "", command) {
 			return nil, fmt.Errorf("Refused: the command %q was blocked by a rule of this dev pod. %s", strings.TrimSpace(command), rl.Message)
 		}
 	}
@@ -138,11 +145,11 @@ func (s *service) agentCommand(ctx context.Context, p devPod, in toolInput) (any
 	if json.Unmarshal(in.Args["timeout_seconds"], &timeout) == nil && timeout > 0 {
 		args["timeout_seconds"] = int(min(timeout, 600))
 	}
-	return s.op(ctx, p.ID, "run_command", args)
+	return s.op(ctx, p.ID, toolRunCommand, args)
 }
 
 // setAuthor makes the agent, with its version, the author of the commits it creates.
-func (s *service) setAuthor(ctx context.Context, p devPod, agent string) {
+func (s *service) setAuthor(ctx context.Context, p *devPod, agent string) {
 	if agent == p.Author || !agentRef.MatchString(agent) {
 		return
 	}
@@ -156,7 +163,7 @@ func (s *service) setAuthor(ctx context.Context, p devPod, agent string) {
 	}
 }
 
-func (s *service) reportBlocked(ctx context.Context, p devPod, in toolInput) (any, error) {
+func (s *service) reportBlocked(ctx context.Context, p *devPod, in toolInput) (any, error) {
 	reason := strings.TrimSpace(in.text("reason"))
 	if reason == "" {
 		return nil, errors.New("Refused: report_blocked needs a reason. Say in one or two sentences what stops the work and what would be needed to continue.")

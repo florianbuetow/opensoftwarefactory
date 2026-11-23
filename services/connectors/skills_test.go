@@ -36,14 +36,14 @@ func configureSkills(w *world, registry string) {
 	w.s.cfg.skillArgsChars = 1000
 }
 
-func (w *world) skill(body map[string]any) (bool, any, string) {
+func (w *world) skill(body map[string]any) (ok bool, result any, message string) {
 	w.t.Helper()
 	status, out := w.call("POST", "/api/skills/tool", body)
 	if status != 200 {
 		w.t.Fatalf("skill tool: status %d: %v", status, out)
 	}
-	message, _ := out["error"].(string)
-	return out["ok"].(bool), out["result"], message
+	message, _ = out["error"].(string)
+	return as[bool](w.t, out["ok"]), out["result"], message
 }
 
 func TestReadSkillReturnsOnlyStoredFilesAndNeedsNoPod(t *testing.T) {
@@ -56,7 +56,7 @@ func TestReadSkillReturnsOnlyStoredFilesAndNeedsNoPod(t *testing.T) {
 		"skill": "git", "version": "v3", "args": map[string]any{"file": "SKILL.md"},
 	}
 	ok, result, message := w.skill(base)
-	if !ok || !strings.Contains(result.(string), "Git procedures") || message != "" {
+	if !ok || !strings.Contains(as[string](t, result), "Git procedures") || message != "" {
 		t.Fatalf("ok=%v result=%v message=%q", ok, result, message)
 	}
 	base["args"] = map[string]any{"file": "../secret"}
@@ -85,15 +85,15 @@ func TestRunSkillScriptChecksPodPassesFilesAndReturnsWarnings(t *testing.T) {
 	if !ok || message != "" {
 		t.Fatalf("ok=%v result=%v message=%q", ok, result, message)
 	}
-	got := result.(map[string]any)
-	if got["exit_code"] != 0.0 || !strings.Contains(got["warning"].(string), "Standard output") {
+	got := as[map[string]any](t, result)
+	if got["exit_code"] != 0.0 || !strings.Contains(as[string](t, got["warning"]), "Standard output") {
 		t.Fatalf("result=%v", got)
 	}
 	op := w.pod.ops[len(w.pod.ops)-1]
 	if op["timeout_seconds"] != 4.0 || op["max_lines"] != 1000.0 || op["max_bytes"] != 10240.0 {
 		t.Fatalf("pod args=%v", op)
 	}
-	if files := op["files"].(map[string]any); !strings.HasPrefix(files["scripts/check.sh"].(string), "#!") {
+	if files := as[map[string]any](t, op["files"]); !strings.HasPrefix(as[string](t, files["scripts/check.sh"]), "#!") {
 		t.Fatalf("files=%v", files)
 	}
 	p, _ := w.s.pod(id)

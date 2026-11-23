@@ -36,14 +36,11 @@ func TestJudgeSeriesUsesTargetRunCountsMissingAndHidesIncompleteHours(t *testing
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/series?metric=quality&group_by=run&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, server.URL+"/api/series?metric=quality&group_by=run&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
+	defer closeBody(t, resp.Body)
 	var result struct {
-		Series   []seriesLine   `json:"series"`
 		Coverage map[string]int `json:"coverage"`
+		Series   []seriesLine   `json:"series"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) != nil {
 		t.Fatal("decode")
@@ -65,19 +62,17 @@ func TestCurrencyIsOnlyRequiredForCostSeries(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/series?metric=input_tokens&group_by=model&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
-	if err != nil {
+	resp := get(t, server.URL+"/api/series?metric=input_tokens&group_by=model&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
+	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("non-cost series without currency = %d", resp.StatusCode)
 	}
-	resp, err = http.Get(server.URL + "/api/series?metric=cost&group_by=model&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
-	if err != nil {
+	resp = get(t, server.URL+"/api/series?metric=cost&group_by=model&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
+	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode != 422 {
 		t.Fatalf("cost series without currency = %d", resp.StatusCode)
 	}
@@ -102,17 +97,14 @@ func TestPartialSeriesSuppressesTotals(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/series?metric=input_tokens&group_by=model&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, server.URL+"/api/series?metric=input_tokens&group_by=model&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
+	defer closeBody(t, resp.Body)
 	var result struct {
-		Series        []seriesLine `json:"series"`
-		QueryComplete bool         `json:"query_complete"`
-		Projection    struct {
+		Projection struct {
 			Status string `json:"status"`
 		} `json:"projection"`
+		Series        []seriesLine `json:"series"`
+		QueryComplete bool         `json:"query_complete"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 	if len(result.Series) != 0 || result.QueryComplete || result.Projection.Status != "refreshing" {
@@ -139,11 +131,8 @@ func TestSeriesParsesOpenObserveNaiveUTCBucket(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/series?metric=duration_ms&group_by=workflow&from=2026-11-21T19:00:00Z&to=2026-11-21T21:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, server.URL+"/api/series?metric=duration_ms&group_by=workflow&from=2026-11-21T19:00:00Z&to=2026-11-21T21:00:00Z")
+	defer closeBody(t, resp.Body)
 	var result struct {
 		Series        []seriesLine `json:"series"`
 		QueryComplete bool         `json:"query_complete"`
@@ -174,17 +163,14 @@ func TestInvalidSeriesBucketMakesQueryIncomplete(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/series?metric=duration_ms&group_by=workflow&from=2026-11-21T19:00:00Z&to=2026-11-21T21:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, server.URL+"/api/series?metric=duration_ms&group_by=workflow&from=2026-11-21T19:00:00Z&to=2026-11-21T21:00:00Z")
+	defer closeBody(t, resp.Body)
 	var result struct {
-		Series        []seriesLine `json:"series"`
-		QueryComplete bool         `json:"query_complete"`
-		Projection    struct {
+		Projection struct {
 			Status string `json:"status"`
 		} `json:"projection"`
+		Series        []seriesLine `json:"series"`
+		QueryComplete bool         `json:"query_complete"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 	if result.QueryComplete || len(result.Series) != 0 || result.Projection.Status != "refreshing" {
@@ -202,11 +188,8 @@ func TestCostSeriesReturnsExactRationalTotalAndApproximateChart(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/series?metric=cost&group_by=model&currency=EUR&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, server.URL+"/api/series?metric=cost&group_by=model&currency=EUR&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
+	defer closeBody(t, resp.Body)
 	var result struct {
 		Series        []seriesLine `json:"series"`
 		QueryComplete bool         `json:"query_complete"`
@@ -232,11 +215,8 @@ func TestCostSeriesConvertsRequestedCurrencyWithoutRecalculation(t *testing.T) {
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
 	get := func(currency string) *exactSeriesValue {
-		resp, err := http.Get(server.URL + "/api/series?metric=cost&group_by=model&currency=" + currency + "&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
+		resp := get(t, server.URL+"/api/series?metric=cost&group_by=model&currency="+currency+"&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z")
+		defer closeBody(t, resp.Body)
 		var result struct {
 			Series []seriesLine `json:"series"`
 		}
@@ -266,10 +246,7 @@ func TestEvidenceArtifactIsExecutionScopedAndCapped(t *testing.T) {
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/api/evidence/artifact?run_id=run&execution_id=exec&artifact_id=runs/run/child/output")
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := get(t, server.URL+"/api/evidence/artifact?run_id=run&execution_id=exec&artifact_id=runs/run/child/output")
 	var result struct {
 		Content   string `json:"content"`
 		Truncated bool   `json:"truncated"`
@@ -280,11 +257,10 @@ func TestEvidenceArtifactIsExecutionScopedAndCapped(t *testing.T) {
 	if resp.StatusCode != 200 || !result.Truncated || len(result.Content) != (1<<20) || result.Bytes != len(content) {
 		t.Fatalf("artifact status=%d len=%d result=%+v", resp.StatusCode, len(result.Content), result)
 	}
-	resp, err = http.Get(server.URL + "/api/evidence/artifact?run_id=run&execution_id=exec&artifact_id=runs/run/sibling/output")
-	if err != nil {
+	resp = get(t, server.URL+"/api/evidence/artifact?run_id=run&execution_id=exec&artifact_id=runs/run/sibling/output")
+	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode != 422 {
 		t.Fatalf("sibling artifact status %d", resp.StatusCode)
 	}

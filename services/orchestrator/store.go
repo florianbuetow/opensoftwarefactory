@@ -22,21 +22,21 @@ const (
 	workflowFile   = "workflow.json"
 )
 
-var versionDir = regexp.MustCompile(`^v([1-9][0-9]*)$`)
+var versionDir = regexp.MustCompile(`^v([1-9]\d*)$`)
 
 // workflowBlobs is the blobstore access the workflow store needs.
 type workflowBlobs interface {
 	pipeline.Store
 	Delete(ctx context.Context, id string) error
-	List(ctx context.Context, prefix string) (dirs []string, objects []string, err error)
+	List(ctx context.Context, prefix string) (dirs, objects []string, err error)
 }
 
 // workflowStore holds every stored version of every workflow. The orchestrator is the only
 // writer, so it reads the blobstore once and keeps the configuration in memory.
 type workflowStore struct {
 	blobs  workflowBlobs
-	mu     sync.Mutex
 	config Config
+	mu     sync.Mutex
 }
 
 // workflowID is the object ID of one stored workflow version.
@@ -131,7 +131,8 @@ func (s *workflowStore) update(ctx context.Context, edit func(c *Config) error) 
 	if err != nil {
 		return err
 	}
-	if err = edit(&next); err != nil {
+	err = edit(&next)
+	if err != nil {
 		return err
 	}
 	before, err := encodeVersions(s.config)
@@ -142,7 +143,8 @@ func (s *workflowStore) update(ctx context.Context, edit func(c *Config) error) 
 	if err != nil {
 		return err
 	}
-	for _, def := range next.Workflows {
+	for i := range next.Workflows {
+		def := &next.Workflows[i]
 		id := workflowID(def.Name, pipeline.DefinitionVersion(def))
 		if old, ok := before[id]; ok && bytes.Equal(old, after[id]) {
 			continue
@@ -166,7 +168,8 @@ func (s *workflowStore) update(ctx context.Context, edit func(c *Config) error) 
 // encodeVersions returns every version of c as its stored object, keyed by object ID.
 func encodeVersions(c Config) (map[string][]byte, error) {
 	out := make(map[string][]byte, len(c.Workflows))
-	for _, def := range c.Workflows {
+	for i := range c.Workflows {
+		def := &c.Workflows[i]
 		data, err := json.MarshalIndent(def, "", "  ")
 		if err != nil {
 			return nil, err
@@ -182,7 +185,8 @@ func cloneConfig(c Config) (Config, error) {
 		return Config{}, err
 	}
 	var out Config
-	if err = json.Unmarshal(data, &out); err != nil {
+	err = json.Unmarshal(data, &out)
+	if err != nil {
 		return Config{}, err
 	}
 	if out.Workflows == nil {

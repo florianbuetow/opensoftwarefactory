@@ -42,16 +42,20 @@ type cluster interface {
 
 // kubeClient talks to the Kubernetes REST API with the service account of the pod it runs in.
 type kubeClient struct {
+	http      *http.Client
 	base      string
 	namespace string
 	tokenFile string
-	http      *http.Client
 }
 
 // newKubeClient trusts the cluster's certificate authority when the service account provides
 // one. Outside a cluster the client is still created; its calls then fail with a clear error.
 func newKubeClient(base, namespace string) (*kubeClient, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("the default HTTP transport is a %T, not a *http.Transport", http.DefaultTransport)
+	}
+	transport := defaultTransport.Clone()
 	if ca, err := os.ReadFile(serviceAccountDir + "/ca.crt"); err == nil {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(ca) {
@@ -77,14 +81,14 @@ func (k *kubeClient) policies() string {
 
 // do sends one request. The token is read on every call because Kubernetes replaces it
 // regularly. A nil out drops the answer.
-func (k *kubeClient) do(ctx context.Context, method, path string, in, out any) (int, error) {
+func (k *kubeClient) do(ctx context.Context, method, path string, in, out any) (code int, err error) {
 	var body io.Reader
 	if in != nil {
-		data, err := json.Marshal(in)
-		if err != nil {
-			return 0, err
+		encoded, marshalErr := json.Marshal(in)
+		if marshalErr != nil {
+			return 0, marshalErr
 		}
-		body = bytes.NewReader(data)
+		body = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, k.base+path, body)
 	if err != nil {
@@ -95,9 +99,9 @@ func (k *kubeClient) do(ctx context.Context, method, path string, in, out any) (
 	}
 	req.Header.Set("Accept", "application/json")
 	if k.tokenFile != "" {
-		token, err := os.ReadFile(k.tokenFile)
-		if err != nil {
-			return 0, fmt.Errorf("the Kubernetes service account token cannot be read: %w", err)
+		token, readErr := os.ReadFile(k.tokenFile)
+		if readErr != nil {
+			return 0, fmt.Errorf("the Kubernetes service account token cannot be read: %w", readErr)
 		}
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	}
@@ -105,7 +109,7 @@ func (k *kubeClient) do(ctx context.Context, method, path string, in, out any) (
 	if err != nil {
 		return 0, fmt.Errorf("the Kubernetes API is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return resp.StatusCode, err

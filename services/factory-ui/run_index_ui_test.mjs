@@ -368,3 +368,23 @@ test("a pass of a nested step is attributed to its path under the workflow node"
   const status = await index.status("run-1");
   assert.equal(status.passes["build/write"].length, 2, "the status carries the passes");
 });
+
+test("a run from before its workflow moved into a group is listed, filtered and named with that workflow", async () => {
+  const groupedName = app.slice(app.indexOf("function groupedName("), app.indexOf("\n}\n", app.indexOf("function groupedName(")) + 3);
+  const context = {
+    titleCase: (s) => String(s || ""), midTruncate: (s) => s,
+    api: async (_m, path) => (path === "/api/orchestrator/workflows" ? { workflows: [{ name: "default/workflow-1" }, { name: "a/dup" }, { name: "b/dup" }] } : { directories: [] }),
+    loadBlob: async () => ({ text: "{}" }),
+  };
+  vm.runInNewContext(`${helpers}\n${groupedName}\nglobalThis.testRunIndex = runIndex;`, context);
+  const index = context.testRunIndex;
+  await index.loadWorkflowNames();
+  index.records.set("old", { trace_id: "old", workflow: "workflow-1", started: "2026-11-16T00:00:00Z" });
+  index.records.set("new", { trace_id: "new", workflow: "default/workflow-1", started: "2026-11-23T00:00:00Z" });
+  index.records.set("odd", { trace_id: "odd", workflow: "dup", started: "2026-11-20T00:00:00Z" });
+  assert.equal(index.workflowOf(index.records.get("old")), "default/workflow-1");
+  assert.deepEqual([...index.list("default/workflow-1").map((r) => r.trace_id)], ["new", "old"], "one filter holds both");
+  assert.equal(index.name("old"), "default/workflow-1");
+  assert.equal(index.workflowOf(index.records.get("odd")), "dup", "two groups hold that name: no guess");
+  assert.equal(index.records.get("old").workflow, "workflow-1", "the record itself never changes");
+});

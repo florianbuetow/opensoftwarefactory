@@ -81,8 +81,8 @@ const OneWay = "one-way"
 // may send on a one-way channel; it is empty when both may send.
 type TeamChannel struct {
 	ID      string   `json:"id"`
-	Members []string `json:"members"`
 	From    string   `json:"from,omitempty"`
+	Members []string `json:"members"`
 }
 
 // sends reports whether the member may send on the channel.
@@ -92,21 +92,21 @@ func (c TeamChannel) sends(member string) bool {
 
 // TeamManifest is stored as <team>/team.json.
 type TeamManifest struct {
-	Lead     string        `json:"lead"`
-	Members  []TeamMember  `json:"members"`
-	Channels []TeamChannel `json:"channels"`
-	TraceID  string        `json:"trace_id"`
-	StepID   string        `json:"step_id"`
+	Lead    string       `json:"lead"`
+	Members []TeamMember `json:"members"`
+	TraceID string       `json:"trace_id"`
+	StepID  string       `json:"step_id"`
 	// Run marks the run of the team step that last opened the team; Round counts those runs.
-	Run   string `json:"run"`
-	Round int    `json:"round"`
+	Run      string        `json:"run"`
+	Channels []TeamChannel `json:"channels"`
+	Round    int           `json:"round"`
 }
 
 // TeamMessage is one message of a queue; Seq counts from 1 per queue.
 type TeamMessage struct {
-	Seq  int    `json:"seq"`
 	Text string `json:"text"`
 	Sent string `json:"sent"`
+	Seq  int    `json:"seq"`
 }
 
 // TeamQueue is stored as <team>/channels/<channel-id>/<sender>.json: the messages one member
@@ -178,9 +178,9 @@ type PendingTeam struct {
 // TeamRejection is the gate rejection a team receives when it runs again.
 type TeamRejection struct {
 	Gate      string `json:"gate"`
-	Round     int    `json:"round"`
 	DecidedBy string `json:"decided_by"`
 	Reason    string `json:"reason"`
+	Round     int    `json:"round"`
 }
 
 // TeamInput starts the team loop of one team step.
@@ -188,17 +188,17 @@ type TeamInput struct {
 	TraceID  string `json:"trace_id"`
 	Workflow string `json:"workflow"`
 	Step     Step   `json:"step"`
-	Inputs   []Item `json:"inputs"`
 	Prefix   string `json:"prefix"`
 	Artifact string `json:"artifact"`
 	Team     string `json:"team"`
-	Depth    int    `json:"depth,omitempty"`
 	// Run changes whenever the team step runs again, so OpenTeam can tell that from a retry.
 	Run       string         `json:"run,omitempty"`
 	Rejection *TeamRejection `json:"rejection,omitempty"`
 	// DevPod is the run's dev pod, nil when the team works without one.
 	DevPod               *DevPod      `json:"dev_pod,omitempty"`
 	Intake               *IntakeInput `json:"intake,omitempty"`
+	Inputs               []Item       `json:"inputs"`
+	Depth                int          `json:"depth,omitempty"`
 	ResolveAgentSettings bool         `json:"resolve_agent_settings,omitempty"`
 }
 
@@ -210,8 +210,8 @@ type TeamTurnRequest struct {
 	Team                      string            `json:"team"`
 	Member                    string            `json:"member"`
 	Agent                     string            `json:"agent"`
-	DevPod                    string            `json:"dev_pod,omitempty"`
 	Skills                    map[string]string `json:"skills,omitempty"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
 	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
@@ -256,7 +256,7 @@ func LeadChannelID(lead string) string {
 
 // TeamMembers returns the members of a team step: the lead agent first, then the other
 // agents, then the workflows. Descriptions are filled in when the team is opened.
-func (s Step) TeamMembers() []TeamMember {
+func (s *Step) TeamMembers() []TeamMember {
 	members := []TeamMember{{Name: MemberName(s.Agent), Kind: AgentMember, Ref: s.Agent}}
 	for _, agent := range s.Agents {
 		members = append(members, TeamMember{Name: MemberName(agent), Kind: AgentMember, Ref: agent})
@@ -269,7 +269,7 @@ func (s Step) TeamMembers() []TeamMember {
 
 // TeamChannels returns the channels between the members of a team step. With no channels
 // configured the lead has a channel to every other member.
-func (s Step) TeamChannels() []TeamChannel {
+func (s *Step) TeamChannels() []TeamChannel {
 	var pairs [][]string
 	if len(s.Channels) == 0 {
 		members := s.TeamMembers()
@@ -299,28 +299,29 @@ func (s Step) TeamChannels() []TeamChannel {
 }
 
 // FinalSteps returns the IDs of the steps no other step depends on, in definition order.
-func FinalSteps(d Definition) []string {
+func FinalSteps(d *Definition) []string {
 	needed := map[string]bool{}
-	for _, s := range d.Steps {
-		for _, dep := range s.DependsOn {
+	for i := range d.Steps {
+		for _, dep := range d.Steps[i].DependsOn {
 			needed[dep] = true
 		}
 	}
 	var final []string
-	for _, s := range d.Steps {
-		if !needed[s.ID] {
-			final = append(final, s.ID)
+	for i := range d.Steps {
+		if id := d.Steps[i].ID; !needed[id] {
+			final = append(final, id)
 		}
 	}
 	return final
 }
 
 // dependents returns the step and every step that depends on it, directly or through others.
-func dependents(d Definition, step string) map[string]bool {
+func dependents(d *Definition, step string) map[string]bool {
 	set := map[string]bool{step: true}
 	for changed := true; changed; {
 		changed = false
-		for _, s := range d.Steps {
+		for i := range d.Steps {
+			s := &d.Steps[i]
 			if set[s.ID] {
 				continue
 			}
@@ -341,14 +342,14 @@ func dependents(d Definition, step string) map[string]bool {
 type nestedRun struct {
 	TraceID    string
 	Name       string
-	Inputs     []Item
 	Prefix     string
-	Depth      int
 	Run        string
 	WorkflowID string
 	// DevPod is the dev pod the nested run works in, nil when it has none.
 	DevPod               *DevPod
 	Intake               *IntakeInput
+	Inputs               []Item
+	Depth                int
 	ResolveAgentSettings bool
 }
 
@@ -357,19 +358,20 @@ type nestedRun struct {
 // the reason when an agent of the nested run ended its work with report_blocked.
 type NestedResult struct {
 	Artifacts map[string]string `json:"artifacts"`
-	Output    []Item            `json:"output"`
 	Blocked   string            `json:"blocked,omitempty"`
+	Output    []Item            `json:"output"`
 }
 
 // startNested resolves the referenced workflow version against the stored configuration and
 // runs it as a child workflow under the same trace. The child's steps store their artifacts under the
 // run's prefix.
-func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
+func startNested(ctx, ownCtx workflow.Context, run *nestedRun) workflow.Future {
 	future, setter := workflow.NewFuture(ctx)
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		if run.Depth > MaxDepth {
 			setter.Set(nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("workflow %q is nested deeper than %d levels", run.Name, MaxDepth), "NestingTooDeep", nil))
+				fmt.Sprintf("workflow %q is nested deeper than %d levels", run.Name, MaxDepth), "NestingTooDeep", nil,
+			))
 			return
 		}
 		var resolved ResolveWorkflowResult
@@ -382,7 +384,7 @@ func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
 			TaskQueue:  TaskQueue,
 			// A step that runs again waits until its cancelled earlier run has closed.
 			WaitForCancellation: true,
-			Memo:                map[string]any{"workflow": resolved.Definition.Name, "workflow_version": DefinitionVersion(resolved.Definition), "trace_id": run.TraceID, "artifact_prefix": run.Prefix},
+			Memo:                map[string]any{"workflow": resolved.Definition.Name, "workflow_version": DefinitionVersion(&resolved.Definition), "trace_id": run.TraceID, "artifact_prefix": run.Prefix},
 		})
 		var child Result
 		if err := workflow.ExecuteChildWorkflow(childCtx, WorkflowName, Input{
@@ -405,7 +407,8 @@ func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
 		}
 		if len(child.Final) == 0 {
 			setter.Set(nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("final step %q of workflow %q produced no artifact", resolved.Final, run.Name), "NoOutput", nil))
+				fmt.Sprintf("final step %q of workflow %q produced no artifact", resolved.Final, run.Name), "NoOutput", nil,
+			))
 			return
 		}
 		setter.Set(NestedResult{Artifacts: child.Artifacts, Output: child.Final}, nil)
@@ -417,7 +420,7 @@ func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
 // member with unread messages until the lead has finished the team and no turn is running.
 // Agent members take their turn in the agent service; a workflow member's turn runs the
 // named workflow as a child run with the unread text as input and posts its output as reply.
-func Team(ctx workflow.Context, in TeamInput) (StepResult, error) {
+func Team(ctx workflow.Context, in *TeamInput) (StepResult, error) {
 	ownCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
 		StartToCloseTimeout: time.Minute,
@@ -485,7 +488,8 @@ func Team(ctx workflow.Context, in TeamInput) (StepResult, error) {
 				if turns >= maxTurns {
 					return StepResult{}, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
 						"team %q used its budget of %d turns without the lead agent %q finishing the team",
-						in.Step.ID, maxTurns, lead), "TeamTurnBudget", nil)
+						in.Step.ID, maxTurns, lead,
+					), "TeamTurnBudget", nil)
 				}
 				turns++
 				running[name] = true
@@ -530,7 +534,8 @@ func Team(ctx workflow.Context, in TeamInput) (StepResult, error) {
 				}
 				return StepResult{}, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
 					"team %q stalled: no member has unread messages and the lead agent %q has not finished the team",
-					in.Step.ID, lead), "TeamStalled", nil)
+					in.Step.ID, lead,
+				), "TeamStalled", nil)
 			}
 		}
 		selector.Select(ctx)
@@ -546,7 +551,7 @@ func Team(ctx workflow.Context, in TeamInput) (StepResult, error) {
 
 // startMemberRun takes the unread messages of one channel of a workflow member, runs the
 // member's workflow with their text as input, and posts the output as the member's reply.
-func startMemberRun(ctx, ownCtx workflow.Context, in TeamInput, member TeamMember, round, n int) workflow.Future {
+func startMemberRun(ctx, ownCtx workflow.Context, in *TeamInput, member TeamMember, round, n int) workflow.Future {
 	future, setter := workflow.NewFuture(ctx)
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		// The team step's own artifact is the object <prefix>/<step>, so the runs of its
@@ -564,7 +569,7 @@ func startMemberRun(ctx, ownCtx workflow.Context, in TeamInput, member TeamMembe
 			return
 		}
 		var nested NestedResult
-		if err := startNested(ctx, ownCtx, nestedRun{
+		if err := startNested(ctx, ownCtx, &nestedRun{
 			TraceID: in.TraceID, Name: member.Ref, Prefix: prefix, Depth: in.Depth + 1,
 			Inputs:               []Item{{Source: InputSource, Artifact: task.Artifact, Round: 1}},
 			WorkflowID:           fmt.Sprintf("%s/%s.r%d.%d", workflow.GetInfo(ctx).WorkflowExecution.ID, member.Name, round, n),
@@ -603,8 +608,8 @@ type ResolveWorkflowRequest struct {
 
 // ResolveWorkflowResult is the configured workflow and its single final step.
 type ResolveWorkflowResult struct {
-	Definition Definition `json:"definition"`
 	Final      string     `json:"final"`
+	Definition Definition `json:"definition"`
 }
 
 // ResolveWorkflow returns the referenced workflow version for a workflow step or a workflow
@@ -617,12 +622,14 @@ func (a *Activities) ResolveWorkflow(_ context.Context, req ResolveWorkflowReque
 	d, ok := FindDefinition(definitions, req.Name)
 	if !ok {
 		return ResolveWorkflowResult{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("workflow %q is not a configured workflow", req.Name), "UnknownWorkflow", nil)
+			fmt.Sprintf("workflow %q is not a configured workflow", req.Name), "UnknownWorkflow", nil,
+		)
 	}
-	final := FinalSteps(d)
+	final := FinalSteps(&d)
 	if len(final) != 1 {
 		return ResolveWorkflowResult{}, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
-			"nested workflow %q needs exactly one final step, but has %d (%s)", d.Name, len(final), strings.Join(final, ", ")),
+			"nested workflow %q needs exactly one final step, but has %d (%s)", d.Name, len(final), strings.Join(final, ", "),
+		),
 			"InvalidNestedWorkflow", nil)
 	}
 	return ResolveWorkflowResult{Definition: d, Final: final[0]}, nil
@@ -634,9 +641,9 @@ type OpenTeamRequest struct {
 	TraceID   string         `json:"trace_id"`
 	Team      string         `json:"team"`
 	Step      Step           `json:"step"`
-	Inputs    []Item         `json:"inputs"`
 	Run       string         `json:"run,omitempty"`
 	Rejection *TeamRejection `json:"rejection,omitempty"`
+	Inputs    []Item         `json:"inputs"`
 }
 
 // OpenTeamResult tells which run of the team this is: 1 for the first, growing with every
@@ -651,7 +658,7 @@ type OpenTeamResult struct {
 // refreshes the input files, posts the gate rejection or the changed inputs to the lead,
 // and removes finished.json, so the team works again. With the same marker it is a retry
 // and changes nothing.
-func (a *Activities) OpenTeam(ctx context.Context, req OpenTeamRequest) (OpenTeamResult, error) {
+func (a *Activities) OpenTeam(ctx context.Context, req *OpenTeamRequest) (OpenTeamResult, error) {
 	meta := Meta{Creator: teamCreator, TraceID: req.TraceID}
 	lead := MemberName(req.Step.Agent)
 	leadChannel := TeamChannel{ID: LeadChannelID(lead), Members: []string{lead, WorkflowSender}}
@@ -666,9 +673,9 @@ func (a *Activities) OpenTeam(ctx context.Context, req OpenTeamRequest) (OpenTea
 
 	var inputs strings.Builder
 	for i, item := range req.Inputs {
-		data, err := a.Store.Get(ctx, item.Artifact)
-		if err != nil {
-			return OpenTeamResult{}, fmt.Errorf("reading artifact %q: %w", item.Artifact, err)
+		data, readErr := a.Store.Get(ctx, item.Artifact)
+		if readErr != nil {
+			return OpenTeamResult{}, fmt.Errorf("reading artifact %q: %w", item.Artifact, readErr)
 		}
 		name := inputFile(req.Inputs, i, data)
 		id := req.Team + "/files/" + name
@@ -692,7 +699,8 @@ func (a *Activities) OpenTeam(ctx context.Context, req OpenTeamRequest) (OpenTea
 				"then finish the team again.\n%s", round, inputs.String())
 		}
 		// The text names the round, so a retry is recognised as the queue's last message.
-		if err = a.postMessage(ctx, req.Team, leadChannel, WorkflowSender, text, meta, false, ""); err != nil {
+		err = a.postMessage(ctx, req.Team, leadChannel, WorkflowSender, text, meta, false, "")
+		if err != nil {
 			return OpenTeamResult{}, err
 		}
 		remover, ok := a.Store.(interface {
@@ -727,7 +735,8 @@ func (a *Activities) OpenTeam(ctx context.Context, req OpenTeamRequest) (OpenTea
 	}
 	channels := append(req.Step.TeamChannels(), leadChannel)
 	// A retry finds the task as the queue's last message and does not post it again.
-	if err = a.postMessage(ctx, req.Team, leadChannel, WorkflowSender, task, meta, false, ""); err != nil {
+	err = a.postMessage(ctx, req.Team, leadChannel, WorkflowSender, task, meta, false, "")
+	if err != nil {
 		return OpenTeamResult{}, err
 	}
 	manifest = TeamManifest{Lead: lead, Members: members, Channels: channels, TraceID: req.TraceID, StepID: req.Step.ID, Run: req.Run, Round: 1}
@@ -795,8 +804,8 @@ type TeamTaskRequest struct {
 // Channel is empty when the member has no unread messages.
 type TeamTaskResult struct {
 	Channel  string `json:"channel"`
-	Seq      int    `json:"seq"`
 	Artifact string `json:"artifact"`
+	Seq      int    `json:"seq"`
 }
 
 // TeamTask stores the unread messages of the first channel of a workflow member that has
@@ -844,9 +853,9 @@ type PostTeamMessageRequest struct {
 	Channel   string   `json:"channel"`
 	From      string   `json:"from"`
 	Text      string   `json:"text,omitempty"`
-	Artifacts []string `json:"artifacts,omitempty"`
 	Member    string   `json:"member,omitempty"`
 	Ref       string   `json:"ref,omitempty"`
+	Artifacts []string `json:"artifacts,omitempty"`
 	Read      int      `json:"read,omitempty"`
 	// Repeat posts the message even when it equals the channel's last one.
 	Repeat bool `json:"repeat,omitempty"`
@@ -855,7 +864,7 @@ type PostTeamMessageRequest struct {
 // PostTeamMessage appends a message to the queue of its sender in a channel of a team. The
 // orchestrator writes only the queues of "workflow" and of workflow members; the queue of an
 // agent member belongs to the tool-gateway.
-func (a *Activities) PostTeamMessage(ctx context.Context, req PostTeamMessageRequest) error {
+func (a *Activities) PostTeamMessage(ctx context.Context, req *PostTeamMessageRequest) error {
 	meta := Meta{Creator: teamCreator, TraceID: req.TraceID}
 	text := req.Text
 	if len(req.Artifacts) > 0 {
@@ -885,7 +894,8 @@ func (a *Activities) PostTeamMessage(ctx context.Context, req PostTeamMessageReq
 	}
 	if channel.ID == "" || !owned {
 		return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
-			"the orchestrator does not write the queue of %q in channel %q of team %q", req.From, req.Channel, req.Team), "InvalidTeamMessage", nil)
+			"the orchestrator does not write the queue of %q in channel %q of team %q", req.From, req.Channel, req.Team,
+		), "InvalidTeamMessage", nil)
 	}
 	// A reply equal to an earlier one is new when it answers a later message; only a retry,
 	// whose reply was sent after the message it answers, is not posted again.
@@ -946,13 +956,15 @@ func (a *Activities) WriteTeamOutput(ctx context.Context, req WriteTeamOutputReq
 	}
 	if !found {
 		return StepResult{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("team %q has no finished.json", req.Team), "TeamNotFinished", nil)
+			fmt.Sprintf("team %q has no finished.json", req.Team), "TeamNotFinished", nil,
+		)
 	}
 	out := TeamOutput{Summary: finished.Summary, Team: req.Team, Files: []TeamOutputFile{}}
 	for _, name := range finished.Files {
 		out.Files = append(out.Files, TeamOutputFile{Name: name, Artifact: req.Team + "/files/" + name})
 	}
-	if err = a.putJSON(ctx, req.Artifact, out, Meta{Creator: teamCreator, TraceID: req.TraceID}); err != nil {
+	err = a.putJSON(ctx, req.Artifact, out, Meta{Creator: teamCreator, TraceID: req.TraceID})
+	if err != nil {
 		return StepResult{}, err
 	}
 	return StepResult{Artifact: req.Artifact}, nil

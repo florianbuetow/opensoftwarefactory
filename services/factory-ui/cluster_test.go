@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"encoding/pem"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +16,9 @@ type kubeRequest struct {
 }
 
 // fakeCluster starts a TLS Kubernetes stand-in and a service account directory that trusts it.
-func fakeCluster(t *testing.T) (*clusterProxy, chan kubeRequest) {
+func fakeCluster(t *testing.T) (proxy *clusterProxy, got chan kubeRequest) {
 	t.Helper()
-	got := make(chan kubeRequest, 1)
+	got = make(chan kubeRequest, 1)
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got <- kubeRequest{r.URL.EscapedPath(), r.URL.RawQuery, r.Header.Get("Authorization")}
 		if r.URL.Path == "/api/v1/namespaces/factory/pods/missing/log" {
@@ -44,7 +43,7 @@ func fakeCluster(t *testing.T) (*clusterProxy, chan kubeRequest) {
 
 func clusterUI(t *testing.T, c *clusterProxy) http.Handler {
 	t.Helper()
-	h, err := newHandler(backends{orchestrator: "http://x", agents: "http://x", policies: "http://x", blobs: "http://x", cluster: c}, slog.New(slog.DiscardHandler))
+	h, err := newHandler(&backends{orchestrator: "http://x", agents: "http://x", policies: "http://x", blobs: "http://x", cluster: c}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +68,7 @@ func TestClusterPathsAndQueries(t *testing.T) {
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, nil))
+		h.ServeHTTP(rec, httptest.NewRequest("GET", tc.path, http.NoBody))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET %s: status %d %s", tc.path, rec.Code, rec.Body)
 		}
@@ -83,14 +82,44 @@ func TestClusterPathsAndQueries(t *testing.T) {
 func TestClusterRereadsToken(t *testing.T) {
 	c, got := fakeCluster(t)
 	h := clusterUI(t, c)
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/cluster/nodes", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/cluster/nodes", http.NoBody))
 	<-got
 	if err := os.WriteFile(filepath.Join(c.dir, "token"), []byte("secret-2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/cluster/nodes", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/cluster/nodes", http.NoBody))
 	if r := <-got; r.auth != "Bearer secret-2" {
 		t.Errorf("auth %q, want the rotated token", r.auth)
+	}
+}
+
+// Kubernetes mounts each service account file as a symlink into a dated directory that it
+// swaps on rotation; reads follow those links and nothing that points out of the directory.
+func TestClusterReadsServiceAccountLinks(t *testing.T) {
+	dir := t.TempDir()
+	dated := filepath.Join(dir, "..2026_11_23_10_00_00.1")
+	if err := os.Mkdir(dated, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret")
+	for path, data := range map[string]string{filepath.Join(dated, "token"): "secret-1\n", outside: "elsewhere"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{"..data": filepath.Base(dated), "token": "..data/token", "escape": outside} {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &clusterProxy{dir: dir}
+	if token, err := c.read("token"); err != nil || token != "secret-1" {
+		t.Errorf("token = %q, %v", token, err)
+	}
+	for _, name := range []string{"escape", "../" + filepath.Base(filepath.Dir(outside)) + "/secret"} {
+		if data, err := c.read(name); err == nil {
+			t.Errorf("read %q returned %q, want a refusal", name, data)
+		}
 	}
 }
 
@@ -107,7 +136,7 @@ func TestClusterAllowlist(t *testing.T) {
 		"/api/cluster/",
 	} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, http.NoBody))
 		// ServeMux redirects unclean paths such as ".." before the proxy sees them.
 		if rec.Code != http.StatusNotFound && rec.Code/100 != 3 {
 			t.Errorf("GET %s: status %d, want 404", path, rec.Code)
@@ -115,7 +144,7 @@ func TestClusterAllowlist(t *testing.T) {
 	}
 	for _, method := range []string{"POST", "PUT", "DELETE", "PATCH"} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(method, "/api/cluster/pods", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(method, "/api/cluster/pods", http.NoBody))
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s: status %d, want 405", method, rec.Code)
 		}
@@ -130,7 +159,7 @@ func TestClusterAllowlist(t *testing.T) {
 func TestClusterErrorsBecomeJSON(t *testing.T) {
 	c, got := fakeCluster(t)
 	rec := httptest.NewRecorder()
-	clusterUI(t, c).ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/missing/log", nil))
+	clusterUI(t, c).ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/missing/log", http.NoBody))
 	<-got
 	var body map[string]string
 	if rec.Code != http.StatusNotFound || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body["error"] != `pods "missing" not found` {
@@ -142,13 +171,8 @@ func TestClusterOutsideCluster(t *testing.T) {
 	c := &clusterProxy{apiBase: "https://127.0.0.1:1", dir: t.TempDir(), logger: slog.New(slog.DiscardHandler)}
 	srv := httptest.NewServer(clusterUI(t, c))
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/api/cluster/pods")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusServiceUnavailable || string(body) != "{\"error\":\"not running in a cluster\"}\n" {
-		t.Fatalf("got %d %s", resp.StatusCode, body)
+	resp := get(t, srv.URL+"/api/cluster/pods")
+	if resp.status != http.StatusServiceUnavailable || resp.body != "{\"error\":\"not running in a cluster\"}\n" {
+		t.Fatalf("got %d %s", resp.status, resp.body)
 	}
 }

@@ -6,8 +6,8 @@ import (
 )
 
 func TestEstimateTokensCountsCl100kBaseTokens(t *testing.T) {
-	if tokenEstimationMethod != "tiktoken:cl100k_base" {
-		t.Fatalf("estimation method = %q", tokenEstimationMethod)
+	if estimationMethod != "tiktoken:cl100k_base" {
+		t.Fatalf("estimation method = %q", estimationMethod)
 	}
 	for _, test := range []struct {
 		input string

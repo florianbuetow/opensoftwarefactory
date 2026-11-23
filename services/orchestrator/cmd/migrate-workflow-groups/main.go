@@ -123,8 +123,8 @@ func migrate(data []byte) ([]pipeline.Definition, error) {
 			}
 		}
 	}
-	for _, w := range c.Workflows {
-		if err := pipeline.Validate(w); err != nil {
+	for i := range c.Workflows {
+		if err := pipeline.Validate(&c.Workflows[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -136,12 +136,17 @@ func migrate(data []byte) ([]pipeline.Definition, error) {
 
 // storeAll writes every version that is not stored yet.
 func storeAll(ctx context.Context, store pipeline.HTTPStore, workflows []pipeline.Definition, out io.Writer) error {
-	for _, w := range workflows {
+	for i := range workflows {
+		w := &workflows[i]
 		id := fmt.Sprintf("workflows/%s/v%d/workflow.json", w.Name, pipeline.DefinitionVersion(w))
-		if _, err := store.Get(ctx, id); err == nil {
-			fmt.Fprintf(out, "kept    %s (already stored)\n", id)
+		_, err := store.Get(ctx, id)
+		if err == nil {
+			if _, err = fmt.Fprintf(out, "kept    %s (already stored)\n", id); err != nil {
+				return err
+			}
 			continue
-		} else if !errors.Is(err, pipeline.ErrNotFound) {
+		}
+		if !errors.Is(err, pipeline.ErrNotFound) {
 			return fmt.Errorf("reading %s: %w", id, err)
 		}
 		data, err := json.MarshalIndent(w, "", "  ")
@@ -151,7 +156,9 @@ func storeAll(ctx context.Context, store pipeline.HTTPStore, workflows []pipelin
 		if err = store.Put(ctx, id, append(data, '\n'), pipeline.Meta{Creator: w.CreatedBy}); err != nil {
 			return fmt.Errorf("storing %s: %w", id, err)
 		}
-		fmt.Fprintf(out, "stored  %s\n", id)
+		if _, err = fmt.Fprintf(out, "stored  %s\n", id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

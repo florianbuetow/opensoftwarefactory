@@ -18,9 +18,9 @@ import (
 
 // fakeBlobstore implements the parts of the blobstore API the registry uses.
 type fakeBlobstore struct {
-	mu   sync.Mutex
 	data map[string][]byte
 	meta map[string]objectMeta
+	mu   sync.Mutex
 }
 
 func newFakeBlobstore() *fakeBlobstore {
@@ -143,9 +143,15 @@ func newTestSkillRegistry(t *testing.T, seed string) (*httptest.Server, *fakeBlo
 	return srv, blobs
 }
 
-func call(t *testing.T, method, url, body string, headers map[string]string) (int, string) {
+// demoFiles is a valid agent version for the tests that only need an entry to exist.
+const demoFiles = `{"files":{"systemprompt.md":"x","agent.json":{"a":1,"unpack_inputs":true}}}`
+
+func call(t *testing.T, method, url, body string, headers map[string]string) (status int, response string) {
 	t.Helper()
-	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -153,8 +159,13 @@ func call(t *testing.T, method, url, body string, headers map[string]string) (in
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	data, readErr := io.ReadAll(resp.Body)
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
 	return resp.StatusCode, string(data)
 }
 
@@ -240,13 +251,13 @@ func TestAgentPolicyReferencesAreValidatedBeforeVersionWrite(t *testing.T) {
 	writes := len(blobs.data)
 	for _, test := range []struct {
 		prompt string
-		status int
 		want   string
+		status int
 	}{
-		{"{{policy::missing}}", http.StatusUnprocessableEntity, `required policy \"missing\" does not exist`},
-		{"{{policy::unavailable}}", http.StatusBadGateway, "cannot validate required policies"},
-		{"{{policy::Bad ID}}", http.StatusUnprocessableEntity, "malformed policy reference"},
-		{"{{policy::missing", http.StatusUnprocessableEntity, "malformed policy reference"},
+		{"{{policy::missing}}", `required policy \"missing\" does not exist`, http.StatusUnprocessableEntity},
+		{"{{policy::unavailable}}", "cannot validate required policies", http.StatusBadGateway},
+		{"{{policy::Bad ID}}", "malformed policy reference", http.StatusUnprocessableEntity},
+		{"{{policy::missing", "malformed policy reference", http.StatusUnprocessableEntity},
 	} {
 		code, response = call(t, http.MethodPost, srv.URL+"/agents/test/rejected", body(test.prompt), nil)
 		if code != test.status || !strings.Contains(response, test.want) {
@@ -391,11 +402,15 @@ func TestSeedStoresMissingVersionsOnly(t *testing.T) {
 	seed := t.TempDir()
 	for _, v := range []string{"v1", "v2"} {
 		dir := filepath.Join(seed, "intake", v)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		_ = os.WriteFile(filepath.Join(dir, "systemprompt.md"), []byte("prompt "+v), 0o644)
-		_ = os.WriteFile(filepath.Join(dir, "agent.json"), []byte(`{"models":["m"]}`), 0o644)
+		if err := os.WriteFile(filepath.Join(dir, "systemprompt.md"), []byte("prompt "+v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "agent.json"), []byte(`{"models":["m"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	srv, blobs := newTestRegistry(t, seed)
 	if string(blobs.data["agents/intake/v2/systemprompt.md"]) != "prompt v2" || blobs.meta["agents/intake/v1/systemprompt.md"].Creator != "seed" {
@@ -421,7 +436,7 @@ func TestVersionNumber(t *testing.T) {
 
 func TestDeleteEntryRemovesEveryVersion(t *testing.T) {
 	srv, blobs := newTestRegistry(t, "")
-	body := `{"files":{"systemprompt.md":"x","agent.json":{"a":1,"unpack_inputs":true}}}`
+	body := demoFiles
 	for i := 0; i < 2; i++ {
 		if code, _ := call(t, http.MethodPost, srv.URL+"/agents/demo", body, nil); code != http.StatusCreated {
 			t.Fatalf("create %d", code)
@@ -443,7 +458,7 @@ func TestDeleteEntryRemovesEveryVersion(t *testing.T) {
 
 func TestDeleteVersionRemovesOnlyThatVersion(t *testing.T) {
 	srv, blobs := newTestRegistry(t, "")
-	body := `{"files":{"systemprompt.md":"x","agent.json":{"a":1,"unpack_inputs":true}}}`
+	body := demoFiles
 	for _, name := range []string{"intake/triage", "intake/triage", "intake/intake"} {
 		if code, _ := call(t, http.MethodPost, srv.URL+"/agents/"+name, body, nil); code != http.StatusCreated {
 			t.Fatalf("create %s: %d", name, code)
@@ -474,7 +489,7 @@ func TestDeleteVersionRemovesOnlyThatVersion(t *testing.T) {
 
 func TestFoldersGroupEntries(t *testing.T) {
 	srv, blobs := newTestRegistry(t, "")
-	body := `{"files":{"systemprompt.md":"x","agent.json":{"a":1,"unpack_inputs":true}}}`
+	body := demoFiles
 	if code, b := call(t, http.MethodPost, srv.URL+"/agents/translation/en-2-de", body, nil); code != http.StatusCreated || !strings.Contains(b, `"name":"translation/en-2-de"`) {
 		t.Fatalf("create in folder %d %s", code, b)
 	}
@@ -634,13 +649,13 @@ func TestSkillCanExceedTheFixedRegistryBodyLimit(t *testing.T) {
 func TestSkillSeedStoresNestedFiles(t *testing.T) {
 	seed := t.TempDir()
 	dir := filepath.Join(seed, "git", "v2", "scripts")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(seed, "git", "v2", "SKILL.md"), []byte("---\nname: git\ndescription: Git procedures\n---\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(seed, "git", "v2", "SKILL.md"), []byte("---\nname: git\ndescription: Git procedures\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "status.sh"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "status.sh"), []byte("#!/bin/sh\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	srv, blobs := newTestSkillRegistry(t, seed)

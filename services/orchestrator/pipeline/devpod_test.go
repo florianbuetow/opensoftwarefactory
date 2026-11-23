@@ -21,6 +21,38 @@ import (
 // podRun is the run ID of the dev pod tests; a work branch gets its first eight characters.
 const podRun = "0b7e3c1e-1111-4a4a-9b9b-123456789abc"
 
+// Values the tests of this package share.
+const (
+	// testPod is the ID of the dev pod the fake connector service creates.
+	testPod = "pod-1"
+	// testUser is the person who decides gates and completes sessions.
+	testUser = "flo"
+	// buildStep is the ID of the step most tests send rejections back to.
+	buildStep = "build"
+	// approveStep is the ID of the gate step of the gate tests.
+	approveStep = "approve"
+	// publishStep is the ID of the step that runs after a gate or a session.
+	publishStep = "publish"
+	// chatStep is the ID of the interactive step of the session tests.
+	chatStep = "chat"
+	// sessionRun and sessionArtifact are the run of the session test and the artifact of its
+	// interactive step.
+	sessionRun      = "t11"
+	sessionArtifact = "runs/t11/chat"
+	// smallFix is the name of the workflow the route tests start.
+	smallFix = "small-fix"
+	// leadMember, coderMember, and echoMember are the members of the test team, and
+	// coderLeadChannel is the channel between its coder and its lead.
+	leadMember       = "lead"
+	coderMember      = "coder"
+	echoMember       = "echo"
+	coderLeadChannel = "coder--lead"
+	// legacyWorkflow is the name of the workflow stored without a version, and oldStep the
+	// step of the first version of a workflow that has two.
+	legacyWorkflow = "legacy"
+	oldStep        = "old"
+)
+
 // listStore is a syncStore that can also list the objects of a run, as the blobstore can.
 type listStore struct{ *syncStore }
 
@@ -43,13 +75,13 @@ func (s listStore) text(id string) string {
 // fakeConnectors stands in for the connector service. calls lists what the orchestrator
 // asked for, in order.
 type fakeConnectors struct {
-	mu        sync.Mutex
-	calls     []string
-	created   []CreatePod
 	createErr error
 	exec      map[string]PodExecResult
+	calls     []string
+	created   []CreatePod
 	requests  []PublishRequest
 	decisions []PublishDecision
+	mu        sync.Mutex
 }
 
 func (f *fakeConnectors) note(format string, args ...any) {
@@ -68,15 +100,15 @@ func (f *fakeConnectors) called(prefix string) int {
 	return n
 }
 
-func (f *fakeConnectors) CreatePod(_ context.Context, req CreatePod) (CreatedPod, error) {
+func (f *fakeConnectors) CreatePod(_ context.Context, req *CreatePod) (CreatedPod, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.note("create %s", req.Repository)
 	if f.createErr != nil {
 		return CreatedPod{}, f.createErr
 	}
-	f.created = append(f.created, req)
-	return CreatedPod{ID: "pod-1", Reused: req.Name != "", StartCommit: "abc123"}, nil
+	f.created = append(f.created, *req)
+	return CreatedPod{ID: testPod, Reused: req.Name != "", StartCommit: "abc123"}, nil
 }
 
 func (f *fakeConnectors) Hold(_ context.Context, pod, run string) error {
@@ -131,18 +163,18 @@ func (f *fakeConnectors) DecidePublish(_ context.Context, pod string, n int, d P
 // output, with a run record, an attempt record, and prompt evidence beside it, as the agent
 // service does.
 type agentStub struct {
-	mu      sync.Mutex
 	store   Store
-	calls   []StepRequest
 	blocked map[string]string
+	calls   []StepRequest
+	mu      sync.Mutex
 }
 
-func (a *agentStub) process(ctx context.Context, req StepRequest) (StepResult, error) {
+func (a *agentStub) process(ctx context.Context, req *StepRequest) (StepResult, error) {
 	a.mu.Lock()
-	a.calls = append(a.calls, req)
+	a.calls = append(a.calls, *req)
 	n := 0
-	for _, call := range a.calls {
-		if call.StepID == req.StepID {
+	for i := range a.calls {
+		if a.calls[i].StepID == req.StepID {
 			n++
 		}
 	}
@@ -165,9 +197,10 @@ func (a *agentStub) process(ctx context.Context, req StepRequest) (StepResult, e
 
 // checks returns the inputs of every run of the step "check".
 func checks(a *agentStub) [][]Item {
-	var out [][]Item
-	for _, req := range a.runsOf("check") {
-		out = append(out, req.Inputs)
+	runs := a.runsOf("check")
+	out := make([][]Item, 0, len(runs))
+	for i := range runs {
+		out = append(out, runs[i].Inputs)
 	}
 	return out
 }
@@ -177,9 +210,9 @@ func (a *agentStub) runsOf(step string) []StepRequest {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var out []StepRequest
-	for _, call := range a.calls {
-		if call.StepID == step {
-			out = append(out, call)
+	for i := range a.calls {
+		if a.calls[i].StepID == step {
+			out = append(out, a.calls[i])
 		}
 	}
 	return out
@@ -222,17 +255,17 @@ func podStep() Step {
 	}
 }
 
-func runPod(env *testsuite.TestWorkflowEnvironment, def Definition) {
-	env.ExecuteWorkflow(Pipeline, Input{TraceID: podRun, Definition: def, Inputs: runInput("runs/" + podRun + "/input")})
+func runPod(env *testsuite.TestWorkflowEnvironment, def *Definition) {
+	env.ExecuteWorkflow(Pipeline, &Input{TraceID: podRun, Definition: *def, Inputs: runInput("runs/" + podRun + "/input")})
 }
 
 // metadataOf reads the status and error the run recorded in its metadata.
 func metadataOf(t *testing.T, store listStore) (status, failure string, pod *DevPod) {
 	t.Helper()
 	var meta struct {
+		DevPod *DevPod `json:"dev_pod"`
 		Status string  `json:"status"`
 		Error  string  `json:"error"`
-		DevPod *DevPod `json:"dev_pod"`
 	}
 	if err := json.Unmarshal([]byte(store.text("runs/"+podRun+"/metadata.json")), &meta); err != nil {
 		t.Fatal(err)
@@ -250,7 +283,7 @@ func TestDevPodStepCreatesThePodAndHandsItToEveryLaterStep(t *testing.T) {
 		{ID: "verify", Service: CommandService, Command: "./verify.sh", Timeout: "5m", DependsOn: []string{"code"}},
 		{ID: "stop", Service: DevPodStopService, DependsOn: []string{"verify"}},
 	}}
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -273,14 +306,14 @@ func TestDevPodStepCreatesThePodAndHandsItToEveryLaterStep(t *testing.T) {
 	if err := json.Unmarshal([]byte(store.text("runs/"+podRun+"/pod")), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out != (DevPodOutput{Pod: "pod-1", Repository: "claims-build", SourceBranch: "main", WorkBranch: "agent/payment-date-0b7e3c1e", StartCommit: "abc123"}) {
+	if out != (DevPodOutput{Pod: testPod, Repository: "claims-build", SourceBranch: "main", WorkBranch: "agent/payment-date-0b7e3c1e", StartCommit: "abc123"}) {
 		t.Errorf("pod output %+v", out)
 	}
 	if !strings.Contains(store.text("runs/"+podRun+"/pod"), `"start_commit": "abc123"`) || !strings.Contains(store.text("runs/"+podRun+"/pod"), `"reused": false`) {
 		t.Errorf("pod document %s", store.text("runs/"+podRun+"/pod"))
 	}
 	// A step after the devpod step works in the pod; a step before it does not.
-	if got := agents.runsOf("code")[0]; got.DevPod != "pod-1" || show(got.Inputs) != "pod=runs/"+podRun+"/pod#1 plan=runs/"+podRun+"/plan#1" {
+	if got := agents.runsOf("code")[0]; got.DevPod != testPod || show(got.Inputs) != "pod=runs/"+podRun+"/pod#1 plan=runs/"+podRun+"/plan#1" {
 		t.Errorf("code request %+v", got)
 	}
 	if got := agents.runsOf("plan")[0]; got.DevPod != "" {
@@ -299,7 +332,7 @@ func TestDevPodStepCreatesThePodAndHandsItToEveryLaterStep(t *testing.T) {
 		t.Errorf("stop output %s", store.text("runs/"+podRun+"/stop"))
 	}
 	status, _, pod := metadataOf(t, store)
-	if status != RunCompleted || pod == nil || *pod != (DevPod{ID: "pod-1", Repository: "claims-build", SourceBranch: "main", WorkBranch: "agent/payment-date-0b7e3c1e"}) {
+	if status != RunCompleted || pod == nil || *pod != (DevPod{ID: testPod, Repository: "claims-build", SourceBranch: "main", WorkBranch: "agent/payment-date-0b7e3c1e"}) {
 		t.Errorf("metadata status %q pod %+v", status, pod)
 	}
 	var res Result
@@ -310,8 +343,8 @@ func TestDevPodStepCreatesThePodAndHandsItToEveryLaterStep(t *testing.T) {
 }
 
 func TestCommandStepFailsTheRunOnANonZeroExitCodeUnlessItAllowsFailure(t *testing.T) {
-	def := func(allow bool) Definition {
-		return Definition{Name: "check", Steps: []Step{
+	def := func(allow bool) *Definition {
+		return &Definition{Name: "check", Steps: []Step{
 			podStep(),
 			{ID: "baseline", Service: CommandService, Command: "./verify.sh", AllowFailure: allow, DependsOn: []string{"pod"}},
 			agentStep("code", "baseline"),
@@ -348,7 +381,7 @@ func TestCommandStepFailsTheRunOnANonZeroExitCodeUnlessItAllowsFailure(t *testin
 	if err = env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if got := agents.runsOf("code"); len(got) != 1 || got[0].DevPod != "pod-1" || show(got[0].Inputs) != "baseline=runs/"+podRun+"/baseline#1" {
+	if got := agents.runsOf("code"); len(got) != 1 || got[0].DevPod != testPod || show(got[0].Inputs) != "baseline=runs/"+podRun+"/baseline#1" {
 		t.Errorf("code requests %+v", got)
 	}
 	if !strings.Contains(store.text("runs/"+podRun+"/baseline"), `"exit_code": 3`) || connectors.called("release") != 1 {
@@ -359,7 +392,7 @@ func TestCommandStepFailsTheRunOnANonZeroExitCodeUnlessItAllowsFailure(t *testin
 func TestDevPodStepFailsTheRunWhenThePodCannotBeCreated(t *testing.T) {
 	env, store, connectors, agents := podEnv(t)
 	connectors.createErr = &ConnectorError{Status: http.StatusConflict, Message: "the work branch equals the default branch"}
-	runPod(env, Definition{Name: "build", Steps: []Step{podStep(), agentStep("code", "pod")}})
+	runPod(env, &Definition{Name: "build", Steps: []Step{podStep(), agentStep("code", "pod")}})
 	err := env.GetWorkflowError()
 	if err == nil || !strings.Contains(err.Error(), `step "pod" failed`) || !strings.Contains(err.Error(), "the work branch equals the default branch") {
 		t.Fatalf("error %v", err)
@@ -385,7 +418,7 @@ func TestCancelledRunReleasesThePod(t *testing.T) {
 		}
 		env.CancelWorkflow()
 	}, time.Second)
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err == nil {
 		t.Fatal("the cancelled run completed")
 	}
@@ -417,13 +450,13 @@ func TestPodReachesSessionsTeamsAndNestedWorkflows(t *testing.T) {
 	}, activity.RegisterOptions{Name: TeamTurnActivity})
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
-		if len(state.Sessions) != 1 || state.Sessions[0].DevPod != "pod-1" || state.Sessions[0].Skills["git"] != "v3" || state.Sessions[0].SkillScriptTimeoutSeconds != 300 {
+		if len(state.Sessions) != 1 || state.Sessions[0].DevPod != testPod || state.Sessions[0].Skills["git"] != "v3" || state.Sessions[0].SkillScriptTimeoutSeconds != 300 {
 			t.Errorf("sessions %+v", state.Sessions)
 		}
 		_ = store.Put(context.Background(), "user-sessions/"+podRun+"/talk/files/result.md", []byte("result"), Meta{})
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "result.md", CompletedBy: "flo"})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "result.md", CompletedBy: testUser})
 	}, time.Second)
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +464,7 @@ func TestPodReachesSessionsTeamsAndNestedWorkflows(t *testing.T) {
 	if got := store.text("user-sessions/" + podRun + "/talk/session.json"); !strings.Contains(got, `"dev_pod": "pod-1"`) || !strings.Contains(got, `"trace_id": "`+podRun+`"`) {
 		t.Errorf("session.json %s", got)
 	}
-	if len(turns) == 0 || turns[0].DevPod != "pod-1" || turns[0].Skills["git"] != "v3" || turns[0].SkillScriptTimeoutSeconds != 300 {
+	if len(turns) == 0 || turns[0].DevPod != testPod || turns[0].Skills["git"] != "v3" || turns[0].SkillScriptTimeoutSeconds != 300 {
 		t.Errorf("team turns %+v", turns)
 	}
 	if deep := agents.runsOf("deep"); len(deep) != 1 || deep[0].Skills["git"] != "v3" || deep[0].SkillScriptTimeoutSeconds != 300 {
@@ -441,7 +474,7 @@ func TestPodReachesSessionsTeamsAndNestedWorkflows(t *testing.T) {
 	if !strings.Contains(string(turn), `"dev_pod":"pod-1"`) {
 		t.Errorf("team turn request %s", turn)
 	}
-	if got := agents.runsOf("deep"); len(got) != 1 || got[0].DevPod != "pod-1" || got[0].Workflow != "inner" {
+	if got := agents.runsOf("deep"); len(got) != 1 || got[0].DevPod != testPod || got[0].Workflow != "inner" {
 		t.Errorf("nested request %+v", got)
 	}
 	// Each of the three steps that worked in the pod asked for publish requests; the nested
@@ -452,20 +485,21 @@ func TestPodReachesSessionsTeamsAndNestedWorkflows(t *testing.T) {
 }
 
 func TestBlockedStepEndsTheRunAsBlocked(t *testing.T) {
+	const blocked = "the test service is down"
 	env, store, connectors, agents := podEnv(t)
-	agents.blocked["code"] = "the test service is down"
+	agents.blocked["code"] = blocked
 	def := Definition{Name: "build", Steps: []Step{
 		podStep(), agentStep("code", "pod"),
 		{ID: "verify", Service: CommandService, Command: "./verify.sh", DependsOn: []string{"code"}},
 		agentStep("deliver", "verify"),
 	}}
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("a blocked run is not a failed run: %v", err)
 	}
 	var res Result
 	_ = env.GetWorkflowResult(&res)
-	if res.Blocked != "the test service is down" || res.BlockedStep != "code" || res.Artifacts["code"] != "runs/"+podRun+"/code" {
+	if res.Blocked != blocked || res.BlockedStep != "code" || res.Artifacts["code"] != "runs/"+podRun+"/code" {
 		t.Errorf("result %+v", res)
 	}
 	if len(agents.runsOf("deliver")) != 0 || connectors.called("exec") != 0 || connectors.called("publish-requests") != 0 {
@@ -474,7 +508,7 @@ func TestBlockedStepEndsTheRunAsBlocked(t *testing.T) {
 	if connectors.called("release pod-1 "+podRun) != 1 {
 		t.Errorf("a blocked run must release the pod: %v", connectors.calls)
 	}
-	if status, reason, _ := metadataOf(t, store); status != RunBlocked || reason != "the test service is down" {
+	if status, reason, _ := metadataOf(t, store); status != RunBlocked || reason != blocked {
 		t.Errorf("metadata %q %q", status, reason)
 	}
 }
@@ -485,18 +519,19 @@ func TestBlockedNestedRunBlocksTheRunThatStartedIt(t *testing.T) {
 		{ID: "sub", Service: WorkflowService, Workflow: "inner"},
 		agentStep("after", "sub"),
 	}}
+	const blocked = "no access"
 	env, store, _, agents := podEnv(t, inner, def)
-	agents.blocked["deep"] = "no access"
-	runPod(env, def)
+	agents.blocked["deep"] = blocked
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
 	var res Result
 	_ = env.GetWorkflowResult(&res)
-	if res.Blocked != "no access" || res.BlockedStep != "sub" || len(agents.runsOf("after")) != 0 {
+	if res.Blocked != blocked || res.BlockedStep != "sub" || len(agents.runsOf("after")) != 0 {
 		t.Errorf("result %+v", res)
 	}
-	if status, reason, _ := metadataOf(t, store); status != RunBlocked || reason != "no access" {
+	if status, reason, _ := metadataOf(t, store); status != RunBlocked || reason != blocked {
 		t.Errorf("metadata %q %q", status, reason)
 	}
 }
@@ -510,7 +545,7 @@ func TestBlockedTeamMemberBlocksTheRun(t *testing.T) {
 	env.RegisterActivityWithOptions(func(context.Context, TeamTurnRequest) (map[string]any, error) {
 		return map[string]any{"model_calls": 1, "blocked": "no credentials"}, nil
 	}, activity.RegisterOptions{Name: TeamTurnActivity})
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -543,13 +578,13 @@ func TestPublishRequestsWaitForAPersonBeforeTheRunGoesOn(t *testing.T) {
 			g.Artifact != "runs/"+podRun+"/deliver.publish-1" || show(g.Inputs) != "deliver=runs/"+podRun+"/deliver#1" || g.OnReject != "" {
 			t.Errorf("first decision %+v", g)
 		}
-		if g.Publish == nil || *g.Publish != (PublishInfo{Step: "deliver", Pod: "pod-1", N: 1, Kind: PublishPush, Repository: "claims-build", Branch: "agent/payment-date-0b7e3c1e"}) {
+		if g.Publish == nil || *g.Publish != (PublishInfo{Step: "deliver", Pod: testPod, N: 1, Kind: PublishPush, Repository: "claims-build", Branch: "agent/payment-date-0b7e3c1e"}) {
 			t.Errorf("first request %+v", g.Publish)
 		}
 		if len(agents.runsOf("after")) != 0 {
 			t.Error("the run went on before the publish request was decided")
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "deliver.publish-1", Decision: Approved, Comment: "go", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "deliver.publish-1", Decision: Approved, Comment: "go", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
@@ -559,14 +594,14 @@ func TestPublishRequestsWaitForAPersonBeforeTheRunGoesOn(t *testing.T) {
 			t.Errorf("second decision %+v", state.Gates)
 		}
 		// A rejected request is not published, and the run goes on.
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "deliver.publish-2", Decision: Rejected, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "deliver.publish-2", Decision: Rejected, DecidedBy: testUser})
 	}, 2*time.Second)
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if len(connectors.decisions) != 2 || connectors.decisions[0] != (PublishDecision{Decision: Approved, Comment: "go", DecidedBy: "flo"}) ||
-		connectors.decisions[1] != (PublishDecision{Decision: Rejected, DecidedBy: "flo"}) {
+	if len(connectors.decisions) != 2 || connectors.decisions[0] != (PublishDecision{Decision: Approved, Comment: "go", DecidedBy: testUser}) ||
+		connectors.decisions[1] != (PublishDecision{Decision: Rejected, DecidedBy: testUser}) {
 		t.Errorf("decisions %+v", connectors.decisions)
 	}
 	if connectors.called("decide pod-1 1 approved") != 1 || connectors.called("decide pod-1 2 rejected") != 1 || connectors.called("decide") != 2 {
@@ -579,7 +614,7 @@ func TestPublishRequestsWaitForAPersonBeforeTheRunGoesOn(t *testing.T) {
 	if err := json.Unmarshal([]byte(store.text("runs/"+podRun+"/deliver.publish-1")), &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Decision != Approved || rec.DecidedBy != "flo" || rec.Step != "deliver.publish-1" || rec.Publish == nil || rec.Publish.N != 1 || !strings.HasPrefix(rec.Question, "Publish branch") {
+	if rec.Decision != Approved || rec.DecidedBy != testUser || rec.Step != "deliver.publish-1" || rec.Publish == nil || rec.Publish.N != 1 || !strings.HasPrefix(rec.Question, "Publish branch") {
 		t.Errorf("record %+v", rec)
 	}
 	var res Result
@@ -591,12 +626,12 @@ func TestPublishRequestsWaitForAPersonBeforeTheRunGoesOn(t *testing.T) {
 
 // backEdge is build -> check -> review, with the gate's rejections going back to build. The
 // step beside is not on a path from build to the gate, and after runs once the gate approves.
-func backEdge() Definition {
-	return Definition{Name: "iterate", Steps: []Step{
-		agentStep("build"),
-		agentStep("check", "build"),
-		agentStep("beside", "build"),
-		{ID: "review", Service: GateService, Question: "Good enough?", DependsOn: []string{"check"}, OnReject: "build", MaxRejections: 2},
+func backEdge() *Definition {
+	return &Definition{Name: "iterate", Steps: []Step{
+		agentStep(buildStep),
+		agentStep("check", buildStep),
+		agentStep("beside", buildStep),
+		{ID: "review", Service: GateService, Question: "Good enough?", DependsOn: []string{"check"}, OnReject: buildStep, MaxRejections: 2},
 		agentStep("after", "review"),
 	}}
 }
@@ -606,13 +641,13 @@ func TestRejectionGoesBackToAnAgentStepAndTheStepsBetweenRunAgain(t *testing.T) 
 	run := "runs/" + podRun
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
-		if len(state.Gates) != 1 || state.Gates[0].Round != 1 || state.Gates[0].OnReject != "build" || state.Gates[0].MaxRejections != 2 ||
+		if len(state.Gates) != 1 || state.Gates[0].Round != 1 || state.Gates[0].OnReject != buildStep || state.Gates[0].MaxRejections != 2 ||
 			show(state.Gates[0].Inputs) != "check="+run+"/check#1" {
 			t.Errorf("first round %+v", state.Gates)
 		}
 		// A rejection without a reason is ignored; the gate keeps waiting.
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, DecidedBy: "flo"})
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "the date is missing", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, DecidedBy: testUser})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "the date is missing", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
@@ -627,7 +662,7 @@ func TestRejectionGoesBackToAnAgentStepAndTheStepsBetweenRunAgain(t *testing.T) 
 		if len(agents.runsOf("after")) != 0 {
 			t.Error("the step after the gate ran before the approval")
 		}
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
 	}, 2*time.Second)
 	runPod(env, backEdge())
 	if err := env.GetWorkflowError(); err != nil {
@@ -661,7 +696,7 @@ func TestRejectionGoesBackToAnAgentStepAndTheStepsBetweenRunAgain(t *testing.T) 
 	if err := json.Unmarshal([]byte(store.text(run+"/review.1")), &first); err != nil {
 		t.Fatal(err)
 	}
-	if first.Decision != Rejected || first.Comment != "the date is missing" || first.Round != 1 || first.OnReject != "build" {
+	if first.Decision != Rejected || first.Comment != "the date is missing" || first.Round != 1 || first.OnReject != buildStep {
 		t.Errorf("first record %+v", first)
 	}
 	// The step between runs again on the new result; the step beside the path and the step
@@ -711,7 +746,7 @@ func TestRejectionBeyondMaxRejectionsEndsTheRun(t *testing.T) {
 	env, store, _, agents := podEnv(t)
 	for round := 1; round <= 3; round++ {
 		env.RegisterDelayedCallback(func() {
-			env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: fmt.Sprintf("no %d", round), DecidedBy: "flo"})
+			env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: fmt.Sprintf("no %d", round), DecidedBy: testUser})
 		}, time.Duration(round)*time.Second)
 	}
 	runPod(env, backEdge())
@@ -742,6 +777,7 @@ func TestRejectionBeyondMaxRejectionsEndsTheRun(t *testing.T) {
 
 func TestRejectionGoesBackToAnInteractiveStepAndReopensItsSession(t *testing.T) {
 	env, store, _, agents := podEnv(t)
+	const firstDraft = "first draft"
 	run, session := "runs/"+podRun, "user-sessions/"+podRun+"/talk"
 	ctx := context.Background()
 	def := Definition{Name: "talks", Steps: []Step{
@@ -750,8 +786,8 @@ func TestRejectionGoesBackToAnInteractiveStepAndReopensItsSession(t *testing.T) 
 		{ID: "review", Service: GateService, DependsOn: []string{"talk", "check"}, OnReject: "talk"},
 	}}
 	env.RegisterDelayedCallback(func() {
-		_ = store.Put(ctx, session+"/files/result.md", []byte("first draft"), Meta{})
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "result.md", CompletedBy: "flo"})
+		_ = store.Put(ctx, session+"/files/result.md", []byte(firstDraft), Meta{})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "result.md", CompletedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "too short", DecidedBy: "ada"})
@@ -770,17 +806,17 @@ func TestRejectionGoesBackToAnInteractiveStepAndReopensItsSession(t *testing.T) 
 		if got := store.text(session + "/files/rejection-1.md"); got != "# Rejection from \"review\" (round 1)\n\nRejected by: ada\n\ntoo short\n" {
 			t.Errorf("rejection file %q", got)
 		}
-		if store.text(session+"/files/input-talk.md") != "first draft" || store.text(session+"/files/input-check.md") != "check v1" {
+		if store.text(session+"/files/input-talk.md") != firstDraft || store.text(session+"/files/input-check.md") != "check v1" {
 			t.Errorf("input files %q %q", store.text(session+"/files/input-talk.md"), store.text(session+"/files/input-check.md"))
 		}
 		if store.has(session+"/completed.json") || store.has(session+"/files/input-review.json") {
 			t.Error("the session must be open, and the decision record is no input file")
 		}
-		if store.text(run+"/talk.round-1") != "first draft" {
+		if store.text(run+"/talk.round-1") != firstDraft {
 			t.Errorf("kept output %q", store.text(run+"/talk.round-1"))
 		}
 		_ = store.Put(ctx, session+"/files/result.md", []byte("second draft"), Meta{})
-		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "result.md", CompletedBy: "flo"})
+		env.SignalWorkflow(CompleteSignal, Completion{Step: "talk", File: "result.md", CompletedBy: testUser})
 	}, 3*time.Second)
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
@@ -789,11 +825,11 @@ func TestRejectionGoesBackToAnInteractiveStepAndReopensItsSession(t *testing.T) 
 		}
 		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "ada"})
 	}, 4*time.Second)
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if store.text(run+"/talk") != "second draft" || store.text(run+"/talk.round-1") != "first draft" || len(agents.runsOf("check")) != 2 {
+	if store.text(run+"/talk") != "second draft" || store.text(run+"/talk.round-1") != firstDraft || len(agents.runsOf("check")) != 2 {
 		t.Errorf("outputs %q %q, check ran %d times", store.text(run+"/talk"), store.text(run+"/talk.round-1"), len(agents.runsOf("check")))
 	}
 }
@@ -807,12 +843,12 @@ func TestRejectionGoesBackToAWorkflowStep(t *testing.T) {
 	env, store, _, agents := podEnv(t, inner, def)
 	run := "runs/" + podRun
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Rejected, Comment: "again", DecidedBy: testUser})
 	}, time.Second)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: "flo"})
+		env.SignalWorkflow(DecisionSignal, Decision{Step: "review", Decision: Approved, DecidedBy: testUser})
 	}, 2*time.Second)
-	runPod(env, def)
+	runPod(env, &def)
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -878,10 +914,10 @@ func TestValidateDevPodStepsAndBackEdges(t *testing.T) {
 		edit(&s)
 		return s
 	}
-	def := func(steps ...Step) Definition { return Definition{Name: "w", Steps: steps} }
+	def := func(steps ...Step) *Definition { return &Definition{Name: "w", Steps: steps} }
 	inner := Step{ID: "sub", Service: WorkflowService, Workflow: "inner"}
 	talk := Step{ID: "talk", Service: InteractiveService, Agent: "helper@v1"}
-	for name, d := range map[string]Definition{
+	for name, d := range map[string]*Definition{
 		"pod":              def(pod, agentStep("code", "pod"), command, stop),
 		"named pod":        def(change(pod, func(s *Step) { s.Name = "payment-date"; s.WorkBranch = "agent/payment-date" }), agentStep("code", "pod")),
 		"command options":  def(pod, agentStep("code", "pod"), change(command, func(s *Step) { s.Timeout = "10m"; s.AllowFailure = true })),
@@ -896,7 +932,7 @@ func TestValidateDevPodStepsAndBackEdges(t *testing.T) {
 		}
 	}
 	for name, tc := range map[string]struct {
-		def  Definition
+		def  *Definition
 		want string
 	}{
 		"two pods":            {def(pod, change(pod, func(s *Step) { s.ID = "second" })), "a workflow has only one"},
@@ -991,28 +1027,28 @@ func TestHTTPConnectorsSendTheRequestsOfTheContract(t *testing.T) {
 	defer srv.Close()
 	c := HTTPConnectors{BaseURL: srv.URL, Client: srv.Client()}
 	ctx := context.Background()
-	created, err := c.CreatePod(ctx, CreatePod{Repository: "claims-build", SourceBranch: "main", WorkBranch: "agent/x", Name: "x", Run: "r1"})
-	if err != nil || created != (CreatedPod{ID: "pod-1", Reused: true, StartCommit: "abc"}) {
+	created, err := c.CreatePod(ctx, &CreatePod{Repository: "claims-build", SourceBranch: "main", WorkBranch: "agent/x", Name: "x", Run: "r1"})
+	if err != nil || created != (CreatedPod{ID: testPod, Reused: true, StartCommit: "abc"}) {
 		t.Fatalf("create %+v %v", created, err)
 	}
-	if err = c.Hold(ctx, "pod-1", "r1"); err != nil {
+	if err = c.Hold(ctx, testPod, "r1"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.Exec(ctx, "pod-1", PodExec{Command: "./verify.sh", TimeoutSeconds: 300})
+	res, err := c.Exec(ctx, testPod, PodExec{Command: "./verify.sh", TimeoutSeconds: 300})
 	if err != nil || res != (PodExecResult{ExitCode: 2, Stdout: "out", Stderr: "err"}) {
 		t.Fatalf("exec %+v %v", res, err)
 	}
-	requests, err := c.PublishRequests(ctx, "pod-1", "r1")
+	requests, err := c.PublishRequests(ctx, testPod, "r1")
 	if err != nil || len(requests) != 2 || requests[1] != (PublishRequest{N: 2, Kind: PublishPullRequest, Title: "T", Body: "B", State: "done"}) {
 		t.Fatalf("publish requests %+v %v", requests, err)
 	}
-	if err = c.DecidePublish(ctx, "pod-1", 2, PublishDecision{Decision: Approved, Comment: "go", DecidedBy: "flo"}); err != nil {
+	if err = c.DecidePublish(ctx, testPod, 2, PublishDecision{Decision: Approved, Comment: "go", DecidedBy: testUser}); err != nil {
 		t.Fatal(err)
 	}
-	if err = c.Release(ctx, "pod-1", "r1"); err != nil {
+	if err = c.Release(ctx, testPod, "r1"); err != nil {
 		t.Fatal(err)
 	}
-	if err = c.DeletePod(ctx, "pod-1"); err != nil {
+	if err = c.DeletePod(ctx, testPod); err != nil {
 		t.Fatal(err)
 	}
 	var refused *ConnectorError
@@ -1040,13 +1076,13 @@ func TestStopAndReleaseTreatAMissingPodAsDone(t *testing.T) {
 	store := listStore{newSyncStore()}
 	a := &Activities{Store: store, Connectors: missingPod{&fakeConnectors{}}}
 	ctx := context.Background()
-	if _, err := a.StopDevPod(ctx, StopDevPodRequest{TraceID: "t", Pod: "pod-1", Artifact: "runs/t/stop"}); err != nil || !store.has("runs/t/stop") {
+	if _, err := a.StopDevPod(ctx, StopDevPodRequest{TraceID: "t", Pod: testPod, Artifact: "runs/t/stop"}); err != nil || !store.has("runs/t/stop") {
 		t.Fatalf("stop %v", err)
 	}
-	if err := a.ReleaseDevPod(ctx, ReleaseDevPodRequest{Pod: "pod-1", Run: "t"}); err != nil {
+	if err := a.ReleaseDevPod(ctx, ReleaseDevPodRequest{Pod: testPod, Run: "t"}); err != nil {
 		t.Fatalf("release %v", err)
 	}
-	if _, err := (&Activities{Store: store}).RunCommand(ctx, CommandRequest{Pod: "pod-1", Command: "ls"}); err == nil || !strings.Contains(err.Error(), "not configured") {
+	if _, err := (&Activities{Store: store}).RunCommand(ctx, &CommandRequest{Pod: testPod, Command: "ls"}); err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("no connector service: %v", err)
 	}
 }

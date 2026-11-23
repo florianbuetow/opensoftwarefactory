@@ -16,13 +16,13 @@ import (
 )
 
 type transactionState struct {
-	mu  sync.RWMutex
 	err error
+	mu  sync.RWMutex
 }
 
 type putCondition struct {
-	kind     byte
 	revision string
+	kind     byte
 }
 
 const (
@@ -35,8 +35,8 @@ type transactionJournal struct {
 	Operation     string `json:"operation"`
 	ID            string `json:"id"`
 	Stage         string `json:"stage,omitempty"`
-	Meta          Meta   `json:"meta,omitempty"`
 	PreviousTrace string `json:"previous_trace,omitempty"`
+	Meta          Meta   `json:"meta,omitempty"`
 }
 
 func parsePutCondition(r *http.Request) (putCondition, error) {
@@ -80,7 +80,7 @@ func newRevision() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
-func (s store) commitPut(id string, body io.Reader, m Meta, condition putCondition) (revision string, status int, err error) {
+func (s *store) commitPut(id string, body io.Reader, meta *Meta, condition putCondition) (revision string, status int, err error) {
 	s.tx.mu.Lock()
 	defer s.tx.mu.Unlock()
 	if s.tx.err != nil {
@@ -102,7 +102,8 @@ func (s store) commitPut(id string, body io.Reader, m Meta, condition putConditi
 	if condition.kind == conditionMatch && (!exists || current.Revision == "" || current.Revision != condition.revision) {
 		return "", http.StatusPreconditionFailed, nil
 	}
-	if err := ensureDirDurable(filepath.Dir(object), s.objects); err != nil {
+	err = ensureDirDurable(filepath.Dir(object), s.objects)
+	if err != nil {
 		return "", 0, err
 	}
 	stage, err := os.CreateTemp(s.transactions, ".upload-*")
@@ -110,7 +111,13 @@ func (s store) commitPut(id string, body io.Reader, m Meta, condition putConditi
 		return "", 0, err
 	}
 	stagePath := stage.Name()
-	defer os.Remove(stagePath)
+	// A published stage was renamed into place and is already gone. A stage that is left
+	// behind and cannot be removed fails the request, whatever its outcome was.
+	defer func() {
+		if cleanupErr := removeAfter(nil, stagePath); cleanupErr != nil {
+			revision, status, err = "", 0, errors.Join(err, cleanupErr)
+		}
+	}()
 	size, copyErr := copyObject(stage, body, objectSizeLimit(id))
 	if copyErr == nil {
 		copyErr = stage.Sync()
@@ -125,18 +132,20 @@ func (s store) commitPut(id string, body io.Reader, m Meta, condition putConditi
 	if copyErr != nil {
 		return "", 0, copyErr
 	}
-	if err := syncDir(filepath.Dir(object)); err != nil {
+	err = syncDir(filepath.Dir(object))
+	if err != nil {
 		return "", 0, err
 	}
 	revision, err = newRevision()
 	if err != nil {
 		return "", 0, err
 	}
+	m := *meta
 	m.Size, m.Revision = size, revision
 	j := transactionJournal{Operation: "put", ID: id, Stage: stagePath, Meta: m, PreviousTrace: current.TraceID}
 	journalPath := filepath.Join(s.transactions, revision+".json")
-	if err = writeJSONAtomic(journalPath, j); err == nil {
-		err = s.replayTransaction(journalPath, j)
+	if err = writeJSONAtomic(journalPath, &j); err == nil {
+		err = s.replayTransaction(journalPath, &j)
 	}
 	if err != nil {
 		if recoveryErr := s.recoverTransactionsLocked(); recoveryErr != nil {
@@ -168,7 +177,7 @@ func copyObject(dst io.Writer, src io.Reader, limit int64) (int64, error) {
 	return size, err
 }
 
-func (s store) commitDelete(id string) (status int, err error) {
+func (s *store) commitDelete(id string) (status int, err error) {
 	s.tx.mu.Lock()
 	defer s.tx.mu.Unlock()
 	if s.tx.err != nil {
@@ -189,8 +198,8 @@ func (s store) commitDelete(id string) (status int, err error) {
 	}
 	j := transactionJournal{Operation: "delete", ID: id, PreviousTrace: current.TraceID}
 	journalPath := filepath.Join(s.transactions, txnID+".json")
-	if err = writeJSONAtomic(journalPath, j); err == nil {
-		err = s.replayTransaction(journalPath, j)
+	if err = writeJSONAtomic(journalPath, &j); err == nil {
+		err = s.replayTransaction(journalPath, &j)
 	}
 	if err != nil {
 		if recoveryErr := s.recoverTransactionsLocked(); recoveryErr != nil {
@@ -202,13 +211,13 @@ func (s store) commitDelete(id string) (status int, err error) {
 	return 0, nil
 }
 
-func (s store) recoverTransactions() error {
+func (s *store) recoverTransactions() error {
 	s.tx.mu.Lock()
 	defer s.tx.mu.Unlock()
 	return s.recoverTransactionsLocked()
 }
 
-func (s store) recoverTransactionsLocked() error {
+func (s *store) recoverTransactionsLocked() error {
 	entries, err := os.ReadDir(s.transactions)
 	if err != nil {
 		return err
@@ -218,7 +227,7 @@ func (s store) recoverTransactionsLocked() error {
 			continue
 		}
 		path := filepath.Join(s.transactions, entry.Name())
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(filepath.Clean(path))
 		if err != nil {
 			return err
 		}
@@ -226,7 +235,7 @@ func (s store) recoverTransactionsLocked() error {
 		if err := json.Unmarshal(data, &j); err != nil || !validID(j.ID) || (j.Operation != "put" && j.Operation != "delete") {
 			return fmt.Errorf("invalid transaction journal %s", entry.Name())
 		}
-		if err := s.replayTransaction(path, j); err != nil {
+		if err := s.replayTransaction(path, &j); err != nil {
 			return err
 		}
 	}
@@ -236,7 +245,7 @@ func (s store) recoverTransactionsLocked() error {
 // ensureLegacyRevisions upgrades objects created before revisions existed without
 // changing their bytes or established metadata. Each upgrade uses the same journal
 // as a PUT, so an interrupted startup is completed by the next startup replay.
-func (s store) ensureLegacyRevisions() error {
+func (s *store) ensureLegacyRevisions() error {
 	s.tx.mu.Lock()
 	defer s.tx.mu.Unlock()
 	return filepath.WalkDir(s.objects, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -272,14 +281,14 @@ func (s store) ensureLegacyRevisions() error {
 		m.Revision = revision
 		j := transactionJournal{Operation: "put", ID: id, Meta: m, PreviousTrace: m.TraceID}
 		journalPath := filepath.Join(s.transactions, revision+".json")
-		if err := writeJSONAtomic(journalPath, j); err != nil {
+		if err := writeJSONAtomic(journalPath, &j); err != nil {
 			return err
 		}
-		return s.replayTransaction(journalPath, j)
+		return s.replayTransaction(journalPath, &j)
 	})
 }
 
-func (s store) replayTransaction(journalPath string, j transactionJournal) error {
+func (s *store) replayTransaction(journalPath string, j *transactionJournal) error {
 	object, metaPath, _ := s.paths(j.ID)
 	switch j.Operation {
 	case "put":
@@ -297,7 +306,7 @@ func (s store) replayTransaction(journalPath string, j transactionJournal) error
 		if err := syncDir(filepath.Dir(object)); err != nil {
 			return err
 		}
-		if err := s.writeMeta(metaPath, j.Meta); err != nil {
+		if err := s.writeMeta(metaPath, &j.Meta); err != nil {
 			return err
 		}
 		if j.PreviousTrace != "" && j.PreviousTrace != j.Meta.TraceID {
@@ -329,12 +338,12 @@ func (s store) replayTransaction(journalPath string, j transactionJournal) error
 	return syncDir(s.transactions)
 }
 
-func syncDir(path string) error {
-	dir, err := os.Open(path)
+func syncDir(path string) (err error) {
+	dir, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { err = closeAfter(err, dir) }()
 	return dir.Sync()
 }
 

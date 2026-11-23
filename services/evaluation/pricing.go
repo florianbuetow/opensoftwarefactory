@@ -16,7 +16,7 @@ func validatePrice(p *Price, id string) error {
 	if p.To != nil && !p.From.Before(*p.To) {
 		return errors.New("price interval must be non-empty")
 	}
-	if p.Currency != "EUR" && p.Currency != "USD" {
+	if p.Currency != currencyEUR && p.Currency != currencyUSD {
 		return errors.New("currency must be EUR or USD")
 	}
 	if p.UnitTokens <= 0 {
@@ -56,7 +56,8 @@ func (s *service) putPrice(w http.ResponseWriter, r *http.Request) {
 		s.dependencyFailure(w, err)
 		return
 	}
-	for _, other := range prices {
+	for i := range prices {
+		other := &prices[i]
 		if other.ID != p.ID && other.Vendor == p.Vendor && other.Model == p.Model && other.Effort == p.Effort && modesKey(other.Modes) == modesKey(p.Modes) && intervalsOverlap(p.From, p.To, other.From, other.To) {
 			s.fail(w, 422, errors.New("price interval overlaps another row with the same dimensions"))
 			return
@@ -135,7 +136,7 @@ func validateConversion(c *Conversion, id string) error {
 	if !validRecordID(id) || c.ID != id {
 		return errors.New("id must match path")
 	}
-	if c.FromCurrency == c.ToCurrency || (c.FromCurrency != "EUR" && c.FromCurrency != "USD") || (c.ToCurrency != "EUR" && c.ToCurrency != "USD") {
+	if c.FromCurrency == c.ToCurrency || (c.FromCurrency != currencyEUR && c.FromCurrency != currencyUSD) || (c.ToCurrency != currencyEUR && c.ToCurrency != currencyUSD) {
 		return errors.New("conversion must be between different EUR/USD currencies")
 	}
 	if _, err := decimal(c.Rate, true); err != nil {

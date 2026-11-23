@@ -48,11 +48,11 @@ func TestCanonicalIntakeHashRejectsChangedPinnedPayload(t *testing.T) {
 	def := pipeline.Definition{Name: "group/score", Version: 3}
 	b := a
 	b.Event = json.RawMessage(`{ "a": 1, "b": 2 }`)
-	ha, err := canonicalIntakeHash(a, def)
+	ha, err := canonicalIntakeHash(&a, &def)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hb, err := canonicalIntakeHash(b, def)
+	hb, err := canonicalIntakeHash(&b, &def)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestCanonicalIntakeHashRejectsChangedPinnedPayload(t *testing.T) {
 		t.Fatalf("semantically identical JSON hashes differ: %s %s", ha, hb)
 	}
 	b.WorkflowVersion = 4
-	hc, _ := canonicalIntakeHash(b, pipeline.Definition{Name: "group/score", Version: 4})
+	hc, _ := canonicalIntakeHash(&b, &pipeline.Definition{Name: "group/score", Version: 4})
 	if hc == ha {
 		t.Fatal("changed pinned version reused accepted payload hash")
 	}
@@ -83,11 +83,11 @@ func TestWorkflowOutcomeVocabulary(t *testing.T) {
 
 func TestRootBlockedMetadataNeverChangesChildOutcome(t *testing.T) {
 	event := WorkflowEvent{Type: "workflow.finished", Status: "completed", ParentExecutionID: "parent-run"}
-	if rootBlockedEligible(event) {
+	if rootBlockedEligible(&event) {
 		t.Fatal("child completion was eligible for root blocked override")
 	}
 	event.ParentExecutionID = ""
-	if !rootBlockedEligible(event) {
+	if !rootBlockedEligible(&event) {
 		t.Fatal("root completion was not eligible")
 	}
 }

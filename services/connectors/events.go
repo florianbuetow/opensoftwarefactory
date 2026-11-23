@@ -13,20 +13,20 @@ import (
 )
 
 type factoryEvent struct {
-	SchemaVersion     int       `json:"schema_version"`
 	ID                string    `json:"id"`
 	Type              string    `json:"type"`
 	RunID             string    `json:"run_id"`
 	ExecutionID       string    `json:"execution_id"`
 	ParentExecutionID string    `json:"parent_execution_id,omitempty"`
 	Workflow          string    `json:"workflow"`
-	WorkflowVersion   int       `json:"workflow_version"`
 	TraceID           string    `json:"trace_id,omitempty"`
 	OccurredAt        time.Time `json:"occurred_at"`
 	Status            string    `json:"status"`
+	SchemaVersion     int       `json:"schema_version"`
+	WorkflowVersion   int       `json:"workflow_version"`
 }
 
-func bindingMatches(binding IntakeBinding, event factoryEvent) bool {
+func bindingMatches(binding *IntakeBinding, event *factoryEvent) bool {
 	if event.SchemaVersion != 1 {
 		return false
 	}
@@ -39,7 +39,7 @@ func bindingMatches(binding IntakeBinding, event factoryEvent) bool {
 	return event.Type == "workflow.finished"
 }
 
-func (s *service) submitBinding(ctx context.Context, binding IntakeBinding, event factoryEvent, raw []byte) error {
+func (s *service) submitBinding(ctx context.Context, binding *IntakeBinding, event *factoryEvent, raw []byte) (err error) {
 	request := map[string]any{
 		"binding_id": binding.ID, "event_id": event.ID, "workflow": binding.Workflow, "workflow_version": binding.WorkflowVersion,
 		"event": json.RawMessage(raw), "binding_revision": binding.Revision, "binding": binding,
@@ -54,7 +54,7 @@ func (s *service) submitBinding(ctx context.Context, binding IntakeBinding, even
 	if err != nil {
 		return fmt.Errorf("orchestrator is unavailable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	response, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 == 2 {
 		return nil

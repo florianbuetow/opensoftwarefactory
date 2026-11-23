@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -58,7 +59,6 @@ var segmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // Meta describes one stored object.
 type Meta struct {
 	ID                    string    `json:"id"`
-	Size                  int64     `json:"size"`
 	Created               time.Time `json:"created"`
 	Revision              string    `json:"revision,omitempty"`
 	Creator               string    `json:"creator,omitempty"`
@@ -67,6 +67,7 @@ type Meta struct {
 	EstimatedOutputTokens *int64    `json:"estimated_output_tokens,omitempty"`
 	ProcessingTimeMS      *int64    `json:"processing_time_ms,omitempty"`
 	EstimationMethod      string    `json:"estimation_method,omitempty"`
+	Size                  int64     `json:"size"`
 }
 
 // Listing is the content of one prefix: its child directories and objects.
@@ -95,8 +96,8 @@ func run() error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := shutdownTelemetry(ctx); err != nil {
-			logger.Warn("telemetry shutdown failed", "error", err)
+		if shutdownErr := shutdownTelemetry(ctx); shutdownErr != nil {
+			logger.Warn("telemetry shutdown failed", "error", shutdownErr)
 		}
 	}()
 	handler, err := newHandler(*dataPath, logger)
@@ -125,7 +126,7 @@ func run() error {
 }
 
 func newHandler(root string, logger *slog.Logger) (http.Handler, error) {
-	s := store{
+	s := &store{
 		objects: filepath.Join(root, "objects"), meta: filepath.Join(root, "meta"), traces: filepath.Join(root, "traces"),
 		transactions: filepath.Join(root, "transactions"), logger: logger, mu: &sync.Mutex{}, tx: &transactionState{}, indexed: &atomic.Bool{},
 	}
@@ -162,11 +163,7 @@ func newHandler(root string, logger *slog.Logger) (http.Handler, error) {
 }
 
 type store struct {
-	objects      string
-	meta         string
-	traces       string
-	transactions string
-	logger       *slog.Logger
+	logger *slog.Logger
 	// tx serialises object mutations and keeps object bytes and metadata consistent
 	// for readers. It is deliberately separate from the trace-index mutex.
 	tx *transactionState
@@ -174,7 +171,11 @@ type store struct {
 	// so concurrent writes under one trace ID cannot lose entries.
 	mu *sync.Mutex
 	// indexed reports that the trace index covers every stored object.
-	indexed *atomic.Bool
+	indexed      *atomic.Bool
+	objects      string
+	meta         string
+	traces       string
+	transactions string
 }
 
 // validID reports whether id is a non-empty object ID that cannot escape the root.
@@ -192,7 +193,7 @@ func validID(id string) bool {
 }
 
 // paths maps an object ID to its object file and metadata file.
-func (s store) paths(id string) (object, meta string, ok bool) {
+func (s *store) paths(id string) (object, meta string, ok bool) {
 	if !validID(id) {
 		return "", "", false
 	}
@@ -219,7 +220,7 @@ func headerValue(r *http.Request, name string) (string, bool) {
 	return v, true
 }
 
-func (s store) put(w http.ResponseWriter, r *http.Request) {
+func (s *store) put(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_, _, ok := s.paths(id)
 	if !ok {
@@ -245,13 +246,13 @@ func (s store) put(w http.ResponseWriter, r *http.Request) {
 		ID: id, Created: time.Now().UTC(), Creator: creator, TraceID: trace,
 		EstimatedInputTokens: inputTokens, EstimatedOutputTokens: outputTokens, ProcessingTimeMS: processingTime, EstimationMethod: method,
 	}
-	revision, status, err := s.commitPut(id, r.Body, m, condition)
-	if status != 0 {
-		http.Error(w, http.StatusText(status), status)
-		return
-	}
+	revision, status, err := s.commitPut(id, r.Body, &m, condition)
 	if err != nil {
 		s.fail(w, err)
+		return
+	}
+	if status != 0 {
+		http.Error(w, http.StatusText(status), status)
 		return
 	}
 	w.Header().Set("ETag", quoteETag(revision))
@@ -270,7 +271,7 @@ func optionalNonnegativeInt64Header(r *http.Request, name string) (*int64, bool)
 	return &value, true
 }
 
-func (s store) get(w http.ResponseWriter, r *http.Request) {
+func (s *store) get(w http.ResponseWriter, r *http.Request) {
 	s.tx.mu.RLock()
 	locked := true
 	defer func() {
@@ -288,7 +289,7 @@ func (s store) get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid object id", http.StatusBadRequest)
 		return
 	}
-	f, err := os.Open(object)
+	f, err := os.Open(filepath.Clean(object))
 	if errors.Is(err, fs.ErrNotExist) {
 		http.Error(w, "object not found", http.StatusNotFound)
 		return
@@ -297,7 +298,11 @@ func (s store) get(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			s.logger.Error("closing object failed", "id", id, "error", closeErr)
+		}
+	}()
 	info, err := f.Stat()
 	if err != nil || info.IsDir() {
 		http.Error(w, "object not found", http.StatusNotFound)
@@ -330,7 +335,7 @@ func setOptionalInt64ResponseHeader(w http.ResponseWriter, name string, value *i
 	}
 }
 
-func (s store) delete(w http.ResponseWriter, r *http.Request) {
+func (s *store) delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_, _, ok := s.paths(id)
 	if !ok {
@@ -361,7 +366,7 @@ func pruneEmpty(dir, root string) {
 	}
 }
 
-func (s store) getMeta(w http.ResponseWriter, r *http.Request) {
+func (s *store) getMeta(w http.ResponseWriter, r *http.Request) {
 	s.tx.mu.RLock()
 	defer s.tx.mu.RUnlock()
 	if s.tx.err != nil {
@@ -387,13 +392,13 @@ func (s store) getMeta(w http.ResponseWriter, r *http.Request) {
 }
 
 // readMeta loads an object's metadata, falling back to the file's own attributes.
-func (s store) readMeta(id string, info fs.FileInfo) Meta {
+func (s *store) readMeta(id string, info fs.FileInfo) Meta {
 	m := Meta{ID: id, Size: info.Size(), Created: info.ModTime().UTC()}
 	_, metaPath, ok := s.paths(id)
 	if !ok {
 		return m
 	}
-	data, err := os.ReadFile(metaPath)
+	data, err := os.ReadFile(filepath.Clean(metaPath))
 	if err != nil {
 		return m
 	}
@@ -405,7 +410,7 @@ func (s store) readMeta(id string, info fs.FileInfo) Meta {
 }
 
 // list returns the immediate children of a prefix: directories and objects.
-func (s store) list(w http.ResponseWriter, r *http.Request) {
+func (s *store) list(w http.ResponseWriter, r *http.Request) {
 	s.tx.mu.RLock()
 	defer s.tx.mu.RUnlock()
 	if s.tx.err != nil {
@@ -458,7 +463,7 @@ func (s store) list(w http.ResponseWriter, r *http.Request) {
 // isUnpublishedStage identifies legacy upload files created beside an object before
 // staging moved to the private transactions directory. A real dot-prefixed object has
 // metadata and remains visible.
-func (s store) isUnpublishedStage(id string, entry fs.DirEntry) bool {
+func (s *store) isUnpublishedStage(id string, entry fs.DirEntry) bool {
 	if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".upload-") {
 		return false
 	}
@@ -471,7 +476,7 @@ func (s store) isUnpublishedStage(id string, entry fs.DirEntry) bool {
 }
 
 // trace returns every object whose metadata carries the trace ID, oldest first.
-func (s store) trace(w http.ResponseWriter, r *http.Request) {
+func (s *store) trace(w http.ResponseWriter, r *http.Request) {
 	s.tx.mu.RLock()
 	defer s.tx.mu.RUnlock()
 	if s.tx.err != nil {
@@ -502,7 +507,7 @@ func (s store) trace(w http.ResponseWriter, r *http.Request) {
 }
 
 // indexedTrace reads the index entries of one trace and the metadata they point to.
-func (s store) indexedTrace(trace string) ([]Meta, error) {
+func (s *store) indexedTrace(trace string) ([]Meta, error) {
 	objects := []Meta{}
 	dir := s.traceDir(trace)
 	entries, err := os.ReadDir(dir)
@@ -516,7 +521,7 @@ func (s store) indexedTrace(trace string) ([]Meta, error) {
 		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		data, err := os.ReadFile(filepath.Clean(filepath.Join(dir, e.Name())))
 		if err != nil {
 			continue
 		}
@@ -542,12 +547,12 @@ func (s store) indexedTrace(trace string) ([]Meta, error) {
 
 // tracedMeta loads the metadata an index entry points to. The entry is stale when
 // the object is gone or now belongs to another trace; an unreadable record is neither.
-func (s store) tracedMeta(trace, id string) (m Meta, found, stale bool) {
+func (s *store) tracedMeta(trace, id string) (m Meta, found, stale bool) {
 	_, metaPath, ok := s.paths(id)
 	if !ok {
 		return m, false, true
 	}
-	data, err := os.ReadFile(metaPath)
+	data, err := os.ReadFile(filepath.Clean(metaPath))
 	if errors.Is(err, fs.ErrNotExist) {
 		return m, false, true
 	}
@@ -562,15 +567,17 @@ func (s store) tracedMeta(trace, id string) (m Meta, found, stale bool) {
 
 // scanTrace finds the objects of one trace by reading every metadata record. It
 // answers only while the index of previously stored objects is still being built.
-func (s store) scanTrace(trace string) ([]Meta, error) {
+func (s *store) scanTrace(trace string) ([]Meta, error) {
 	objects := []Meta{}
 	err := filepath.WalkDir(s.meta, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
 			return err
 		}
-		data, err := os.ReadFile(path)
+		// The caller holds the transaction read lock, so no record is removed during the
+		// scan: a record that cannot be read is a storage fault, not a deleted object.
+		data, err := os.ReadFile(filepath.Clean(path))
 		if err != nil {
-			return nil
+			return err
 		}
 		var m Meta
 		if json.Unmarshal(data, &m) == nil && m.TraceID == trace {
@@ -584,7 +591,7 @@ func (s store) scanTrace(trace string) ([]Meta, error) {
 // buildTraceIndex indexes the objects stored before the index existed. The marker is
 // written only after a complete scan, so an interrupted build starts over at the next
 // start; entries are idempotent, and writes during the scan index themselves.
-func (s store) buildTraceIndex() {
+func (s *store) buildTraceIndex() {
 	started := time.Now()
 	indexed := 0
 	err := filepath.WalkDir(s.meta, func(path string, d fs.DirEntry, err error) error {
@@ -596,7 +603,7 @@ func (s store) buildTraceIndex() {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(filepath.Clean(path))
 		if err != nil {
 			return nil
 		}
@@ -629,18 +636,18 @@ func hashName(v string) string {
 }
 
 // traceDir is the index directory of one trace ID.
-func (s store) traceDir(trace string) string {
+func (s *store) traceDir(trace string) string {
 	return filepath.Join(s.traces, hashName(trace))
 }
 
 // traceEntry is the index entry of one object under a trace ID; its content is the object ID.
-func (s store) traceEntry(trace, id string) string {
+func (s *store) traceEntry(trace, id string) string {
 	return filepath.Join(s.traceDir(trace), hashName(id))
 }
 
 // storedTrace returns the trace ID of the metadata record at metaPath, or "" without one.
 func storedTrace(metaPath string) string {
-	data, err := os.ReadFile(metaPath)
+	data, err := os.ReadFile(filepath.Clean(metaPath))
 	if err != nil {
 		return ""
 	}
@@ -654,7 +661,7 @@ func storedTrace(metaPath string) string {
 // writeMeta stores an object's metadata and moves its index entry to the record's
 // trace ID. The entry is written first: a failure in between leaves a stale entry,
 // which a trace lookup skips and removes, never an object missing from its trace.
-func (s store) writeMeta(metaPath string, m Meta) error {
+func (s *store) writeMeta(metaPath string, m *Meta) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous := storedTrace(metaPath)
@@ -679,7 +686,7 @@ func (s store) writeMeta(metaPath string, m Meta) error {
 }
 
 // removeMeta deletes an object's metadata and its index entry.
-func (s store) removeMeta(id, metaPath string) error {
+func (s *store) removeMeta(id, metaPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous := storedTrace(metaPath)
@@ -697,7 +704,7 @@ func (s store) removeMeta(id, metaPath string) error {
 
 // dropTraceEntry removes one index entry, and the trace's directory once it is empty.
 // The caller holds s.mu, so no entry is being added to that directory meanwhile.
-func (s store) dropTraceEntry(trace, id string) {
+func (s *store) dropTraceEntry(trace, id string) {
 	entry := s.traceEntry(trace, id)
 	if err := os.Remove(entry); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		s.logger.Warn("removing trace index entry failed", "error", err)
@@ -710,7 +717,7 @@ func (s store) dropTraceEntry(trace, id string) {
 	}
 }
 
-func (s store) fail(w http.ResponseWriter, err error) {
+func (s *store) fail(w http.ResponseWriter, err error) {
 	s.logger.Error("request failed", "error", err)
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
@@ -721,8 +728,9 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // writeJSONAtomic writes v to path through a temporary file and a rename.
-func writeJSONAtomic(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+func writeJSONAtomic(path string, v any) (err error) {
+	err = os.MkdirAll(filepath.Dir(path), 0o750)
+	if err != nil {
 		return err
 	}
 	data, err := json.Marshal(v)
@@ -733,20 +741,40 @@ func writeJSONAtomic(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err = tmp.Write(data); err != nil {
-		tmp.Close()
+	defer func() { err = removeAfter(err, tmp.Name()) }()
+	err = writeSynced(tmp, data)
+	if err != nil {
 		return err
 	}
-	if err = tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp.Name(), path); err != nil {
+	err = os.Rename(tmp.Name(), path)
+	if err != nil {
 		return err
 	}
 	return syncDir(filepath.Dir(path))
+}
+
+// writeSynced writes data to f and flushes it to disk; f is closed on every path.
+func writeSynced(f *os.File, data []byte) (err error) {
+	defer func() { err = closeAfter(err, f) }()
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
+}
+
+// removeAfter removes the temporary file at path and adds a failed removal to the
+// error the caller returns. A file that was renamed into place is already gone.
+func removeAfter(err error, path string) error {
+	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+		return errors.Join(err, removeErr)
+	}
+	return err
 }

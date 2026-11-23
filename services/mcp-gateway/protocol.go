@@ -17,13 +17,24 @@ import (
 const (
 	protocolVersion = "2025-11-25"
 	maxResponse     = 16 << 20
+
+	methodInitialize  = "initialize"
+	methodInitialized = "notifications/initialized"
+	methodCancelled   = "notifications/cancelled"
+	methodToolsList   = "tools/list"
+	methodToolsCall   = "tools/call"
+
+	outcomeSuccess = "success"
+	outcomeError   = "error"
+
+	eventStream = "text/event-stream"
 )
 
 type rpcRequest struct {
 	JSONRPC string                     `json:"jsonrpc"`
-	ID      json.RawMessage            `json:"id"`
 	Method  string                     `json:"method"`
 	Params  map[string]json.RawMessage `json:"params"`
+	ID      json.RawMessage            `json:"id"`
 }
 
 func protocolHeaders(initializing bool) http.Header {
@@ -37,12 +48,12 @@ func protocolHeaders(initializing bool) http.Header {
 }
 
 func initializeRequest(id string) []byte {
-	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "initialize", "params": map[string]any{"protocolVersion": protocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "mcp-gateway", "version": "1"}}})
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": methodInitialize, "params": map[string]any{"protocolVersion": protocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "mcp-gateway", "version": "1"}}})
 	return b
 }
 
 func initializedNotification() []byte {
-	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": methodInitialized})
 	return b
 }
 
@@ -54,7 +65,7 @@ func parseRequest(data []byte, h http.Header) (rpcRequest, string, error) {
 	if r.JSONRPC != "2.0" || r.Method == "" {
 		return r, "", fmt.Errorf("a JSON-RPC 2.0 message is required")
 	}
-	if r.Method != "notifications/initialized" && r.Method != "notifications/cancelled" {
+	if r.Method != methodInitialized && r.Method != methodCancelled {
 		if len(r.ID) == 0 || string(r.ID) == "null" || !json.Valid(r.ID) {
 			return r, "", fmt.Errorf("a JSON-RPC request id is required")
 		}
@@ -68,7 +79,7 @@ func parseRequest(data []byte, h http.Header) (rpcRequest, string, error) {
 			return r, "", fmt.Errorf("id must be a string or number")
 		}
 	}
-	if r.Method == "initialize" {
+	if r.Method == methodInitialize {
 		var version string
 		if json.Unmarshal(r.Params["protocolVersion"], &version) != nil || version != protocolVersion {
 			return r, "", fmt.Errorf("only MCP %s is supported", protocolVersion)
@@ -80,7 +91,7 @@ func parseRequest(data []byte, h http.Header) (rpcRequest, string, error) {
 		return r, "", fmt.Errorf("MCP-Protocol-Version %s is required after initialize", protocolVersion)
 	}
 	name := ""
-	if r.Method == "tools/call" && (json.Unmarshal(r.Params["name"], &name) != nil || name == "") {
+	if r.Method == methodToolsCall && (json.Unmarshal(r.Params["name"], &name) != nil || name == "") {
 		return r, "", fmt.Errorf("tool name is required")
 	}
 	return r, name, nil
@@ -96,7 +107,7 @@ func rpcError(w http.ResponseWriter, status, code int, id json.RawMessage, err e
 func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	service := r.PathValue("name")
-	method, tool, outcome, detail := "invalid", "", "error", ""
+	method, tool, outcome, detail := "invalid", "", outcomeError, ""
 	status := http.StatusOK
 	defer func() {
 		attrs := []any{"service", service, "method", method, "outcome", outcome, "status", status, "duration_ms", time.Since(started).Milliseconds()}
@@ -107,7 +118,7 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		if detail != "" {
 			attrs = append(attrs, "error", detail)
 		}
-		if outcome == "success" {
+		if outcome == outcomeSuccess {
 			g.log.Info("MCP request completed", attrs...)
 		} else {
 			g.log.Warn("MCP request completed", attrs...)
@@ -134,8 +145,8 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch req.Method {
-	case "initialize", "notifications/initialized", "notifications/cancelled", "tools/list":
-	case "tools/call":
+	case methodInitialize, methodInitialized, methodCancelled, methodToolsList:
+	case methodToolsCall:
 		if !e.config.allowed(name) {
 			fail(403, -32602, req.ID, fmt.Errorf("tool %q is denied", name))
 			return
@@ -145,14 +156,14 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	skillCall := service == "skills" && req.Method == "tools/call"
+	skillCall := service == "skills" && req.Method == methodToolsCall
 	// The connector owns the skill script deadline and returns the retained output on timeout.
 	if !skillCall || tool != "run_skill_script" {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 	}
-	headers := protocolHeaders(req.Method == "initialize")
+	headers := protocolHeaders(req.Method == methodInitialize)
 	copyCorrelationHeaders(headers, r.Header)
 	if session := r.Header.Get("Mcp-Session-Id"); session != "" {
 		headers.Set("Mcp-Session-Id", session)
@@ -162,12 +173,12 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		fail(502, -32603, req.ID, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer g.closeResponse(resp, service)
 	if session := resp.Header.Get("Mcp-Session-Id"); session != "" {
 		w.Header().Set("Mcp-Session-Id", session)
 	}
 	if resp.StatusCode == http.StatusAccepted {
-		status, outcome = http.StatusAccepted, "success"
+		status, outcome = http.StatusAccepted, outcomeSuccess
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -181,14 +192,14 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 	if skillCall {
 		responseLimit = math.MaxInt
 	}
-	if typ == "text/event-stream" {
-		streamOutcome, streamDetail := "success", ""
-		w.Header().Set("Content-Type", "text/event-stream")
+	if typ == eventStream {
+		streamOutcome, streamDetail := outcomeSuccess, ""
+		w.Header().Set("Content-Type", eventStream)
 		w.Header().Set("Cache-Control", "no-cache")
 		err = streamEvents(resp.Body, responseLimit, func(lines []string) error {
-			filtered, err := filterSSE(lines, req, e.config)
-			if err != nil || filtered == nil {
-				return err
+			filtered, filterErr := filterSSE(lines, req, &e.config)
+			if filterErr != nil || filtered == nil {
+				return filterErr
 			}
 			data := []string{}
 			for _, line := range filtered {
@@ -197,13 +208,13 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if len(data) > 0 {
-				if eventOutcome, eventDetail := responseOutcome([]byte(strings.Join(data, "\n")), req.Method); eventOutcome == "error" {
+				if eventOutcome, eventDetail := responseOutcome([]byte(strings.Join(data, "\n")), req.Method); eventOutcome == outcomeError {
 					streamOutcome, streamDetail = eventOutcome, eventDetail
 				}
 			}
 			for _, line := range filtered {
-				if _, err := fmt.Fprintln(w, line); err != nil {
-					return err
+				if _, writeErr := fmt.Fprintln(w, line); writeErr != nil {
+					return writeErr
 				}
 			}
 			_, _ = fmt.Fprintln(w)
@@ -228,7 +239,7 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		body, err = readBounded(resp.Body)
 	}
 	if err == nil {
-		body, err = filterResponse(body, req, e.config)
+		body, err = filterResponse(body, req, &e.config)
 	}
 	if err != nil || body == nil {
 		if err == nil {
@@ -265,40 +276,40 @@ func correlationLogAttrs(headers http.Header) []any {
 }
 
 // responseOutcome classifies JSON-RPC and MCP tool errors without logging response bodies.
-func responseOutcome(body []byte, method string) (string, string) {
+func responseOutcome(body []byte, method string) (outcome, detail string) {
 	var msg struct {
 		Error *struct {
-			Code    int    `json:"code"`
 			Message string `json:"message"`
+			Code    int    `json:"code"`
 		} `json:"error"`
 		Result struct {
 			IsError bool `json:"isError"`
 		} `json:"result"`
 	}
 	if json.Unmarshal(body, &msg) != nil {
-		return "error", "invalid JSON-RPC response"
+		return outcomeError, "invalid JSON-RPC response"
 	}
 	if msg.Error != nil {
 		// The upstream message is response content and may contain tool output or secrets.
 		// Keep the machine-readable code for diagnosis without copying the body into logs.
-		return "error", fmt.Sprintf("JSON-RPC error %d", msg.Error.Code)
+		return outcomeError, fmt.Sprintf("JSON-RPC error %d", msg.Error.Code)
 	}
-	if method == "tools/call" && msg.Result.IsError {
-		return "error", "tool returned isError"
+	if method == methodToolsCall && msg.Result.IsError {
+		return outcomeError, "tool returned isError"
 	}
-	return "success", ""
+	return outcomeSuccess, ""
 }
 
 func (g *gateway) closeSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	service, outcome, detail, status := r.PathValue("name"), "error", "", http.StatusNoContent
+	service, outcome, detail, status := r.PathValue("name"), outcomeError, "", http.StatusNoContent
 	defer func() {
 		attrs := []any{"service", service, "method", "session/close", "outcome", outcome, "status", status, "duration_ms", time.Since(started).Milliseconds()}
 		attrs = append(attrs, correlationLogAttrs(r.Header)...)
 		if detail != "" {
 			attrs = append(attrs, "error", detail)
 		}
-		if outcome == "success" {
+		if outcome == outcomeSuccess {
 			g.log.Info("MCP request completed", attrs...)
 		} else {
 			g.log.Warn("MCP request completed", attrs...)
@@ -320,13 +331,13 @@ func (g *gateway) closeSession(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 502, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer g.closeResponse(resp, service)
 	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusMethodNotAllowed {
 		status, detail = resp.StatusCode, fmt.Sprintf("upstream HTTP %d", resp.StatusCode)
 		copyErrorResponse(w, resp)
 		return
 	}
-	status, outcome = resp.StatusCode, "success"
+	status, outcome = resp.StatusCode, outcomeSuccess
 	w.WriteHeader(resp.StatusCode)
 }
 
@@ -341,7 +352,7 @@ func copyErrorResponse(w http.ResponseWriter, resp *http.Response) {
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, maxResponse))
 }
 
-func filterSSE(lines []string, req rpcRequest, c Config) ([]string, error) {
+func filterSSE(lines []string, req rpcRequest, c *Config) ([]string, error) {
 	var dataLines []string
 	for _, line := range lines {
 		if strings.HasPrefix(line, "data:") {
@@ -364,7 +375,7 @@ func filterSSE(lines []string, req rpcRequest, c Config) ([]string, error) {
 	return append(out, "data: "+string(filtered)), nil
 }
 
-func filterResponse(data []byte, req rpcRequest, c Config) ([]byte, error) {
+func filterResponse(data []byte, req rpcRequest, c *Config) ([]byte, error) {
 	var msg map[string]json.RawMessage
 	if err := json.Unmarshal(data, &msg); err != nil || msg == nil {
 		return nil, fmt.Errorf("invalid upstream JSON-RPC response")
@@ -392,12 +403,12 @@ func filterResponse(data []byte, req rpcRequest, c Config) ([]byte, error) {
 		return nil, fmt.Errorf("upstream response missing result")
 	}
 	switch req.Method {
-	case "initialize":
+	case methodInitialize:
 		if err := validateInitialize(result); err != nil {
 			return nil, err
 		}
 		result["capabilities"], _ = json.Marshal(map[string]any{"tools": map[string]any{}})
-	case "tools/list":
+	case methodToolsList:
 		tools, err := toolList(result)
 		if err != nil {
 			return nil, err
@@ -518,7 +529,7 @@ func readRPCResponse(resp *http.Response, id json.RawMessage) (map[string]json.R
 	}
 	typ, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	var err error
-	if typ == "text/event-stream" {
+	if typ == eventStream {
 		done := fmt.Errorf("response complete")
 		err = streamEvents(resp.Body, maxResponse, func(lines []string) error {
 			var parts []string
@@ -530,8 +541,8 @@ func readRPCResponse(resp *http.Response, id json.RawMessage) (map[string]json.R
 			if len(parts) == 0 {
 				return nil
 			}
-			if err := consume([]byte(strings.Join(parts, "\n"))); err != nil {
-				return err
+			if consumeErr := consume([]byte(strings.Join(parts, "\n"))); consumeErr != nil {
+				return consumeErr
 			}
 			if result != nil {
 				return done

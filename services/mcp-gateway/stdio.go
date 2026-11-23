@@ -23,40 +23,45 @@ const maxStdioMessage = 16 << 20
 // stdioUpstream starts an externally supplied MCP program only when it is
 // first used. One process owns one shared, newline-delimited JSON-RPC channel.
 type stdioUpstream struct {
+	process    *stdioProcess
 	connection Connection
-
-	mu      sync.Mutex
-	process *stdioProcess
-	nextID  atomic.Uint64
-	closed  bool
+	mu         sync.Mutex
+	nextID     atomic.Uint64
+	closed     bool
 }
 
 type stdioProcess struct {
-	owner *stdioUpstream
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-
-	mu      sync.Mutex
+	owner   *stdioUpstream
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
 	pending map[string]stdioPending
-	closed  bool
-	writeMu sync.Mutex
 	done    chan struct{}
 	exited  chan struct{}
-	initMu  sync.Mutex
 	init    []byte
+	mu      sync.Mutex
+	writeMu sync.Mutex
+	initMu  sync.Mutex
+	closed  bool
 }
 
 type stdioPending struct {
-	originalID json.RawMessage
 	result     chan stdioResult
-	progress   json.RawMessage
 	stream     *io.PipeWriter
 	finished   chan struct{}
+	originalID json.RawMessage
+	progress   json.RawMessage
 }
 
 type stdioResult struct {
-	body []byte
 	err  error
+	body []byte
+}
+
+// stdioMessage is the part of a line from the child that routing needs.
+type stdioMessage struct {
+	Params map[string]json.RawMessage `json:"params"`
+	Method string                     `json:"method"`
+	ID     json.RawMessage            `json:"id"`
 }
 
 func (u *stdioUpstream) RoundTrip(ctx context.Context, body []byte, _ http.Header) (*http.Response, error) {
@@ -74,43 +79,35 @@ func (u *stdioUpstream) RoundTrip(ctx context.Context, body []byte, _ http.Heade
 		if err != nil {
 			return nil, err
 		}
-		if method == "notifications/cancelled" {
-			if err := process.cancelOriginal(ctx, message); err != nil {
+		if method == methodCancelled {
+			err = process.cancelOriginal(ctx, message)
+			if err != nil {
 				return nil, err
 			}
 			return &http.Response{StatusCode: http.StatusAccepted, Status: "202 Accepted", Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		}
-		if method == "initialize" {
-			body, err := process.ensureInitialized(ctx)
-			if errors.Is(err, errProcessClosed) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
+		initialized, err := process.ensureInitialized(ctx)
+		if errors.Is(err, errProcessClosed) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if method == methodInitialize {
 			var reply map[string]json.RawMessage
-			if err := json.Unmarshal(body, &reply); err != nil {
+			err = json.Unmarshal(initialized, &reply)
+			if err != nil {
 				return nil, err
 			}
 			reply["id"] = message["id"]
-			body, err = json.Marshal(reply)
+			initialized, err = json.Marshal(reply)
 			if err != nil {
 				return nil, err
 			}
-			return jsonResponse(body), nil
+			return jsonResponse(initialized), nil
 		}
-		if method == "notifications/initialized" {
-			if _, err := process.ensureInitialized(ctx); errors.Is(err, errProcessClosed) {
-				continue
-			} else if err != nil {
-				return nil, err
-			}
+		if method == methodInitialized {
 			return &http.Response{StatusCode: http.StatusAccepted, Status: "202 Accepted", Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(nil))}, nil
-		}
-		if _, err := process.ensureInitialized(ctx); errors.Is(err, errProcessClosed) {
-			continue
-		} else if err != nil {
-			return nil, err
 		}
 		originalID, ok := message["id"]
 		if !ok || len(originalID) == 0 || bytes.Equal(bytes.TrimSpace(originalID), []byte("null")) {
@@ -172,16 +169,19 @@ func (p *stdioProcess) ensureInitialized(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	body, err := readBounded(response.Body)
-	response.Body.Close()
+	if closeErr := response.Body.Close(); closeErr != nil {
+		return nil, errors.Join(err, closeErr)
+	}
 	if err != nil {
 		return nil, err
 	}
-	request := rpcRequest{Method: "initialize", ID: json.RawMessage(`"gateway-initialize"`)}
-	body, err = filterResponse(body, request, Config{})
+	request := rpcRequest{Method: methodInitialize, ID: json.RawMessage(`"gateway-initialize"`)}
+	body, err = filterResponse(body, request, &Config{})
 	if err != nil {
 		return nil, err
 	}
-	if err = p.write(ctx, initializedNotification()); err != nil {
+	err = p.write(ctx, initializedNotification())
+	if err != nil {
 		return nil, err
 	}
 	p.init = append([]byte(nil), body...)
@@ -215,14 +215,14 @@ func (p *stdioProcess) call(ctx context.Context, body, originalID json.RawMessag
 		return nil, err
 	}
 	if err := p.write(ctx, outbound); err != nil {
-		if pending, ok := p.take(internalID); ok {
-			pending.finish(err)
+		if taken, ok := p.take(internalID); ok {
+			taken.finish(err)
 		}
 		return nil, err
 	}
 	if reader != nil {
 		go p.cancelWhenDone(ctx, internalID, pending.finished)
-		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}, "X-Accel-Buffering": []string{"no"}}, Body: reader}, nil
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{eventStream}, "Cache-Control": []string{"no-cache"}, "X-Accel-Buffering": []string{"no"}}, Body: reader}, nil
 	}
 
 	select {
@@ -301,7 +301,8 @@ func (u *stdioUpstream) getProcess() (*stdioProcess, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = cmd.Start(); err != nil {
+	err = cmd.Start()
+	if err != nil {
 		return nil, err
 	}
 	p := &stdioProcess{owner: u, cmd: cmd, stdin: stdin, pending: map[string]stdioPending{}, done: make(chan struct{}), exited: make(chan struct{})}
@@ -414,7 +415,7 @@ func (p *stdioProcess) write(ctx context.Context, body []byte) error {
 func (p *stdioProcess) cancel(ctx context.Context, id string) error {
 	message, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"method":  "notifications/cancelled",
+		"method":  methodCancelled,
 		"params":  map[string]any{"requestId": id},
 	})
 	if err != nil {
@@ -428,11 +429,7 @@ func (p *stdioProcess) read(r io.Reader) {
 	scanner.Buffer(make([]byte, 64*1024), maxStdioMessage)
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		var message struct {
-			ID     json.RawMessage            `json:"id"`
-			Method string                     `json:"method"`
-			Params map[string]json.RawMessage `json:"params"`
-		}
+		var message stdioMessage
 		if err := json.Unmarshal(line, &message); err != nil {
 			continue
 		}
@@ -476,12 +473,7 @@ func (p *stdioProcess) read(r io.Reader) {
 	}
 }
 
-func (p *stdioProcess) progress(line []byte, message struct {
-	ID     json.RawMessage            `json:"id"`
-	Method string                     `json:"method"`
-	Params map[string]json.RawMessage `json:"params"`
-},
-) {
+func (p *stdioProcess) progress(line []byte, message stdioMessage) {
 	if message.Method != "notifications/progress" {
 		return
 	}
@@ -493,8 +485,8 @@ func (p *stdioProcess) progress(line []byte, message struct {
 	var target *stdioPending
 	for _, pending := range p.pending {
 		if pending.stream != nil && bytes.Equal(pending.progress, token) {
-			copy := pending
-			target = &copy
+			match := pending
+			target = &match
 			break
 		}
 	}

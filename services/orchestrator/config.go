@@ -42,14 +42,6 @@ func parseConfig(data []byte) (Config, error) {
 	return c, c.validate()
 }
 
-func loadConfig(path string) (Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, err
-	}
-	return parseConfig(data)
-}
-
 // seedWorkflows adds bundled workflow names that are wholly absent from the stored
 // workflows. Existing names, including all their versions, always win. Seed files are read
 // in name order and must each contain a valid workflow configuration.
@@ -70,14 +62,13 @@ func seedWorkflows(ctx context.Context, store *workflowStore, seedDir string) (i
 		if extension != ".json" && extension != ".yaml" && extension != ".yml" {
 			continue
 		}
-		path := filepath.Join(seedDir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return 0, fmt.Errorf("reading workflow seed %s: %w", entry.Name(), err)
+		data, readErr := os.ReadFile(filepath.Clean(filepath.Join(seedDir, entry.Name())))
+		if readErr != nil {
+			return 0, fmt.Errorf("reading workflow seed %s: %w", entry.Name(), readErr)
 		}
-		config, err := parseConfig(data)
-		if err != nil {
-			return 0, fmt.Errorf("workflow seed %s: %w", entry.Name(), err)
+		config, parseErr := parseConfig(data)
+		if parseErr != nil {
+			return 0, fmt.Errorf("workflow seed %s: %w", entry.Name(), parseErr)
 		}
 		seeded = append(seeded, config.Workflows...)
 	}
@@ -94,8 +85,8 @@ func seedWorkflows(ctx context.Context, store *workflowStore, seedDir string) (i
 				added++
 			}
 		}
-		if err := stored.validate(); err != nil {
-			return fmt.Errorf("merging workflow seeds: %w", err)
+		if validateErr := stored.validate(); validateErr != nil {
+			return fmt.Errorf("merging workflow seeds: %w", validateErr)
 		}
 		return nil
 	})
@@ -110,7 +101,8 @@ func seedWorkflows(ctx context.Context, store *workflowStore, seedDir string) (i
 func (c Config) validate() error {
 	names := map[string]string{}
 	seen := map[string]bool{}
-	for _, w := range c.Workflows {
+	for i := range c.Workflows {
+		w := &c.Workflows[i]
 		if err := pipeline.Validate(w); err != nil {
 			return err
 		}

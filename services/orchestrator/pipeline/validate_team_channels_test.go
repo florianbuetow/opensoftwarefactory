@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func teamWithWorkflowMembers(channels [][]string) Definition {
-	return Definition{Name: "team-channels", Steps: []Step{{
+func teamWithWorkflowMembers(channels [][]string) *Definition {
+	return &Definition{Name: "team-channels", Steps: []Step{{
 		ID: "coordinate", Service: TeamService, Agent: "lead@v1",
 		Agents:    []string{"helper@v1"},
 		Workflows: []string{"review-flow@v2", "verify-flow@v3"},

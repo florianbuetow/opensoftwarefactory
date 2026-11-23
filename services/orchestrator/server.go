@@ -33,15 +33,15 @@ type RunStatus struct {
 	Workflow      string            `json:"workflow,omitempty"`
 	Started       time.Time         `json:"started,omitempty"`
 	Finished      time.Time         `json:"finished,omitempty"`
-	DurationMS    int64             `json:"duration_ms,omitempty"`
-	DurationKnown bool              `json:"duration_known"`
 	Status        string            `json:"status"`
 	Artifacts     map[string]string `json:"artifacts,omitempty"`
-	Nodes         json.RawMessage   `json:"nodes,omitempty"`
 	Error         string            `json:"error,omitempty"`
 	DevPod        *pipeline.DevPod  `json:"dev_pod,omitempty"`
 	PullRequest   string            `json:"pull_request,omitempty"`
 	Rounds        map[string]int    `json:"rounds,omitempty"`
+	Nodes         json.RawMessage   `json:"nodes,omitempty"`
+	DurationMS    int64             `json:"duration_ms,omitempty"`
+	DurationKnown bool              `json:"duration_known"`
 }
 
 // RunRecord is stored as runs/<trace>/run.json when a run starts.
@@ -51,11 +51,11 @@ type RunRecord struct {
 	ParentExecutionID  string    `json:"parent_execution_id,omitempty"`
 	DistributedTraceID string    `json:"distributed_trace_id,omitempty"`
 	Workflow           string    `json:"workflow"`
-	WorkflowVersion    int       `json:"workflow_version"`
 	Started            time.Time `json:"started"`
 	StartedBy          string    `json:"started_by"`
 	InputArtifact      string    `json:"input_artifact"`
 	Source             string    `json:"source,omitempty"`
+	WorkflowVersion    int       `json:"workflow_version"`
 }
 
 type runStartObligation struct {
@@ -67,10 +67,10 @@ const runStartObligationPrefix = "run-start-obligations"
 
 // PendingDecision is a gate step of a running workflow that waits for a person.
 type PendingDecision struct {
+	pipeline.PendingGate
 	WorkflowID string `json:"workflow_id"`
 	TraceID    string `json:"trace_id"`
 	Workflow   string `json:"workflow"`
-	pipeline.PendingGate
 }
 
 // DecisionRequest is what the UI posts to decide a pending gate.
@@ -105,8 +105,8 @@ type SessionChatRequest struct {
 	Agent                     string            `json:"agent"`
 	Message                   string            `json:"message"`
 	CreatedBy                 string            `json:"created_by"`
-	DevPod                    string            `json:"dev_pod,omitempty"`
 	Skills                    map[string]string `json:"skills,omitempty"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
 	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
@@ -123,7 +123,7 @@ var errRunNotFound = errors.New("run not found")
 
 // Runner starts, inspects, decides, completes, and removes pipeline runs.
 type Runner interface {
-	Start(ctx context.Context, in pipeline.Input) error
+	Start(ctx context.Context, in *pipeline.Input) error
 	Status(ctx context.Context, traceID string) (RunStatus, error)
 	Pending(ctx context.Context) ([]PendingDecision, error)
 	Decide(ctx context.Context, workflowID string, d pipeline.Decision) error
@@ -148,8 +148,8 @@ type server struct {
 	agents     func(ctx context.Context, ref string) (AgentSettings, error)
 	logger     *slog.Logger
 	events     *eventService
-	agentURL   string
 	httpClient *http.Client
+	agentURL   string
 }
 
 func (s *server) routes() http.Handler {
@@ -267,7 +267,7 @@ func (s *server) startRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The metadata records what produces the run, so the run can be evaluated later.
-	runMeta := s.runMetadata(r.Context(), c, def, run)
+	runMeta := s.runMetadata(r.Context(), c, &def, &run)
 	metadata, _ := json.MarshalIndent(runMeta, "", "  ")
 	if err = s.blobs.Put(r.Context(), pipeline.ArtifactID(prefix, pipeline.MetadataFile), metadata, pipeline.Meta{Creator: startedBy, TraceID: traceID}); err != nil {
 		s.fail(w, http.StatusBadGateway, err)
@@ -280,7 +280,7 @@ func (s *server) startRun(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, fmt.Errorf("persisting run acceptance obligation: %w", err))
 		return
 	}
-	runInput := pipeline.Input{TraceID: traceID, Definition: def, Inputs: runInputs, Prefix: prefix}
+	runInput := &pipeline.Input{TraceID: traceID, Definition: def, Inputs: runInputs, Prefix: prefix}
 	if starter, ok := s.runner.(executionStarter); ok {
 		run.ExecutionID, err = starter.StartExecution(r.Context(), runInput)
 	} else {
@@ -299,7 +299,7 @@ func (s *server) startRun(w http.ResponseWriter, r *http.Request) {
 		finalized := true
 		eventObligated := s.events == nil
 		if s.events != nil {
-			if eventErr := s.events.acceptExecution(r.Context(), knownOpenExecution{WorkflowID: traceID, ExecutionID: run.ExecutionID, RunID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(def), AcceptedAt: run.Started}); eventErr != nil {
+			if eventErr := s.events.acceptExecution(r.Context(), &knownOpenExecution{WorkflowID: traceID, ExecutionID: run.ExecutionID, RunID: traceID, Workflow: def.Name, WorkflowVersion: pipeline.DefinitionVersion(&def), AcceptedAt: run.Started}); eventErr != nil {
 				s.logger.Warn("persisting workflow event obligation failed", "trace_id", traceID, "execution_id", run.ExecutionID, "error", eventErr)
 			} else {
 				eventObligated = true
@@ -474,7 +474,8 @@ func (s *server) postDecision(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusBadGateway, err)
 			return
 		}
-		for _, gate := range pending {
+		for i := range pending {
+			gate := &pending[i]
 			if gate.WorkflowID == req.WorkflowID && gate.Step == req.Step && gate.OnReject != "" {
 				s.fail(w, http.StatusBadRequest, errors.New("a rejection at this gate needs a comment with the reason; it goes back to the step that runs again"))
 				return
@@ -562,8 +563,8 @@ func (s *server) postSessionChat(w http.ResponseWriter, r *http.Request) {
 		Agent                     string            `json:"agent"`
 		Message                   string            `json:"message"`
 		CreatedBy                 string            `json:"created_by"`
-		DevPod                    string            `json:"dev_pod,omitempty"`
 		Skills                    map[string]string `json:"skills,omitempty"`
+		DevPod                    string            `json:"dev_pod,omitempty"`
 		SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 	}{
 		TraceID: waiting.TraceID, StepID: waiting.Step, Session: waiting.Session, Tab: req.Tab,
@@ -591,7 +592,11 @@ func (s *server) postSessionChat(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, errors.New("the agent service is not reachable"))
 		return
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			s.logger.Error("closing the answer of the agent service failed", "error", closeErr)
+		}
+	}()
 	responseBody, err := io.ReadAll(http.MaxBytesReader(w, response.Body, maxBodyBytes))
 	if err != nil {
 		s.fail(w, http.StatusBadGateway, errors.New("the agent service returned an unreadable answer"))
@@ -656,8 +661,8 @@ func (s *server) postSessionComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := ""
-	for _, open := range sessions {
-		if open.WorkflowID == req.WorkflowID && open.Step == req.Step {
+	for i := range sessions {
+		if open := &sessions[i]; open.WorkflowID == req.WorkflowID && open.Step == req.Step {
 			session = open.Session
 		}
 	}
@@ -689,6 +694,14 @@ func (s *server) fail(w http.ResponseWriter, status int, err error) {
 		s.logger.Error("request failed", "status", status, "error", err)
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

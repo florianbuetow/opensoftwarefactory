@@ -78,9 +78,9 @@ type DevPodOutput struct {
 // CommandOutput is the output document of a command step.
 type CommandOutput struct {
 	Command  string `json:"command"`
-	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
 }
 
 // CreatePod is the body of POST /api/devpods.
@@ -97,8 +97,8 @@ type CreatePod struct {
 // CreatedPod is the answer to POST /api/devpods.
 type CreatedPod struct {
 	ID          string `json:"id"`
-	Reused      bool   `json:"reused"`
 	StartCommit string `json:"start_commit,omitempty"`
+	Reused      bool   `json:"reused"`
 }
 
 // PodExec is the body of POST /api/devpods/{id}/exec.
@@ -109,9 +109,9 @@ type PodExec struct {
 
 // PodExecResult is the answer to POST /api/devpods/{id}/exec.
 type PodExecResult struct {
-	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
 }
 
 // Publish request kinds and states.
@@ -123,11 +123,11 @@ const (
 
 // PublishRequest is a push or pull request an agent asked for that waits for a person.
 type PublishRequest struct {
-	N     int    `json:"n"`
 	Kind  string `json:"kind"`
 	Title string `json:"title,omitempty"`
 	Body  string `json:"body,omitempty"`
 	State string `json:"state"`
+	N     int    `json:"n"`
 }
 
 // PublishDecision is the body of POST /api/devpods/{id}/publish-requests/{n}/decision.
@@ -139,7 +139,7 @@ type PublishDecision struct {
 
 // Connectors is the part of the connector service the orchestrator calls.
 type Connectors interface {
-	CreatePod(ctx context.Context, req CreatePod) (CreatedPod, error)
+	CreatePod(ctx context.Context, req *CreatePod) (CreatedPod, error)
 	Hold(ctx context.Context, pod, run string) error
 	Release(ctx context.Context, pod, run string) error
 	Exec(ctx context.Context, pod string, req PodExec) (PodExecResult, error)
@@ -150,8 +150,8 @@ type Connectors interface {
 
 // ConnectorError is an answer of the connector service that is not a success.
 type ConnectorError struct {
-	Status  int
 	Message string
+	Status  int
 }
 
 func (e *ConnectorError) Error() string {
@@ -160,8 +160,8 @@ func (e *ConnectorError) Error() string {
 
 // HTTPConnectors is the client for the connector service's HTTP API.
 type HTTPConnectors struct {
-	BaseURL string
 	Client  *http.Client
+	BaseURL string
 }
 
 // NewHTTPConnectorsFromEnv uses CONNECTORS_URL, defaulting to the in-cluster connector service.
@@ -174,14 +174,14 @@ func NewHTTPConnectorsFromEnv(client *http.Client) HTTPConnectors {
 
 // call sends one request. A body is sent as JSON; a successful answer is decoded into out
 // when out is set.
-func (c HTTPConnectors) call(ctx context.Context, method, path string, body, out any) error {
+func (c HTTPConnectors) call(ctx context.Context, method, path string, body, out any) (err error) {
 	var reader io.Reader
 	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
+		encoded, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			return marshalErr
 		}
-		reader = bytes.NewReader(data)
+		reader = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reader)
 	if err != nil {
@@ -194,7 +194,7 @@ func (c HTTPConnectors) call(ctx context.Context, method, path string, body, out
 	if err != nil {
 		return fmt.Errorf("the connector service is not reachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return err
@@ -225,36 +225,43 @@ func podPath(pod, rest string) string {
 	return "/api/devpods/" + url.PathEscape(pod) + rest
 }
 
-func (c HTTPConnectors) CreatePod(ctx context.Context, req CreatePod) (CreatedPod, error) {
+// CreatePod asks the connector service for a dev pod and waits until it is cloned and set up.
+func (c HTTPConnectors) CreatePod(ctx context.Context, req *CreatePod) (CreatedPod, error) {
 	var out CreatedPod
 	err := c.call(ctx, http.MethodPost, "/api/devpods", req, &out)
 	return out, err
 }
 
+// Hold keeps the dev pod alive for the run.
 func (c HTTPConnectors) Hold(ctx context.Context, pod, run string) error {
 	return c.call(ctx, http.MethodPost, podPath(pod, "/hold"), map[string]string{"run": run}, nil)
 }
 
+// Release tells the connector service that the run no longer needs the dev pod.
 func (c HTTPConnectors) Release(ctx context.Context, pod, run string) error {
 	return c.call(ctx, http.MethodPost, podPath(pod, "/release"), map[string]string{"run": run}, nil)
 }
 
+// Exec runs one command in the dev pod.
 func (c HTTPConnectors) Exec(ctx context.Context, pod string, req PodExec) (PodExecResult, error) {
 	var out PodExecResult
 	err := c.call(ctx, http.MethodPost, podPath(pod, "/exec"), req, &out)
 	return out, err
 }
 
+// DeletePod deletes the dev pod.
 func (c HTTPConnectors) DeletePod(ctx context.Context, pod string) error {
 	return c.call(ctx, http.MethodDelete, podPath(pod, ""), nil, nil)
 }
 
+// PublishRequests lists the publish requests the agents of the run made in the dev pod.
 func (c HTTPConnectors) PublishRequests(ctx context.Context, pod, run string) ([]PublishRequest, error) {
 	var out []PublishRequest
 	err := c.call(ctx, http.MethodGet, podPath(pod, "/publish-requests?run="+url.QueryEscape(run)), nil, &out)
 	return out, err
 }
 
+// DecidePublish sends a person's decision about the n-th publish request of the dev pod.
 func (c HTTPConnectors) DecidePublish(ctx context.Context, pod string, n int, d PublishDecision) error {
 	return c.call(ctx, http.MethodPost, podPath(pod, fmt.Sprintf("/publish-requests/%d/decision", n)), d, nil)
 }
@@ -269,7 +276,7 @@ func WorkBranchName(template, run string) string {
 }
 
 // CommandTimeout is the time a command step lets its command run.
-func (s Step) CommandTimeout() time.Duration {
+func (s *Step) CommandTimeout() time.Duration {
 	if d, err := time.ParseDuration(s.Timeout); err == nil && d > 0 {
 		return d
 	}
@@ -305,9 +312,9 @@ type CreateDevPodRequest struct {
 	WorkBranch   string   `json:"work_branch"`
 	Name         string   `json:"name,omitempty"`
 	Protected    []string `json:"protected,omitempty"`
-	Rules        []Rule   `json:"rules,omitempty"`
 	Artifact     string   `json:"artifact"`
 	Metadata     string   `json:"metadata"`
+	Rules        []Rule   `json:"rules,omitempty"`
 }
 
 // DevPodResult is the artifact of a devpod step and the pod it created.
@@ -319,16 +326,17 @@ type DevPodResult struct {
 // CreateDevPod asks the connector service for the dev pod, waits until it is cloned and set
 // up, holds it for the run, stores the step's output document, and records the pod in the
 // run's metadata.
-func (a *Activities) CreateDevPod(ctx context.Context, req CreateDevPodRequest) (DevPodResult, error) {
+func (a *Activities) CreateDevPod(ctx context.Context, req *CreateDevPodRequest) (DevPodResult, error) {
 	c, err := a.connectors()
 	if err != nil {
 		return DevPodResult{}, err
 	}
 	if req.WorkBranch == req.SourceBranch {
 		return DevPodResult{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("the work branch %q must differ from the source branch", req.WorkBranch), "InvalidWorkBranch", nil)
+			fmt.Sprintf("the work branch %q must differ from the source branch", req.WorkBranch), "InvalidWorkBranch", nil,
+		)
 	}
-	created, err := c.CreatePod(ctx, CreatePod{
+	created, err := c.CreatePod(ctx, &CreatePod{
 		Repository: req.Repository, SourceBranch: req.SourceBranch, WorkBranch: req.WorkBranch, Name: req.Name,
 		Run: req.TraceID, Protected: req.Protected, Rules: req.Rules,
 	})
@@ -343,7 +351,7 @@ func (a *Activities) CreateDevPod(ctx context.Context, req CreateDevPodRequest) 
 	}
 	if created.StartCommit == "" {
 		// An answer without the commit: ask the pod where its work branch stands.
-		if head, err := c.Exec(ctx, created.ID, PodExec{Command: "git rev-parse HEAD", TimeoutSeconds: 30}); err == nil && head.ExitCode == 0 {
+		if head, execErr := c.Exec(ctx, created.ID, PodExec{Command: "git rev-parse HEAD", TimeoutSeconds: 30}); execErr == nil && head.ExitCode == 0 {
 			created.StartCommit = strings.TrimSpace(head.Stdout)
 		}
 	}
@@ -353,10 +361,12 @@ func (a *Activities) CreateDevPod(ctx context.Context, req CreateDevPodRequest) 
 		Pod: pod.ID, Repository: pod.Repository, SourceBranch: pod.SourceBranch, WorkBranch: pod.WorkBranch,
 		StartCommit: created.StartCommit, Reused: created.Reused,
 	}
-	if err = a.putJSON(ctx, req.Artifact, out, meta); err != nil {
+	err = a.putJSON(ctx, req.Artifact, out, meta)
+	if err != nil {
 		return DevPodResult{}, err
 	}
-	if err = a.setMetadata(ctx, req.Metadata, "dev_pod", pod, meta); err != nil {
+	err = a.setMetadata(ctx, req.Metadata, "dev_pod", pod, meta)
+	if err != nil {
 		return DevPodResult{}, err
 	}
 	return DevPodResult{Artifact: req.Artifact, Pod: pod}, nil
@@ -397,34 +407,37 @@ type CommandRequest struct {
 	Step           string `json:"step"`
 	Pod            string `json:"pod"`
 	Command        string `json:"command"`
+	Artifact       string `json:"artifact"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	AllowFailure   bool   `json:"allow_failure,omitempty"`
-	Artifact       string `json:"artifact"`
 }
 
 // RunCommand runs the command in the dev pod and stores the command, its exit code, and its
 // output as the step's output document. An exit code other than 0 fails the step unless the
 // step allows failure; the output document is stored either way.
-func (a *Activities) RunCommand(ctx context.Context, req CommandRequest) (StepResult, error) {
+func (a *Activities) RunCommand(ctx context.Context, req *CommandRequest) (StepResult, error) {
 	c, err := a.connectors()
 	if err != nil {
 		return StepResult{}, err
 	}
 	if req.Pod == "" {
 		return StepResult{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("step %q has no dev pod to run its command in", req.Step), "NoDevPod", nil)
+			fmt.Sprintf("step %q has no dev pod to run its command in", req.Step), "NoDevPod", nil,
+		)
 	}
 	res, err := c.Exec(ctx, req.Pod, PodExec{Command: req.Command, TimeoutSeconds: req.TimeoutSeconds})
 	if err != nil {
 		return StepResult{}, connectorFailure(fmt.Errorf("running %q in dev pod %q: %w", req.Command, req.Pod, err))
 	}
 	out := CommandOutput{Command: req.Command, ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr}
-	if err = a.putJSON(ctx, req.Artifact, out, Meta{Creator: CommandService, TraceID: req.TraceID}); err != nil {
+	err = a.putJSON(ctx, req.Artifact, out, Meta{Creator: CommandService, TraceID: req.TraceID})
+	if err != nil {
 		return StepResult{}, err
 	}
 	if res.ExitCode != 0 && !req.AllowFailure {
 		return StepResult{}, temporal.NewNonRetryableApplicationError(
-			fmt.Sprintf("command %q ended with exit code %d; its output is in %s", req.Command, res.ExitCode, req.Artifact), "CommandFailed", nil)
+			fmt.Sprintf("command %q ended with exit code %d; its output is in %s", req.Command, res.ExitCode, req.Artifact), "CommandFailed", nil,
+		)
 	}
 	return StepResult{Artifact: req.Artifact}, nil
 }
@@ -450,7 +463,8 @@ func (a *Activities) StopDevPod(ctx context.Context, req StopDevPodRequest) (Ste
 		return StepResult{}, connectorFailure(fmt.Errorf("deleting dev pod %q: %w", req.Pod, err))
 	}
 	out := map[string]any{"pod": req.Pod, "stopped": true}
-	if err = a.putJSON(ctx, req.Artifact, out, Meta{Creator: sessionCreator, TraceID: req.TraceID}); err != nil {
+	err = a.putJSON(ctx, req.Artifact, out, Meta{Creator: sessionCreator, TraceID: req.TraceID})
+	if err != nil {
 		return StepResult{}, err
 	}
 	return StepResult{Artifact: req.Artifact}, nil
@@ -526,7 +540,7 @@ func PublishQuestion(r PublishRequest, pod DevPod) string {
 
 // DecidePublish stores the decision about a publish request as a decision record and sends
 // it to the connector service, which publishes on approval.
-func (a *Activities) DecidePublish(ctx context.Context, rec DecisionRecord) (StepResult, error) {
+func (a *Activities) DecidePublish(ctx context.Context, rec *DecisionRecord) (StepResult, error) {
 	c, err := a.connectors()
 	if err != nil {
 		return StepResult{}, err
@@ -588,8 +602,8 @@ func roundID(id, base string, round int) (string, bool) {
 // the next run replaces them.
 type KeptStep struct {
 	Base  string   `json:"base"`
-	Round int      `json:"round"`
 	Keep  []string `json:"keep,omitempty"`
+	Round int      `json:"round"`
 }
 
 // KeepRoundsRequest lists the steps of a run whose results are kept before they run again.
@@ -639,7 +653,7 @@ func (a *Activities) KeepRounds(ctx context.Context, req KeepRoundsRequest) erro
 			}
 			meta := Meta{Creator: sessionCreator, TraceID: req.TraceID}
 			if creators != nil {
-				if creator, err := creators.Creator(ctx, id); err == nil && creator != "" {
+				if creator, creatorErr := creators.Creator(ctx, id); creatorErr == nil && creator != "" {
 					meta.Creator = creator
 				}
 			}

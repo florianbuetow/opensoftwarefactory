@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math"
 	"net/http"
@@ -47,6 +48,8 @@ import (
 const (
 	maxBodyBytes              = 16 << 20
 	retiredSkillVersionPrefix = ".retired-"
+	// latestVersion is the version name that resolves to the newest stored version.
+	latestVersion = "latest"
 )
 
 // segmentPattern matches one segment of a name; a name is up to maxDepth segments.
@@ -62,7 +65,7 @@ func validName(name string) bool {
 		return false
 	}
 	for _, p := range parts {
-		if !segmentPattern.MatchString(p) || p == "latest" {
+		if !segmentPattern.MatchString(p) || p == latestVersion {
 			return false
 		}
 		if _, ok := versionNumber(p); ok {
@@ -145,22 +148,22 @@ func tracedHTTPClient() *http.Client {
 }
 
 type registry struct {
-	prefix      string
-	files       []string
-	openFiles   bool
-	blobs       blobClient
-	policiesURL string
-	skillsURL   string
 	http        *http.Client
 	logger      *slog.Logger
+	blobs       blobClient
+	prefix      string
+	policiesURL string
+	skillsURL   string
+	files       []string
 	mu          sync.RWMutex // serializes version allocation and publication
+	openFiles   bool
 }
 
 // Entry summarizes one named entry and its versions.
 type Entry struct {
 	Name     string   `json:"name"`
-	Versions []string `json:"versions"`
 	Latest   string   `json:"latest"`
+	Versions []string `json:"versions"`
 }
 
 // Version describes one stored version.
@@ -175,8 +178,8 @@ type Content struct {
 	Name    string                     `json:"name"`
 	Version string                     `json:"version"`
 	Created time.Time                  `json:"created"`
-	Creator string                     `json:"creator,omitempty"`
 	Files   map[string]json.RawMessage `json:"files"`
+	Creator string                     `json:"creator,omitempty"`
 }
 
 func (r *registry) routes() http.Handler {
@@ -201,7 +204,7 @@ func (r *registry) getPath(w http.ResponseWriter, req *http.Request) {
 	path := strings.Trim(req.PathValue("path"), "/")
 	if i := strings.LastIndexByte(path, '/'); i > 0 {
 		last := path[i+1:]
-		if _, ok := versionNumber(last); ok || last == "latest" {
+		if _, ok := versionNumber(last); ok || last == latestVersion {
 			r.getVersion(w, req, path[:i], last)
 			return
 		}
@@ -339,7 +342,7 @@ func (r *registry) getVersion(w http.ResponseWriter, req *http.Request, name, ve
 		writeError(w, http.StatusBadRequest, badName)
 		return
 	}
-	if version == "latest" {
+	if version == latestVersion {
 		versions, err := r.versions(req.Context(), name)
 		if err != nil {
 			r.fail(w, err)
@@ -391,36 +394,36 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if r.openFiles {
-		if err := validateSkillFiles(name, files); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		if skillErr := validateSkillFiles(name, files); skillErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, skillErr.Error())
 			return
 		}
 	}
 	if r.prefix == "agents" {
-		if err := validateModelSettings(files["agent.json"]); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		if settingsErr := validateModelSettings(files["agent.json"]); settingsErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, settingsErr.Error())
 			return
 		}
-		if err := validateUnpackInputs(files["agent.json"]); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		if unpackErr := validateUnpackInputs(files["agent.json"]); unpackErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, unpackErr.Error())
 			return
 		}
-		if err := validateOutputContract(files["agent.json"]); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, err.Error())
+		if contractErr := validateOutputContract(files["agent.json"]); contractErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, contractErr.Error())
 			return
 		}
-		if err := r.validateSkillReferences(req.Context(), files["agent.json"]); err != nil {
+		if skillsErr := r.validateSkillReferences(req.Context(), files["agent.json"]); skillsErr != nil {
 			var statusErr *skillValidationError
-			if errors.As(err, &statusErr) {
+			if errors.As(skillsErr, &statusErr) {
 				writeError(w, statusErr.status, statusErr.Error())
 			} else {
 				writeError(w, http.StatusBadGateway, "cannot validate skills")
 			}
 			return
 		}
-		if err := r.validatePolicyReferences(req.Context(), string(files["systemprompt.md"])); err != nil {
+		if policiesErr := r.validatePolicyReferences(req.Context(), string(files["systemprompt.md"])); policiesErr != nil {
 			var statusErr *policyValidationError
-			if errors.As(err, &statusErr) {
+			if errors.As(policiesErr, &statusErr) {
 				writeError(w, statusErr.status, statusErr.Error())
 			} else {
 				writeError(w, http.StatusBadGateway, "cannot validate required policies")
@@ -440,10 +443,12 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if len(versions) == 0 {
-		if conflict, err := r.folderConflict(req.Context(), name); err != nil {
-			r.fail(w, err)
+		conflict, conflictErr := r.folderConflict(req.Context(), name)
+		if conflictErr != nil {
+			r.fail(w, conflictErr)
 			return
-		} else if conflict != "" {
+		}
+		if conflict != "" {
 			writeError(w, http.StatusConflict, conflict)
 			return
 		}
@@ -453,9 +458,9 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 		last, _ = versionNumber(versions[len(versions)-1].Version)
 	}
 	if r.openFiles {
-		l, err := r.blobs.list(req.Context(), r.prefix+"/"+name)
-		if err != nil && !errors.Is(err, errNotFound) {
-			r.fail(w, err)
+		l, listErr := r.blobs.list(req.Context(), r.prefix+"/"+name)
+		if listErr != nil && !errors.Is(listErr, errNotFound) {
+			r.fail(w, listErr)
 			return
 		}
 		for _, object := range l.Objects {
@@ -524,15 +529,15 @@ func validateUnpackInputs(agentJSON []byte) error {
 }
 
 type policyValidationError struct {
-	status int
 	text   string
+	status int
 }
 
 func (e *policyValidationError) Error() string { return e.text }
 
 type skillValidationError struct {
-	status int
 	text   string
+	status int
 }
 
 func (e *skillValidationError) Error() string { return e.text }
@@ -579,7 +584,7 @@ func (r *registry) validateSkillReferences(ctx context.Context, agentJSON []byte
 		}
 		endpoint := r.skillsURL + "/skills/" + strings.Join(parts, "/") + "/" + version
 		fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, http.NoBody)
 		if err != nil {
 			cancel()
 			return err
@@ -619,7 +624,7 @@ func (r *registry) validatePolicyReferences(ctx context.Context, prompt string) 
 		}
 		endpoint := r.policiesURL + "/policies/" + strings.Join(parts, "/") + "/latest"
 		fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, http.NoBody)
 		if err != nil {
 			cancel()
 			return err
@@ -1046,46 +1051,52 @@ func (r *registry) seedDir(ctx context.Context, dir, name string) error {
 	return nil
 }
 
-func (r *registry) seedVersion(ctx context.Context, dir, name, version string) error {
+func (r *registry) seedVersion(ctx context.Context, dir, name, version string) (err error) {
 	if r.openFiles {
-		if _, _, err := r.blobs.get(ctx, r.retiredSkillVersionID(name, version)); err == nil {
+		_, _, retiredErr := r.blobs.get(ctx, r.retiredSkillVersionID(name, version))
+		if retiredErr == nil {
 			return nil
-		} else if !errors.Is(err, errNotFound) {
-			return err
+		}
+		if !errors.Is(retiredErr, errNotFound) {
+			return retiredErr
 		}
 	}
 	id := r.prefix + "/" + name + "/" + version
-	if listing, err := r.blobs.list(ctx, id); err == nil {
+	stored, listErr := r.blobs.list(ctx, id)
+	if listErr != nil && !errors.Is(listErr, errNotFound) {
+		return listErr
+	}
+	if listErr == nil {
 		if !r.openFiles {
 			return nil // already stored
 		}
-		for _, object := range listing.Objects {
+		for _, object := range stored.Objects {
 			if object.ID == id+"/"+r.files[0] {
 				return nil
 			}
 		}
-	} else if !errors.Is(err, errNotFound) {
-		return err
 	}
+	// The files are read through a root, so a seed version cannot name a file outside its directory.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("seed %s/%s: %w", name, version, err)
+	}
+	defer func() { err = closeAfter(err, root) }()
+	seedFiles := root.FS()
 	files := map[string][]byte{}
-	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+	err = fs.WalkDir(seedFiles, ".", func(relative string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
 			return nil
 		}
-		relative, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		relative = filepath.ToSlash(relative)
 		if !r.openFiles && !slicesContains(r.files, relative) {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
+		data, readErr := fs.ReadFile(seedFiles, relative)
+		if readErr != nil {
+			return readErr
 		}
 		files[relative] = data
 		return nil
@@ -1099,17 +1110,17 @@ func (r *registry) seedVersion(ctx context.Context, dir, name, version string) e
 		}
 	}
 	if r.openFiles {
-		if err := validateSkillFiles(name, files); err != nil {
-			return fmt.Errorf("seed %s/%s: %w", name, version, err)
+		if skillErr := validateSkillFiles(name, files); skillErr != nil {
+			return fmt.Errorf("seed %s/%s: %w", name, version, skillErr)
 		}
 	}
 	if r.prefix == "agents" {
-		if err := validateOutputContract(files["agent.json"]); err != nil {
-			return fmt.Errorf("seed %s/%s: %w", name, version, err)
+		if contractErr := validateOutputContract(files["agent.json"]); contractErr != nil {
+			return fmt.Errorf("seed %s/%s: %w", name, version, contractErr)
 		}
 	}
-	if err := r.write(ctx, name, version, files, "seed"); err != nil {
-		return err
+	if writeErr := r.write(ctx, name, version, files, "seed"); writeErr != nil {
+		return writeErr
 	}
 	r.logger.Info("seeded", "prefix", r.prefix, "name", name, "version", version)
 	return nil
@@ -1160,8 +1171,8 @@ func env(key, fallback string) string {
 
 // blobClient talks to the blobstore service.
 type blobClient struct {
-	base   string
 	client *http.Client
+	base   string
 }
 
 var errNotFound = errors.New("not found")
@@ -1169,10 +1180,10 @@ var errNotFound = errors.New("not found")
 // objectMeta mirrors the blobstore's metadata record.
 type objectMeta struct {
 	ID      string    `json:"id"`
-	Size    int64     `json:"size"`
 	Created time.Time `json:"created"`
 	Creator string    `json:"creator,omitempty"`
 	TraceID string    `json:"trace_id,omitempty"`
+	Size    int64     `json:"size"`
 }
 
 type listing struct {
@@ -1211,7 +1222,7 @@ func (b blobClient) put(ctx context.Context, id string, data []byte, creator str
 	return b.do(ctx, http.MethodPut, "/blobs/"+id, data, creator, func(*http.Response) error { return nil })
 }
 
-func (b blobClient) do(ctx context.Context, method, path string, body []byte, creator string, read func(*http.Response) error) error {
+func (b blobClient) do(ctx context.Context, method, path string, body []byte, creator string, read func(*http.Response) error) (err error) {
 	req, err := http.NewRequestWithContext(ctx, method, b.base+path, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -1223,7 +1234,7 @@ func (b blobClient) do(ctx context.Context, method, path string, body []byte, cr
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode == http.StatusNotFound {
 		return errNotFound
 	}
@@ -1231,4 +1242,12 @@ func (b blobClient) do(ctx context.Context, method, path string, body []byte, cr
 		return fmt.Errorf("%s %s: %s", method, path, resp.Status)
 	}
 	return read(resp)
+}
+
+// closeAfter closes c and adds a failed Close to the error the caller returns.
+func closeAfter(err error, c io.Closer) error {
+	if closeErr := c.Close(); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return err
 }

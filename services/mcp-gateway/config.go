@@ -8,13 +8,16 @@ import (
 	"strings"
 )
 
+// Connection is the content of mcpconfig.json: how the gateway reaches one MCP server.
 type Connection struct {
 	Transport string            `json:"transport"`
 	URL       string            `json:"url,omitempty"`
 	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+	Args      []string          `json:"args,omitempty"`
 }
+
+// Config is one MCP service: its connection and the two lists that decide which tools run.
 type Config struct {
 	MCPConfig Connection `json:"mcpconfig"`
 	Allowlist []string   `json:"allowlist"`
@@ -30,7 +33,7 @@ func validateName(name string) error {
 	return nil
 }
 
-func (c Config) validate() error {
+func (c *Config) validate() error {
 	switch c.MCPConfig.Transport {
 	case "streamable-http":
 		u, err := url.Parse(c.MCPConfig.URL)
@@ -70,7 +73,7 @@ func (c Config) validate() error {
 	return nil
 }
 
-func (c Config) allowed(name string) bool {
+func (c *Config) allowed(name string) bool {
 	for _, n := range c.Denylist {
 		if n == name {
 			return false
@@ -99,5 +102,6 @@ func decodeConfig(data []byte) (Config, error) {
 		return c, err
 	}
 	c.normalize()
-	return c, c.validate()
+	err := c.validate()
+	return c, err
 }

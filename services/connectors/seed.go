@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -18,7 +19,8 @@ type repositorySeeds struct {
 // readRepositorySeeds reads optional repository records mounted outside the service image.
 // A missing file means the service starts with no seed data.
 func readRepositorySeeds(path string) ([]repository, error) {
-	data, err := os.ReadFile(path)
+	seedFile := filepath.Clean(path)
+	data, err := os.ReadFile(seedFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -28,7 +30,8 @@ func readRepositorySeeds(path string) ([]repository, error) {
 	var raw repositorySeeds
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
-	if err = d.Decode(&raw); err != nil {
+	err = d.Decode(&raw)
+	if err != nil {
 		return nil, err
 	}
 	if err = d.Decode(&struct{}{}); err != io.EOF {
@@ -87,7 +90,8 @@ func (s *service) seedRepositories(ctx context.Context, repositories []repositor
 		if !errors.Is(err, errNotFound) {
 			return err
 		}
-		if err = s.blobs.putJSON(ctx, repositoryObject(repo.Name), repo, "connectors", ""); err != nil {
+		err = s.blobs.putJSON(ctx, repositoryObject(repo.Name), repo, "connectors", "")
+		if err != nil {
 			return err
 		}
 		s.log.Info("added a seeded repository", "repository", repo.Name, "url", repo.URL)

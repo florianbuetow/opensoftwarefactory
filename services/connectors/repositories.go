@@ -10,7 +10,18 @@ import (
 	"strings"
 )
 
-const repositoryPrefix = "connectors/git"
+const (
+	repositoryPrefix = "connectors/git"
+
+	// The kinds of a repository.
+	kindPlain  = "plain"
+	kindGitHub = "github"
+
+	// What the credential of a repository may do.
+	credentialNone      = "none"
+	credentialRead      = "read"
+	credentialReadWrite = "read-write"
+)
 
 // repository is a Git repository agents may work on, as stored in the blob store. Its token
 // is never part of it: the token lives in a Kubernetes Secret only.
@@ -20,9 +31,9 @@ type repository struct {
 	URL            string `json:"url"`
 	DefaultBranch  string `json:"default_branch"`
 	SetupCommand   string `json:"setup_command"`
+	Credential     string `json:"credential"`
 	IdleMinutes    int    `json:"idle_minutes"`
 	ApprovePublish bool   `json:"approve_publish"`
-	Credential     string `json:"credential"`
 }
 
 // repositoryInput is the body of a PUT. Missing fields take their defaults.
@@ -33,8 +44,8 @@ type repositoryInput struct {
 	SetupCommand   string  `json:"setup_command"`
 	IdleMinutes    *int    `json:"idle_minutes"`
 	ApprovePublish *bool   `json:"approve_publish"`
-	Credential     string  `json:"credential"`
 	Token          *string `json:"token"`
+	Credential     string  `json:"credential"`
 }
 
 // A repository name is also part of the name of its Secret, so it follows those rules.
@@ -115,7 +126,7 @@ func (s *service) putRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case repo.Credential == "none":
+	case repo.Credential == credentialNone:
 		// Without a credential no token may stay behind.
 		if err = s.kube.DeleteSecret(r.Context(), credentialSecret(name)); err != nil {
 			s.fail(w, 502, err)
@@ -127,7 +138,7 @@ func (s *service) putRepository(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, 502, err)
 			return
 		}
-	case !exists || old.Credential == "none":
+	case !exists || old.Credential == credentialNone:
 		s.fail(w, 400, errors.New(`credential "`+repo.Credential+`" needs a token: send it as "token"`))
 		return
 	}
@@ -139,7 +150,7 @@ func (s *service) putRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 // repository checks the input and fills in the defaults.
-func (in repositoryInput) repository(name string, hasToken bool) (repository, error) {
+func (in *repositoryInput) repository(name string, hasToken bool) (repository, error) {
 	repo := repository{
 		Name: name, Kind: in.Kind, URL: strings.TrimSpace(in.URL), DefaultBranch: strings.TrimSpace(in.DefaultBranch),
 		SetupCommand: in.SetupCommand, IdleMinutes: 30, Credential: in.Credential,
@@ -151,15 +162,15 @@ func (in repositoryInput) repository(name string, hasToken bool) (repository, er
 		return repo, err
 	}
 	if repo.Kind == "" {
-		repo.Kind = "plain"
+		repo.Kind = kindPlain
 		if host, _, _ := repositoryHost(repo.URL); host == "github.com" {
-			repo.Kind = "github"
+			repo.Kind = kindGitHub
 		}
 	}
-	if repo.Kind != "github" && repo.Kind != "plain" {
+	if repo.Kind != kindGitHub && repo.Kind != kindPlain {
 		return repo, errors.New(`kind must be "github" or "plain"`)
 	}
-	if repo.Kind == "github" {
+	if repo.Kind == kindGitHub {
 		if _, _, err := githubRepository(repo.URL); err != nil {
 			return repo, err
 		}
@@ -173,17 +184,17 @@ func (in repositoryInput) repository(name string, hasToken bool) (repository, er
 	if repo.IdleMinutes < 1 {
 		return repo, errors.New("idle_minutes must be 1 or more")
 	}
-	repo.ApprovePublish = repo.Kind == "github"
+	repo.ApprovePublish = repo.Kind == kindGitHub
 	if in.ApprovePublish != nil {
 		repo.ApprovePublish = *in.ApprovePublish
 	}
 	if repo.Credential == "" {
-		repo.Credential = "none"
+		repo.Credential = credentialNone
 		if hasToken {
-			repo.Credential = "read"
+			repo.Credential = credentialRead
 		}
 	}
-	if repo.Credential != "none" && repo.Credential != "read" && repo.Credential != "read-write" {
+	if repo.Credential != credentialNone && repo.Credential != credentialRead && repo.Credential != credentialReadWrite {
 		return repo, errors.New(`credential must be "none", "read" or "read-write"`)
 	}
 	return repo, nil
@@ -222,7 +233,7 @@ func (s *service) deleteRepository(w http.ResponseWriter, r *http.Request) {
 
 // repositoryHost returns the host and port a repository URL points at. It reads http, https
 // and ssh URLs and the short form git@host:path.
-func repositoryHost(raw string) (host string, port string, err error) {
+func repositoryHost(raw string) (host, port string, err error) {
 	if !strings.Contains(raw, "://") {
 		if at := strings.Index(raw, "@"); at >= 0 {
 			if h, _, ok := strings.Cut(raw[at+1:], ":"); ok && h != "" {
@@ -252,7 +263,7 @@ func repositoryHost(raw string) (host string, port string, err error) {
 }
 
 // githubRepository returns the owner and the name of a GitHub repository URL.
-func githubRepository(raw string) (owner string, name string, err error) {
+func githubRepository(raw string) (owner, name string, err error) {
 	path := raw
 	if strings.Contains(raw, "://") {
 		u, perr := url.Parse(raw)
