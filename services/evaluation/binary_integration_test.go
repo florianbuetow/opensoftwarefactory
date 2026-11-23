@@ -25,7 +25,7 @@ func TestBinaryMeasurementJourney(t *testing.T) {
 	runBuild(t, ".", evaluationBin)
 	blobAddr := freeAddress(t)
 	evaluationAddr := freeAddress(t)
-	blob := exec.Command(blobBin, "-data", filepath.Join(tmp, "blob-data"), "-addr", blobAddr)
+	blob := exec.Command(blobBin, "-data", filepath.Join(tmp, "blob-data"), "-addr", blobAddr) //nolint:gosec // permitted: the test starts the binary it has just built
 	blob.Env = os.Environ()
 	if err := blob.Start(); err != nil {
 		t.Fatal(err)
@@ -42,7 +42,7 @@ func TestBinaryMeasurementJourney(t *testing.T) {
 	if err := os.WriteFile(config, []byte("ZO_ROOT_USER_EMAIL=test@example.com\nZO_ROOT_USER_PASSWORD=secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	evaluation := exec.Command(evaluationBin)
+	evaluation := exec.Command(evaluationBin) //nolint:gosec // permitted: the test starts the binary it has just built
 	evaluation.Env = append(os.Environ(), "EVALUATION_ADDR="+evaluationAddr, "BLOBSTORE_URL=http://"+blobAddr, "ORCHESTRATOR_URL="+orchestrator.URL, "OPENOBSERVE_URL="+openobserve.URL, "OPENOBSERVE_CONFIG="+config, "EVALUATION_LOCK_PATH="+filepath.Join(tmp, "writer.lock"), "EVALUATION_PROJECTION_STREAM=factory_measurements_test_binary")
 	if err := evaluation.Start(); err != nil {
 		t.Fatal(err)

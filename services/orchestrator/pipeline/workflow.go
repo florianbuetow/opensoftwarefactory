@@ -75,16 +75,12 @@ type Step struct {
 	// Agents are its other agent members. Workflows names pinned versions, such as docs@v1.
 	Workflows []string   `yaml:"workflows,omitempty" json:"workflows,omitempty"`
 	Channels  [][]string `yaml:"channels,omitempty" json:"channels,omitempty"`
-	MaxTurns  int        `yaml:"max_turns,omitempty" json:"max_turns,omitempty"`
 	// MemberPositions keeps where the editor shows the members of a team step, by member name:
 	// x in percent of the panel width, y in pixels. It has no effect on a run.
 	MemberPositions map[string]Point `yaml:"member_positions,omitempty" json:"member_positions,omitempty"`
 	// OnReject names the agent, interactive, team, or workflow step a gate sends its
 	// rejections back to; that step and the steps between it and the gate then run again.
-	// MaxRejections is the number of rejections the gate sends back, DefaultMaxRejections
-	// when it is 0; a rejection beyond it ends the run.
-	OnReject      string `yaml:"on_reject,omitempty" json:"on_reject,omitempty"`
-	MaxRejections int    `yaml:"max_rejections,omitempty" json:"max_rejections,omitempty"`
+	OnReject string `yaml:"on_reject,omitempty" json:"on_reject,omitempty"`
 	// Repository, SourceBranch, WorkBranch, Name, Protected, and Rules configure a devpod
 	// step. The work branch may hold {run}, the first eight characters of the run ID. A name
 	// reuses the live pod of the same repository and name. The agents cannot change the
@@ -97,17 +93,21 @@ type Step struct {
 	Rules        []Rule   `yaml:"rules,omitempty" json:"rules,omitempty"`
 	// Command and AllowFailure configure a command step: the command it runs in the run's
 	// dev pod, and whether an exit code other than 0 lets the run go on.
-	Command      string   `yaml:"command,omitempty" json:"command,omitempty"`
-	AllowFailure bool     `yaml:"allow_failure,omitempty" json:"allow_failure,omitempty"`
-	DependsOn    []string `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
-	Timeout      string   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	MaxAttempts  int32    `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	Command   string   `yaml:"command,omitempty" json:"command,omitempty"`
+	Timeout   string   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Position  *Point   `yaml:"position,omitempty" json:"position,omitempty"`
+	DependsOn []string `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
+	MaxTurns  int      `yaml:"max_turns,omitempty" json:"max_turns,omitempty"`
+	// MaxRejections is the number of rejections a gate with on_reject sends back,
+	// DefaultMaxRejections when it is 0; a rejection beyond it ends the run.
+	MaxRejections int `yaml:"max_rejections,omitempty" json:"max_rejections,omitempty"`
 	// Capacity, Size, and InputTimeout configure merge and batch steps: the waiting entries a
 	// merge may hold, the items a batch collects, and the seconds either waits for input.
-	Capacity     int    `yaml:"capacity,omitempty" json:"capacity,omitempty"`
-	Size         int    `yaml:"size,omitempty" json:"size,omitempty"`
-	InputTimeout int    `yaml:"input_timeout,omitempty" json:"input_timeout,omitempty"`
-	Position     *Point `yaml:"position,omitempty" json:"position,omitempty"`
+	Capacity     int   `yaml:"capacity,omitempty" json:"capacity,omitempty"`
+	Size         int   `yaml:"size,omitempty" json:"size,omitempty"`
+	InputTimeout int   `yaml:"input_timeout,omitempty" json:"input_timeout,omitempty"`
+	MaxAttempts  int32 `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	AllowFailure bool  `yaml:"allow_failure,omitempty" json:"allow_failure,omitempty"`
 }
 
 // Point is a step's position in the graphical editor.
@@ -121,12 +121,12 @@ type Point struct {
 // descriptive text can be edited in place without creating a new version.
 type Definition struct {
 	Name        string `yaml:"name" json:"name"`
-	Version     int    `yaml:"version,omitempty" json:"version"`
 	Description string `yaml:"description,omitempty" json:"description,omitempty"`
 	// Created is the RFC 3339 time the version was stored.
 	Created   string `yaml:"created,omitempty" json:"created,omitempty"`
 	CreatedBy string `yaml:"created_by,omitempty" json:"created_by,omitempty"`
 	Steps     []Step `yaml:"steps" json:"steps"`
+	Version   int    `yaml:"version,omitempty" json:"version"`
 }
 
 // Input starts a pipeline run. The definition is a snapshot so later
@@ -138,10 +138,10 @@ type Input struct {
 	TraceID string `json:"trace_id"`
 	// ExecutionID and ParentExecutionID distinguish this Temporal execution from the
 	// business run and its nested executions. Temporal fills ExecutionID for intake runs.
-	ExecutionID       string     `json:"execution_id,omitempty"`
-	ParentExecutionID string     `json:"parent_execution_id,omitempty"`
-	Definition        Definition `json:"definition"`
-	Prefix            string     `json:"prefix,omitempty"`
+	ExecutionID       string `json:"execution_id,omitempty"`
+	ParentExecutionID string `json:"parent_execution_id,omitempty"`
+	Inputs            []Item `json:"inputs"`
+	Prefix            string `json:"prefix,omitempty"`
 	// Run changes whenever the step that started this run runs again after a rejection, so
 	// the teams inside can tell that from a retry.
 	Run string `json:"run,omitempty"`
@@ -150,8 +150,8 @@ type Input struct {
 	DevPod *DevPod `json:"dev_pod,omitempty"`
 	// Intake is set only for automatically accepted factory events. Manual and legacy
 	// inputs leave it nil and replay the original command path.
-	Intake *IntakeInput `json:"intake,omitempty"`
-	Inputs []Item       `json:"inputs"`
+	Intake     *IntakeInput `json:"intake,omitempty"`
+	Definition Definition   `json:"definition"`
 	// Depth counts the workflow steps and team members above this run; a top-level run has 0.
 	Depth int `json:"depth,omitempty"`
 	// ResolveAgentSettings is set by new parent workflows for nested team workflows. An
@@ -240,19 +240,19 @@ const (
 type PendingGate struct {
 	Step     string `json:"step"`
 	Question string `json:"question,omitempty"`
-	Inputs   []Item `json:"inputs"`
 	Artifact string `json:"artifact"`
-	// OnReject is the step a rejection goes back to, empty for a plain gate. Round is 1
-	// for the first review and grows with every rejection sent back.
+	// OnReject is the step a rejection goes back to, empty for a plain gate.
 	OnReject string `json:"on_reject"`
-	Round    int    `json:"round"`
+	// Publish is set for a decision about a publish request of a dev pod instead of a gate
+	// step: Step is then "<step>.publish-<n>", and a rejection does not end the run.
+	Publish *PublishInfo `json:"publish,omitempty"`
+	Inputs  []Item       `json:"inputs"`
+	// Round is 1 for the first review and grows with every rejection sent back.
+	Round int `json:"round"`
 	// Pass is the pass of a gate that runs after a merge or batch.
 	Pass int `json:"pass,omitempty"`
 	// MaxRejections is the number of rejections a gate with on_reject sends back.
 	MaxRejections int `json:"max_rejections,omitempty"`
-	// Publish is set for a decision about a publish request of a dev pod instead of a gate
-	// step: Step is then "<step>.publish-<n>", and a rejection does not end the run.
-	Publish *PublishInfo `json:"publish,omitempty"`
 }
 
 // PendingSession describes an interactive step whose chat session waits to be completed.
@@ -262,18 +262,18 @@ type PendingSession struct {
 	Step     string   `json:"step"`
 	Agent    string   `json:"agent"`
 	Agents   []string `json:"agents"`
-	Inputs   []Item   `json:"inputs"`
 	Artifact string   `json:"artifact"`
 	Session  string   `json:"session"`
-	// Pass is the pass of a session that runs after a merge or batch.
-	Pass int `json:"pass,omitempty"`
 	// DevPod is the ID of the run's dev pod, left out when the session works without one.
-	DevPod                    string            `json:"dev_pod,omitempty"`
-	Skills                    map[string]string `json:"skills,omitempty"`
-	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+	DevPod string            `json:"dev_pod,omitempty"`
+	Skills map[string]string `json:"skills,omitempty"`
 	// AgentSettings maps every selectable pinned agent to the skills and timeout sent with
 	// that agent's chat requests.
 	AgentSettings map[string]AgentExecutionSettings `json:"agent_settings,omitempty"`
+	Inputs        []Item                            `json:"inputs"`
+	// Pass is the pass of a session that runs after a merge or batch.
+	Pass                      int `json:"pass,omitempty"`
+	SkillScriptTimeoutSeconds int `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // RoundsQuery is the Temporal query that returns how often every step that ran again after

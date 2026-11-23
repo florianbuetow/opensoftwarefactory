@@ -15,9 +15,9 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 const maxBodyBytes = 64 << 20
 
@@ -67,10 +67,10 @@ const runStartObligationPrefix = "run-start-obligations"
 
 // PendingDecision is a gate step of a running workflow that waits for a person.
 type PendingDecision struct {
-	pipeline.PendingGate
 	WorkflowID string `json:"workflow_id"`
 	TraceID    string `json:"trace_id"`
 	Workflow   string `json:"workflow"`
+	pipeline.PendingGate
 }
 
 // DecisionRequest is what the UI posts to decide a pending gate.

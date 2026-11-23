@@ -158,8 +158,8 @@ type InitializeIntakeRequest struct {
 	TraceID     string      `json:"trace_id"`
 	ExecutionID string      `json:"execution_id"`
 	Prefix      string      `json:"prefix"`
-	Definition  Definition  `json:"definition"`
 	Intake      IntakeInput `json:"intake"`
+	Definition  Definition  `json:"definition"`
 }
 
 // InitializeIntakeResult tells whether this execution owns the receipt and runs the graph.
@@ -354,8 +354,8 @@ type RouteRequest struct {
 // RouteResult is the configured workflow a route step starts and the item
 // that named it, which becomes the input of the routed workflow.
 type RouteResult struct {
-	Definition Definition `json:"definition"`
 	Inputs     []Item     `json:"inputs"`
+	Definition Definition `json:"definition"`
 }
 
 // ResolveRoute reads the route field of a JSON artifact and returns the

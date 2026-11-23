@@ -179,10 +179,6 @@ help:
     @printf "\033[0;33mSetup & Lifecycle:\033[0m\n"
     @printf "  %-38s %s\n" "just init" "Initialize local configuration without overwriting it"
     @printf "  %-38s %s\n" "just sync-seeds" "Publish optional local scratch/seeds to the cluster"
-    @printf "  %-38s %s\n" "just verify-measurements" "Test isolated real measurement service processes"
-    @printf "  %-38s %s\n" "just verify-measurements-live" "Test real projection in a disposable OpenObserve stream"
-    @printf "  %-38s %s\n" "just verify-workflow-events" "Test real isolated JetStream/Temporal intake and judges"
-    @printf "  %-38s %s\n" "just verify-openobserve" "Verify replacement in a disposable telemetry stream"
     @printf "  %-38s %s\n" "just cluster-create" "Create the empty KIND cluster"
     @printf "  %-38s %s\n" "just cluster-delete" "Delete the project cluster, keeping all data"
     @printf "  %-38s %s\n" "just reset" "Delete workflows, artifacts, and run history, then re-init"
@@ -290,22 +286,6 @@ stop:
 # Publish optional ignored local seeds; no seed payload is built into an image.
 sync-seeds:
     node scripts/sync-seeds.js {{cluster}}-control-plane
-
-# Test real local services with isolated temporary data; no cluster mutation.
-verify-measurements:
-    node scripts/verify-factory-measurements.js
-
-# Exercise the actual projector against a unique disposable live OpenObserve stream.
-verify-measurements-live:
-    VERIFY_REAL_OPENOBSERVE=1 node scripts/verify-factory-measurements.js
-
-# Test actual isolated broker/workflow processes with a deterministic model fixture.
-verify-workflow-events:
-    node scripts/verify-workflow-events.js
-
-# Verify replacement only in a fresh disposable OpenObserve test stream.
-verify-openobserve:
-    node scripts/verify-openobserve.js
 
 # Recovery only with explicit authorization to interrupt all workloads on default Colima.
 _restart-shared-runtime approval:
@@ -632,6 +612,7 @@ check:
     node --check scripts/init-openobserve.js
     node --check scripts/init-orchestrator.js
     node --check scripts/sync-seeds.js
+    node --check scripts/verify-ui-live.js
     node --check scripts/init-jetstream.js
     node --check scripts/verify-factory-measurements.js
     node --check scripts/verify-workflow-events.js
@@ -644,7 +625,7 @@ check:
     node --check scripts/migrate-unpack-inputs.js
     node --check scripts/migrate-unpack-inputs.test.js
     for script in services/factory-ui/web/*.js; do node --check "$script"; done
-    node --test scripts/auxiliary-targets.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
+    node --test scripts/auxiliary-targets.test.js scripts/verify.test.js scripts/verify-ui-live.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
     kubectl kustomize infra/kubernetes/overlays/local >/dev/null
     for module in llm-gateway blobstore mcp-gateway connectors orchestrator registry evaluation agent factory-ui; do
         test -z "$(gofmt -l "services/$module")"

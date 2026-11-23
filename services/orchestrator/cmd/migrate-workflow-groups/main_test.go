@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 const legacy = `workflows:
   - name: ECC-plan

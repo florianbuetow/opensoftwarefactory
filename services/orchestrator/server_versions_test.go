@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 const (
 	// firstLeaf is the pinned reference to the first version of the workflow leaf.
@@ -243,7 +243,7 @@ func TestLoadTreatsUnversionedWorkflowsAsV1AndPinsReferences(t *testing.T) {
 		t.Fatalf("status %d", code)
 	}
 	file, _ := workflowObjects(workflows)
-	if !strings.Contains(string(file), `"workflow": "mid@v1"`) || strings.Count(string(file), `"version": 1,`) != 4 || strings.Count(string(file), `"version": 2,`) != 2 {
+	if !strings.Contains(string(file), `"workflow": "mid@v1"`) || strings.Count(string(file), "\"version\": 1\n") != 4 || strings.Count(string(file), "\"version\": 2\n") != 2 {
 		t.Fatalf("stored objects:\n%s", file)
 	}
 	if _, err = parseConfig([]byte("workflows:\n  - name: a\n    steps: [{id: a, service: s}]\n  - name: a\n    steps: [{id: a, service: s}]\n")); err == nil || !strings.Contains(err.Error(), "duplicate") {
@@ -538,7 +538,7 @@ func TestAgentRegistryReadsTheSettingsOfAnAgent(t *testing.T) {
 	}
 	// A temperature of 0 is set, so it is recorded.
 	data, _ := json.Marshal(coder)
-	if string(data) != `{"model":"first","effort":"low","temperature":0,"tools":["factory/send_message"],"max_retries":10,"skills":{"git":"v3"},"skill_script_timeout_seconds":300}` {
+	if string(data) != `{"model":"first","effort":"low","temperature":0,"skills":{"git":"v3"},"tools":["factory/send_message"],"max_retries":10,"skill_script_timeout_seconds":300}` {
 		t.Errorf("coder %s", data)
 	}
 	plain, err := agents.settings(ctx, "plain@v2")

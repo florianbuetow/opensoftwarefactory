@@ -37,8 +37,8 @@ const NodesQuery = "nodes"
 type Item struct {
 	Source   string `json:"source"`
 	Artifact string `json:"artifact"`
-	Round    int    `json:"round"`
 	Kind     string `json:"kind,omitempty"`
+	Round    int    `json:"round"`
 }
 
 // Kinds of the items a rejection adds to a step's inputs.
@@ -115,13 +115,13 @@ type node struct {
 	cancel workflow.CancelFunc
 	// queues holds, per source of a merge, the results that wait to be forwarded.
 	queues map[string][]message
-	step   Step
 	// segment lists the steps that run once per release: those reached from the node
 	// without passing another merge or batch step.
 	segment []string
 	// items holds the results a batch collected.
 	items    []Item
 	releases []Release
+	step     Step
 	seq      int
 }
 

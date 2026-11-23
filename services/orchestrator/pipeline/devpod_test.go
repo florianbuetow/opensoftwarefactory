@@ -681,9 +681,9 @@ func TestRejectionGoesBackToAnAgentStepAndTheStepsBetweenRunAgain(t *testing.T) 
 	// The added items say what they are; the normal items carry no kind.
 	added, _ := json.Marshal(builds[1].Inputs)
 	if string(added) != `[{"source":"input","artifact":"`+run+`/input","round":1},`+
-		`{"source":"review","artifact":"`+run+`/review.1","round":1,"kind":"rejection"},`+
-		`{"source":"build","artifact":"`+run+`/build.round-1","round":1,"kind":"previous"},`+
-		`{"source":"check","artifact":"`+run+`/check.round-1","round":1,"kind":"reviewed"}]` {
+		`{"source":"review","artifact":"`+run+`/review.1","kind":"rejection","round":1},`+
+		`{"source":"build","artifact":"`+run+`/build.round-1","kind":"previous","round":1},`+
+		`{"source":"check","artifact":"`+run+`/check.round-1","kind":"reviewed","round":1}]` {
 		t.Errorf("round 2 items %s", added)
 	}
 	if kinds, _ := json.Marshal(checks(agents)); strings.Contains(string(kinds), `"kind"`) {

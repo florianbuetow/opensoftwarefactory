@@ -11,15 +11,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 // workflowView is a workflow version as the API returns it: the definition and the list of
 // stored versions of that workflow.
 type workflowView struct {
-	pipeline.Definition
 	Versions []int `json:"versions"`
+	pipeline.Definition
 }
 
 func (c Config) view(d *pipeline.Definition) workflowView {

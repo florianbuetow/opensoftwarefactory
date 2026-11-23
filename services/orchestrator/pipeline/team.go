@@ -187,7 +187,7 @@ type TeamRejection struct {
 type TeamInput struct {
 	TraceID  string `json:"trace_id"`
 	Workflow string `json:"workflow"`
-	Step     Step   `json:"step"`
+	Inputs   []Item `json:"inputs"`
 	Prefix   string `json:"prefix"`
 	Artifact string `json:"artifact"`
 	Team     string `json:"team"`
@@ -197,7 +197,7 @@ type TeamInput struct {
 	// DevPod is the run's dev pod, nil when the team works without one.
 	DevPod               *DevPod      `json:"dev_pod,omitempty"`
 	Intake               *IntakeInput `json:"intake,omitempty"`
-	Inputs               []Item       `json:"inputs"`
+	Step                 Step         `json:"step"`
 	Depth                int          `json:"depth,omitempty"`
 	ResolveAgentSettings bool         `json:"resolve_agent_settings,omitempty"`
 }
@@ -640,10 +640,10 @@ func (a *Activities) ResolveWorkflow(_ context.Context, req ResolveWorkflowReque
 type OpenTeamRequest struct {
 	TraceID   string         `json:"trace_id"`
 	Team      string         `json:"team"`
-	Step      Step           `json:"step"`
+	Inputs    []Item         `json:"inputs"`
 	Run       string         `json:"run,omitempty"`
 	Rejection *TeamRejection `json:"rejection,omitempty"`
-	Inputs    []Item         `json:"inputs"`
+	Step      Step           `json:"step"`
 }
 
 // OpenTeamResult tells which run of the team this is: 1 for the first, growing with every

@@ -208,7 +208,7 @@ func mcpRequest(t *testing.T, url, method, name, cursor string, status int) []by
 func buildFixture(t *testing.T, dir, target string) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "server")
-	cmd := exec.Command("go", "build", "-o", out, target)
+	cmd := exec.Command("go", "build", "-o", out, target) //nolint:gosec // permitted: the test builds its fixture into its own temp folder
 	cmd.Dir = dir
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fixture: %v %s", err, b)

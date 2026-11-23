@@ -19,7 +19,7 @@ import (
 func integrationBuild(t *testing.T, dir, target string) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "fixture")
-	cmd := exec.Command("go", "build", "-o", out, target)
+	cmd := exec.Command("go", "build", "-o", out, target) //nolint:gosec // permitted: the test builds its fixture into its own temp folder
 	cmd.Dir = dir
 	if data, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v: %s", target, err, data)

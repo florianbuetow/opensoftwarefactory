@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 type acceptedFlakyStore struct {
 	*memStore

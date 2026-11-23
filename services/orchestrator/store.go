@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 // Workflows live in the blobstore, one object per version:
 // workflows/<name>/v<N>/workflow.json, where the name may hold groups (ecc/ECC-plan). A

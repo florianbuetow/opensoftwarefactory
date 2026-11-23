@@ -10,9 +10,9 @@ import (
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 type recalculationStarter interface {
 	StartRecalculation(context.Context, *pipeline.RecalculationInput) (string, error)

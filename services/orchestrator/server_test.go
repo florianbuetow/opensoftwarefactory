@@ -14,9 +14,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 type fakeRunner struct {
 	started  []pipeline.Input
@@ -407,7 +407,7 @@ func TestSessions(t *testing.T) {
 		AgentSettings: map[string]pipeline.AgentExecutionSettings{"triage@v1": {Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}},
 	}}}
 	code, body = call(t, http.MethodGet, srv.URL+"/api/sessions", "")
-	want := `{"sessions":[{"workflow_id":"t/route","trace_id":"t","workflow":"feature","step":"chat","agent":"triage@v1","agents":["triage@v1","plain@v2"],"inputs":[{"source":"spec","artifact":"runs/t/route/spec","round":1}],"artifact":"runs/t/route/chat","session":"user-sessions/t/route/chat"}]}`
+	want := `{"sessions":[{"workflow_id":"t/route","trace_id":"t","workflow":"feature","step":"chat","agent":"triage@v1","agents":["triage@v1","plain@v2"],"artifact":"runs/t/route/chat","session":"user-sessions/t/route/chat","inputs":[{"source":"spec","artifact":"runs/t/route/spec","round":1}]}]}`
 	if code != http.StatusOK || strings.TrimSpace(body) != want {
 		t.Fatalf("sessions %d %s", code, body)
 	}

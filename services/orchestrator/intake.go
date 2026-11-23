@@ -14,9 +14,9 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 var intakeNamespace = uuid.MustParse("cdb9127d-ec92-5fc8-958f-cf638e419896")
 

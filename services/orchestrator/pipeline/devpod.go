@@ -522,12 +522,12 @@ func (a *Activities) PublishRequests(ctx context.Context, req PublishRequestsReq
 type PublishInfo struct {
 	Step       string `json:"step"`
 	Pod        string `json:"pod"`
-	N          int    `json:"n"`
 	Kind       string `json:"kind"`
 	Title      string `json:"title,omitempty"`
 	Body       string `json:"body,omitempty"`
 	Repository string `json:"repository"`
 	Branch     string `json:"branch"`
+	N          int    `json:"n"`
 }
 
 // PublishQuestion is the question a person is asked about a publish request.

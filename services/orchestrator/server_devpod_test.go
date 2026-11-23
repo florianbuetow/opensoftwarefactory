@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 func TestRunStatusShowsBlockedThePodAndThePullRequest(t *testing.T) {
 	srv, runner, store, _ := newTestServer(t)
@@ -59,8 +59,9 @@ func TestDecisionsListPublishRequests(t *testing.T) {
 	}}}
 	code, body := call(t, http.MethodGet, srv.URL+"/api/decisions", "")
 	want := `"step":"deliver.publish-2","question":"Publish branch agent/x of claims-build and open the pull request 'Add payment date'?",` +
-		`"inputs":[{"source":"deliver","artifact":"runs/t/deliver","round":1}],"artifact":"runs/t/deliver.publish-2","on_reject":"","round":1,` +
-		`"publish":{"step":"deliver","pod":"pod-1","n":2,"kind":"pull_request","title":"Add payment date","body":"Shows the date.","repository":"claims-build","branch":"agent/x"}`
+		`"artifact":"runs/t/deliver.publish-2","on_reject":"",` +
+		`"publish":{"step":"deliver","pod":"pod-1","kind":"pull_request","title":"Add payment date","body":"Shows the date.","repository":"claims-build","branch":"agent/x","n":2},` +
+		`"inputs":[{"source":"deliver","artifact":"runs/t/deliver","round":1}],"round":1`
 	if code != http.StatusOK || !strings.Contains(body, want) {
 		t.Fatalf("decisions %d %s", code, body)
 	}
@@ -95,7 +96,7 @@ func TestSavingDevPodStepsAndBackEdges(t *testing.T) {
 	for _, field := range []string{
 		`"repository":"claims-build"`, `"source_branch":"main"`, `"work_branch":"agent/payment-date-{run}"`, `"name":"payment"`,
 		`"protected":["tests/**","verify.sh"]`, `"rules":[{"tool":"write_file","path":"src/panel/**","matches":"rejection ?reason","message":"Blocked by CL-7: fix it."}]`,
-		`"command":"./verify.sh","allow_failure":true`, `"on_reject":"build","max_rejections":3`, `"service":"devpod-stop"`,
+		`"command":"./verify.sh","depends_on":["pod"],"allow_failure":true`, `"on_reject":"build","depends_on":["verify"],"max_rejections":3`, `"service":"devpod-stop"`,
 	} {
 		if !strings.Contains(body, field) {
 			t.Errorf("saved version lacks %s: %s", field, body)
@@ -150,7 +151,7 @@ func TestRejectionAtAGateWithABackEdgeToAnAgentNeedsAComment(t *testing.T) {
 	srv, runner, _, _ := newTestServer(t)
 	runner.pending = []PendingDecision{{WorkflowID: "t", TraceID: "t", Workflow: "build", PendingGate: pipeline.PendingGate{Step: "decide", OnReject: "build", Round: 1, MaxRejections: 5}}}
 	code, body := call(t, http.MethodGet, srv.URL+"/api/decisions", "")
-	if code != http.StatusOK || !strings.Contains(body, `"on_reject":"build","round":1,"max_rejections":5`) {
+	if code != http.StatusOK || !strings.Contains(body, `"on_reject":"build","inputs":null,"round":1,"max_rejections":5`) {
 		t.Fatalf("decisions %d %s", code, body)
 	}
 	bad := `{"workflow_id":"t","step":"decide","decision":"rejected","decided_by":"flo"}`

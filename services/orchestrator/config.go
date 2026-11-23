@@ -11,9 +11,9 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 // Config is every stored version of every workflow. A seed file holds one as YAML or JSON.
 type Config struct {

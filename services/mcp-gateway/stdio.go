@@ -287,7 +287,7 @@ func (u *stdioUpstream) getProcess() (*stdioProcess, error) {
 		return u.process, nil
 	}
 
-	cmd := exec.Command(u.connection.Command, u.connection.Args...)
+	cmd := exec.Command(u.connection.Command, u.connection.Args...) //nolint:gosec // permitted: running the command named in mcpconfig.json is the stdio transport
 	cmd.Env = environment(u.connection.Env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

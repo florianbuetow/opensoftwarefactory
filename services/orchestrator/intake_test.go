@@ -11,8 +11,9 @@ import (
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 func TestDeterministicIntakeIdentityUsesBindingAndEvent(t *testing.T) {
 	a := deterministicIntakeID("quality/main", "event-7")

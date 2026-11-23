@@ -24,9 +24,9 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 var example = regexp.MustCompile(`^ex0[1-9]-`)
 

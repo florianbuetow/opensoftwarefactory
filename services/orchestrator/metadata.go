@@ -10,9 +10,9 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 // metadataSchemaVersion is the schema_version of metadata.json.
 const metadataSchemaVersion = 1
@@ -29,9 +29,9 @@ type AgentSettings struct {
 	Model                     string            `json:"model"`
 	Effort                    string            `json:"effort"`
 	Temperature               *float64          `json:"temperature,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
 	Tools                     []string          `json:"tools"`
 	MaxRetries                int               `json:"max_retries"`
-	Skills                    map[string]string `json:"skills,omitempty"`
 	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 

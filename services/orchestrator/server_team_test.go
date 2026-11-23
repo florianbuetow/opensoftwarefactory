@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"opensoftwarefactory/orchestrator/pipeline"
 )
+
+import "opensoftwarefactory/orchestrator/pipeline"
 
 func TestTeamsListsRunningTeamSteps(t *testing.T) {
 	srv, runner, _, _ := newTestServer(t)
@@ -30,7 +30,7 @@ func TestRejectionAtAGateWithOnRejectNeedsAComment(t *testing.T) {
 		{WorkflowID: "t", TraceID: "t", Workflow: "plain", PendingGate: pipeline.PendingGate{Step: "review", Round: 1}},
 	}
 	code, body := call(t, http.MethodGet, srv.URL+"/api/decisions", "")
-	if code != http.StatusOK || !strings.Contains(body, `"on_reject":"team","round":1`) || !strings.Contains(body, `"on_reject":"","round":1`) {
+	if code != http.StatusOK || !strings.Contains(body, `"on_reject":"team","inputs":null,"round":1`) || !strings.Contains(body, `"on_reject":"","inputs":null,"round":1`) {
 		t.Fatalf("decisions %d %s", code, body)
 	}
 	for _, comment := range []string{``, `,"comment":"  "`} {
