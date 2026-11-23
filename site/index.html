@@ -204,6 +204,17 @@
   .start h2 { font-size: clamp(32px, 4.6vw, 64px); letter-spacing: -.04em; text-wrap: balance; font-weight: 500; }
   .start p { max-width: 62ch; margin: 18px auto 0; font-size: 16px; line-height: 1.5; text-wrap: pretty; }
   .start pre { display: inline-block; max-width: 100%; overflow-x: auto; margin-top: 28px; text-align: left; background: var(--pill); border: 1px solid var(--line); border-radius: 16px; padding: 20px 28px; font: 15px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
+  .start-row { max-width: 1248px; margin: 96px auto 0; padding: 0 24px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 64px; align-items: start; }
+  .start-row .start { max-width: none; margin: 0; padding: 0; text-align: left; }
+  .start-row .start p { margin-left: 0; }
+  .start-row .cta { justify-content: flex-start; }
+  .start-row + .topic { margin-top: 96px; }
+  @media (max-width: 1260px) {
+    .start-row { grid-template-columns: minmax(0, 1fr); gap: 96px; }
+    .start-row .start { text-align: center; }
+    .start-row .start p { margin-left: auto; }
+    .start-row .cta { justify-content: center; }
+  }
   .foot {
     max-width: 1200px;
     margin: 0 auto;
@@ -470,6 +481,7 @@
     </ul>
   </section>
 
+  <div class="start-row">
   <section class="start" id="limitations">
     <h2>Limitations</h2>
     <p>The factory is not meant to scale to production environments. It is an educational tool with no production hardening, built to run on a single-node KIND cluster on your workstation.</p>
@@ -493,6 +505,7 @@ just help     # list every command</pre>
       </a>
     </div>
   </section>
+  </div>
 
   <section class="topic t10" id="contribute">
     <div>
