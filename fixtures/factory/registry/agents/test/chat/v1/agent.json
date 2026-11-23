@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "test/chat",
+  "description": "Test agent for an interactive step: chats briefly with the person. Used by the factory's own tests only.",
+  "unpack_inputs": true,
+  "models": ["qwen3-0.6b-mlx"],
+  "effort": "none",
+  "tools": [],
+  "max_retries": 0
+}

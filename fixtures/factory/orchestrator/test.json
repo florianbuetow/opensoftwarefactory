@@ -1,0 +1,22 @@
+{
+  "workflows": [
+    {
+      "name": "test/one-step",
+      "version": 1,
+      "description": "Test workflow: one agent step. Used by the factory's own tests; runs of it are removed by the test that starts them.",
+      "steps": [
+        { "id": "answer", "service": "agent", "agent": "test/echo@v1", "position": { "x": 0, "y": 40 } }
+      ]
+    },
+    {
+      "name": "test/waits-for-person",
+      "version": 1,
+      "description": "Test workflow: an agent step, an interactive step that waits for a person, and an agent step after it. Used by the factory's own tests; runs of it are removed by the test that starts them.",
+      "steps": [
+        { "id": "answer", "service": "agent", "agent": "test/echo@v1", "position": { "x": 0, "y": 40 } },
+        { "id": "talk", "service": "interactive", "agent": "test/chat@v1", "depends_on": ["answer"], "position": { "x": 0, "y": 176 } },
+        { "id": "after", "service": "agent", "agent": "test/echo@v1", "depends_on": ["talk"], "position": { "x": 0, "y": 312 } }
+      ]
+    }
+  ]
+}

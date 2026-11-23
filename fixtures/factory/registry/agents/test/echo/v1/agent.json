@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "test/echo",
+  "description": "Test agent: answers with one short sentence about its input. Used by the factory's own tests only.",
+  "unpack_inputs": true,
+  "models": ["qwen3-0.6b-mlx"],
+  "effort": "none",
+  "tools": [],
+  "max_retries": 0
+}
