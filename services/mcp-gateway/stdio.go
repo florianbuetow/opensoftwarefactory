@@ -234,7 +234,7 @@ func (p *stdioProcess) call(ctx context.Context, body, originalID json.RawMessag
 	case <-ctx.Done():
 		if pending, ok := p.take(internalID); ok {
 			pending.finish(ctx.Err())
-			cancel, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			cancel, stop := context.WithTimeout(context.WithoutCancel(ctx), 100*time.Millisecond)
 			_ = p.cancel(cancel, internalID)
 			stop()
 		}
@@ -270,7 +270,7 @@ func (p *stdioProcess) cancelWhenDone(ctx context.Context, id string, finished <
 	case <-ctx.Done():
 		if pending, ok := p.take(id); ok {
 			pending.finish(ctx.Err())
-			cancel, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			cancel, stop := context.WithTimeout(context.WithoutCancel(ctx), 100*time.Millisecond)
 			_ = p.cancel(cancel, id)
 			stop()
 		}
@@ -287,6 +287,7 @@ func (u *stdioUpstream) getProcess() (*stdioProcess, error) {
 		return u.process, nil
 	}
 
+	// #nosec G204 G702 -- permitted: running the command named in mcpconfig.json is the stdio transport
 	cmd := exec.Command(u.connection.Command, u.connection.Args...) //nolint:gosec // permitted: running the command named in mcpconfig.json is the stdio transport
 	cmd.Env = environment(u.connection.Env)
 	stdin, err := cmd.StdinPipe()

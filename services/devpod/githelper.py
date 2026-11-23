@@ -37,6 +37,7 @@ HELPER_HOME = required_env("GITHELPER_HOME")
 PATH = required_env("PATH")
 WORK_UID = 1000
 GUARD_UID = 2000
+WORK_GID = 1000
 GIT_TIMEOUT = 300
 VIEW_LIMIT = 400000
 READ_ONLY = ("log", "diff", "show", "ls-files", "rev-parse")
@@ -437,12 +438,14 @@ def apply_protection(
     """Carry out a plan of plan_protection. `chown` is replaceable for tests without root."""
     for rel in holders:
         path = os.path.join(root, rel) if rel else root
-        chown(path, GUARD_UID, GUARD_UID)
-        os.chmod(path, 0o1777)
+        chown(path, GUARD_UID, WORK_GID)
+        # Sticky bit requires guard ownership while keeping the directory writable by dev (group 1000).
+        os.chmod(path, 0o1770)  # nosec B103
     for rel in folders:
         path = os.path.join(root, rel)
-        chown(path, GUARD_UID, GUARD_UID)
-        os.chmod(path, 0o755)
+        chown(path, GUARD_UID, WORK_GID)
+        # Protected folders must remain readable and traversable by dev (group 1000) without write access.
+        os.chmod(path, 0o750)  # nosec B103
     for rel in files:
         path = os.path.join(root, rel)
         chown(path, GUARD_UID, GUARD_UID)

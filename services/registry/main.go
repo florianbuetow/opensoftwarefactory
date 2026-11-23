@@ -1223,10 +1223,15 @@ func (b blobClient) put(ctx context.Context, id string, data []byte, creator str
 }
 
 func (b blobClient) do(ctx context.Context, method, path string, body []byte, creator string, read func(*http.Response) error) (err error) {
-	req, err := http.NewRequestWithContext(ctx, method, b.base+path, bytes.NewReader(body))
+	baseURL, err := url.Parse(b.base)
 	if err != nil {
 		return err
 	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.URL.Path = strings.TrimRight(baseURL.Path, "/") + path
 	if creator != "" {
 		req.Header.Set("X-Creator", creator)
 	}

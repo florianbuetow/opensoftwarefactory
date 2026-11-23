@@ -334,7 +334,7 @@ func (s *service) exportRun(ctx context.Context, trace string, manifest *exportM
 			Created string `json:"created"`
 		} `json:"objects"`
 	}
-	if err := s.getJSON(ctx, s.blobs+"/trace/"+trace, &listing); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/trace/"+trace, &listing); err != nil {
 		return fmt.Errorf("listing the run's objects: %w", err)
 	}
 	sort.SliceStable(listing.Objects, func(i, j int) bool { return listing.Objects[i].Created < listing.Objects[j].Created })

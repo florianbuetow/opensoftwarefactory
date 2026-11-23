@@ -528,7 +528,7 @@ func (s *service) readRun(ctx context.Context, id string) RunSnapshot {
 		Workflow           string    `json:"workflow"`
 		InputArtifact      string    `json:"input_artifact"`
 	}
-	if err := s.getJSON(ctx, s.blobs+"/blobs/runs/"+id+"/run.json", &rec); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/blobs/runs/"+id+"/run.json", &rec); err != nil {
 		s.log.Warn("run record is unreadable", "run", id, "error", err)
 		return RunSnapshot{TraceID: id, Agents: []string{}, Status: runStatusUnknown, SourcePresent: true, IndexError: "Cannot read run record"}
 	}
@@ -540,7 +540,7 @@ func (s *service) readRun(ctx context.Context, id string) RunSnapshot {
 		DurationKnown bool      `json:"duration_known"`
 	}
 	run := RunSnapshot{TraceID: id, Workflow: rec.Workflow, Agents: []string{}, Started: rec.Started, InputArtifact: rec.InputArtifact, DistributedTraceID: rec.DistributedTraceID, SourcePresent: true}
-	if err := s.getJSON(ctx, s.orchestrator+"/api/runs/"+id, &status); errors.Is(err, errNotFound) {
+	if err := s.getJSON(ctx, s.orchestrator, "/api/runs/"+id, &status); errors.Is(err, errNotFound) {
 		run.Status, run.HistoryUnavailable = runStatusUnknown, true
 	} else if err != nil {
 		run.Status, run.IndexError = runStatusUnknown, "Cannot read run status"
@@ -567,7 +567,7 @@ func (s *service) runAgents(ctx context.Context, id string) (agents []string, co
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if s.getJSON(ctx, s.blobs+"/trace/"+id, &listing) != nil {
+	if s.getJSON(ctx, s.blobs, "/trace/"+id, &listing) != nil {
 		return []string{}, false, fmt.Errorf("trace listing unavailable")
 	}
 	seen := map[string]bool{}
@@ -578,7 +578,7 @@ func (s *service) runAgents(ctx context.Context, id string) (agents []string, co
 		var rec struct {
 			Agent string `json:"agent"`
 		}
-		err = s.getJSON(ctx, s.blobs+"/blobs/"+o.ID, &rec)
+		err = s.getJSON(ctx, s.blobs, "/blobs/"+o.ID, &rec)
 		if err != nil {
 			return nil, false, err
 		}
@@ -598,7 +598,7 @@ func (s *service) runIDs(ctx context.Context) (map[string]bool, error) {
 	var list struct {
 		Directories []string `json:"directories"`
 	}
-	if err := s.getJSON(ctx, s.blobs+"/list/runs", &list); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/list/runs", &list); err != nil {
 		if errors.Is(err, errNotFound) {
 			return map[string]bool{}, nil
 		}
@@ -619,7 +619,7 @@ func (s *service) loadSets(ctx context.Context) ([]EvaluationSet, error) {
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if err := s.getJSON(ctx, s.blobs+"/list/"+setPrefix, &list); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/list/"+setPrefix, &list); err != nil {
 		if errors.Is(err, errNotFound) {
 			return nil, nil
 		}
@@ -628,7 +628,7 @@ func (s *service) loadSets(ctx context.Context) ([]EvaluationSet, error) {
 	sets := make([]EvaluationSet, 0, len(list.Objects))
 	for _, o := range list.Objects {
 		var set EvaluationSet
-		if err := s.getJSON(ctx, s.blobs+"/blobs/"+o.ID, &set); err != nil {
+		if err := s.getJSON(ctx, s.blobs, "/blobs/"+o.ID, &set); err != nil {
 			return nil, fmt.Errorf("reading %s: %w", o.ID, err)
 		}
 		sets = append(sets, set)
@@ -641,7 +641,7 @@ func (s *service) loadSet(ctx context.Context, id string) (EvaluationSet, error)
 		return EvaluationSet{}, errNotFound
 	}
 	var set EvaluationSet
-	err := s.getJSON(ctx, s.blobs+"/blobs/"+setPrefix+"/"+id+".json", &set)
+	err := s.getJSON(ctx, s.blobs, "/blobs/"+setPrefix+"/"+id+".json", &set)
 	if errors.Is(err, errNotFound) {
 		return set, errNotFound
 	}
@@ -653,7 +653,7 @@ func (s *service) saveSet(ctx context.Context, set *EvaluationSet) (err error) {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.blobs+"/blobs/"+setPrefix+"/"+set.ID+".json", bytes.NewReader(data))
+	req, err := s.newRequest(ctx, s.blobs, http.MethodPut, "/blobs/"+setPrefix+"/"+set.ID+".json", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -670,8 +670,8 @@ func (s *service) saveSet(ctx context.Context, set *EvaluationSet) (err error) {
 	return nil
 }
 
-func (s *service) getJSON(ctx context.Context, url string, out any) (err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+func (s *service) getJSON(ctx context.Context, base, path string, out any) (err error) {
+	req, err := s.newRequest(ctx, base, http.MethodGet, path, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -684,7 +684,7 @@ func (s *service) getJSON(ctx context.Context, url string, out any) (err error) 
 		return errNotFound
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
+		return fmt.Errorf("GET %s%s: %s", base, path, resp.Status)
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out)
 }

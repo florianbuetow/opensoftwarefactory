@@ -567,17 +567,22 @@ func (s *store) tracedMeta(trace, id string) (m Meta, found, stale bool) {
 
 // scanTrace finds the objects of one trace by reading every metadata record. It
 // answers only while the index of previously stored objects is still being built.
-func (s *store) scanTrace(trace string) ([]Meta, error) {
-	objects := []Meta{}
-	err := filepath.WalkDir(s.meta, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			return err
+func (s *store) scanTrace(trace string) (objects []Meta, err error) {
+	objects = []Meta{}
+	root, err := os.OpenRoot(s.meta)
+	if err != nil {
+		return objects, err
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	err = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+			return walkErr
 		}
 		// The caller holds the transaction read lock, so no record is removed during the
 		// scan: a record that cannot be read is a storage fault, not a deleted object.
-		data, err := os.ReadFile(filepath.Clean(path))
-		if err != nil {
-			return err
+		data, readErr := root.ReadFile(rel)
+		if readErr != nil {
+			return readErr
 		}
 		var m Meta
 		if json.Unmarshal(data, &m) == nil && m.TraceID == trace {
@@ -594,29 +599,37 @@ func (s *store) scanTrace(trace string) ([]Meta, error) {
 func (s *store) buildTraceIndex() {
 	started := time.Now()
 	indexed := 0
-	err := filepath.WalkDir(s.meta, func(path string, d fs.DirEntry, err error) error {
-		if errors.Is(err, fs.ErrNotExist) { // deleted during the scan
-			return nil
-		}
-		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			return err
-		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		data, err := os.ReadFile(filepath.Clean(path))
-		if err != nil {
-			return nil
-		}
-		var m Meta
-		if json.Unmarshal(data, &m) != nil || m.TraceID == "" {
-			return nil
-		}
-		if _, metaPath, ok := s.paths(m.ID); !ok || metaPath != path {
-			return nil
-		}
-		indexed++
-		return writeJSONAtomic(s.traceEntry(m.TraceID, m.ID), m.ID)
-	})
+	root, err := os.OpenRoot(s.meta)
+	if err == nil {
+		defer func() {
+			if closeErr := root.Close(); closeErr != nil {
+				s.logger.Warn("closing metadata root failed", "error", closeErr)
+			}
+		}()
+		err = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
+			if errors.Is(walkErr, fs.ErrNotExist) { // deleted during the scan
+				return nil
+			}
+			if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+				return walkErr
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			data, readErr := root.ReadFile(rel)
+			if readErr != nil {
+				return nil
+			}
+			var m Meta
+			if json.Unmarshal(data, &m) != nil || m.TraceID == "" {
+				return nil
+			}
+			if _, metaPath, ok := s.paths(m.ID); !ok || metaPath != filepath.Join(s.meta, filepath.FromSlash(rel)) {
+				return nil
+			}
+			indexed++
+			return writeJSONAtomic(s.traceEntry(m.TraceID, m.ID), m.ID)
+		})
+	}
 	if err == nil {
 		err = writeJSONAtomic(filepath.Join(s.traces, traceIndexMarker), time.Now().UTC())
 	}

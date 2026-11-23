@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -43,7 +44,7 @@ type cluster interface {
 // kubeClient talks to the Kubernetes REST API with the service account of the pod it runs in.
 type kubeClient struct {
 	http      *http.Client
-	base      string
+	baseURL   *url.URL
 	namespace string
 	tokenFile string
 }
@@ -51,6 +52,10 @@ type kubeClient struct {
 // newKubeClient trusts the cluster's certificate authority when the service account provides
 // one. Outside a cluster the client is still created; its calls then fail with a clear error.
 func newKubeClient(base, namespace string) (*kubeClient, error) {
+	parsed, err := url.Parse(strings.TrimRight(base, "/"))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid Kubernetes API URL %q", base)
+	}
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("the default HTTP transport is a %T, not a *http.Transport", http.DefaultTransport)
@@ -64,7 +69,7 @@ func newKubeClient(base, namespace string) (*kubeClient, error) {
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 	return &kubeClient{
-		base:      strings.TrimRight(base, "/"),
+		baseURL:   parsed,
 		namespace: namespace,
 		tokenFile: serviceAccountDir + "/token",
 		http:      &http.Client{Timeout: 30 * time.Second, Transport: transport},
@@ -79,27 +84,48 @@ func (k *kubeClient) policies() string {
 	return "/apis/networking.k8s.io/v1/namespaces/" + url.PathEscape(k.namespace) + "/networkpolicies"
 }
 
+// readInDirectory reads the file at path without leaving the directory that holds it.
+func readInDirectory(path string) (_ []byte, err error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = closeAfter(err, root) }()
+	return root.ReadFile(filepath.Base(path))
+}
+
 // do sends one request. The token is read on every call because Kubernetes replaces it
 // regularly. A nil out drops the answer.
 func (k *kubeClient) do(ctx context.Context, method, path string, in, out any) (code int, err error) {
-	var body io.Reader
+	var encoded []byte
 	if in != nil {
-		encoded, marshalErr := json.Marshal(in)
-		if marshalErr != nil {
-			return 0, marshalErr
+		encoded, err = json.Marshal(in)
+		if err != nil {
+			return 0, err
 		}
-		body = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, k.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, "", http.NoBody)
 	if err != nil {
 		return 0, err
+	}
+	u := *k.baseURL
+	reqPath, rawQuery, _ := strings.Cut(path, "?")
+	u.Path = strings.TrimRight(u.Path, "/") + reqPath
+	u.RawQuery = rawQuery
+	req.URL = &u
+	if encoded != nil {
+		req.Body = io.NopCloser(bytes.NewReader(encoded))
+		req.ContentLength = int64(len(encoded))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(encoded)), nil
+		}
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
 	if k.tokenFile != "" {
-		token, readErr := os.ReadFile(k.tokenFile)
+		token, readErr := readInDirectory(k.tokenFile)
 		if readErr != nil {
 			return 0, fmt.Errorf("the Kubernetes service account token cannot be read: %w", readErr)
 		}

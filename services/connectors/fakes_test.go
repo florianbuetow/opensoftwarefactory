@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -417,7 +418,11 @@ func (w *world) start(registry string) *service {
 		podNamespace: testNamespace, factoryNamespace: "opensoftwarefactory", image: "opensoftwarefactory-devpod:local", pullPolicy: "Never",
 		sweep: time.Hour, startTimeout: 2 * time.Second, poll: 5 * time.Millisecond, mcpURL: "http://tool-gateway:8080/mcp", registerRetry: 5 * time.Millisecond,
 	}
-	kube := &kubeClient{base: w.kube.srv.URL, namespace: testNamespace, tokenFile: tokenFile, http: http.DefaultClient}
+	kubeURL, err := url.Parse(w.kube.srv.URL)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	kube := &kubeClient{baseURL: kubeURL, namespace: testNamespace, tokenFile: tokenFile, http: http.DefaultClient}
 	s := newService(&cfg, slog.New(slog.DiscardHandler), http.DefaultClient, kube)
 	s.blobs = blobClient{base: w.blobs.srv.URL, http: http.DefaultClient}
 	s.registry = registry

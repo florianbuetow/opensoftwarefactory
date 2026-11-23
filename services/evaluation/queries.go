@@ -144,7 +144,7 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 	var retainedRun struct {
 		DistributedTraceID string `json:"distributed_trace_id"`
 	}
-	_ = s.getJSON(r.Context(), s.blobs+"/blobs/runs/"+runID+"/run.json", &retainedRun)
+	_ = s.getJSON(r.Context(), s.blobs, "/blobs/runs/"+runID+"/run.json", &retainedRun)
 	if traceID == "" {
 		traceID = retainedRun.DistributedTraceID
 	} else if retainedRun.DistributedTraceID != "" && traceID != retainedRun.DistributedTraceID {
@@ -227,7 +227,7 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 	var listing struct {
 		Objects []map[string]any `json:"objects"`
 	}
-	artifactErr := s.getJSON(r.Context(), s.blobs+"/trace/"+runID, &listing)
+	artifactErr := s.getJSON(r.Context(), s.blobs, "/trace/"+runID, &listing)
 	if artifactErr == nil {
 		for _, artifact := range listing.Objects {
 			id, _ := artifact["id"].(string)
@@ -463,11 +463,23 @@ type exactSeriesValue struct {
 	Decimal     string `json:"decimal"`
 }
 
+func seriesMetricColumn(metric string) (string, bool) {
+	switch metric {
+	case metricCost:
+		return "converted_amount", true
+	case "input_tokens", "output_tokens", "cached_input_tokens", "uncached_input_tokens", "reasoning_tokens":
+		return metric, true
+	case metricDuration:
+		return metricDuration, true
+	default:
+		return "", false
+	}
+}
+
 func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	metric, group, currency := q.Get("metric"), q.Get("group_by"), q.Get("currency")
-	allowedMetric := map[string]string{metricCost: "converted_amount", "input_tokens": "input_tokens", "output_tokens": "output_tokens", "cached_input_tokens": "cached_input_tokens", "uncached_input_tokens": "uncached_input_tokens", "reasoning_tokens": "reasoning_tokens", metricDuration: metricDuration}
-	field, ok := allowedMetric[metric]
+	field, ok := seriesMetricColumn(metric)
 	if !ok {
 		if strings.TrimSpace(metric) == "" || len(metric) > 255 {
 			s.fail(w, 422, errors.New("metric is required"))

@@ -438,17 +438,20 @@ class ProtectTest(HelperCase):
         def mode(relative: str) -> int:
             return stat.S_IMODE(os.lstat(os.path.join(root, relative)).st_mode)
 
-        self.assertEqual(mode("."), 0o1777)
-        self.assertEqual(mode("docs"), 0o1777)
-        self.assertEqual(mode("docs/guide"), 0o1777)
-        self.assertEqual(mode("tests"), 0o755)
-        self.assertEqual(mode("tests/sub"), 0o755)
+        self.assertEqual(mode("."), 0o1770)
+        self.assertEqual(mode("docs"), 0o1770)
+        self.assertEqual(mode("docs/guide"), 0o1770)
+        self.assertEqual(mode("tests"), 0o750)
+        self.assertEqual(mode("tests/sub"), 0o750)
         self.assertEqual(mode("tests/test_a.py"), 0o644)
         self.assertEqual(mode("verify.sh"), 0o755)
         self.assertEqual(mode("docs/guide/rules.md"), 0o644)
         self.assertEqual(mode("src/panel.py"), 0o664)
         self.assertEqual(mode("docs/readme.md"), 0o664)
-        self.assertEqual(set(owned.values()), {(2000, 2000)})
+        for folder in [".", "docs", "docs/guide", "tests", "tests/sub"]:
+            self.assertEqual(owned[folder], (2000, 1000))
+        for file_path in ["docs/guide/rules.md", "tests/sub/test_b.py", "tests/test_a.py", "verify.sh"]:
+            self.assertEqual(owned[file_path], (2000, 2000))
         self.assertEqual(
             sorted(owned),
             sorted(

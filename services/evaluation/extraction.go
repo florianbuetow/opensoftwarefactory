@@ -86,7 +86,7 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 	var producer struct {
 		InputArtifact string `json:"input_artifact"`
 	}
-	if producerErr := s.getJSON(r.Context(), s.blobs+"/blobs/runs/"+in.ProducerRunID+"/run.json", &producer); producerErr != nil {
+	if producerErr := s.getJSON(r.Context(), s.blobs, "/blobs/runs/"+in.ProducerRunID+"/run.json", &producer); producerErr != nil {
 		if errors.Is(producerErr, errNotFound) {
 			s.fail(w, 422, errors.New("producer run is not retained"))
 		} else {
@@ -99,7 +99,7 @@ func (s *service) extractMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input any
-	if inputErr := s.getJSON(r.Context(), s.blobs+"/blobs/"+producer.InputArtifact, &input); inputErr != nil {
+	if inputErr := s.getJSON(r.Context(), s.blobs, "/blobs/"+producer.InputArtifact, &input); inputErr != nil {
 		if errors.Is(inputErr, errNotFound) {
 			s.fail(w, 422, errors.New("producer input is not retained"))
 		} else {

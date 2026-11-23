@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -29,10 +30,15 @@ func closeAfter(err error, c io.Closer) error {
 }
 
 func (s blobStore) request(ctx context.Context, method, path string, data []byte) (body []byte, err error) {
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(s.base, "/")+path, bytes.NewReader(data))
+	baseURL, err := url.Parse(s.base)
 	if err != nil {
 		return nil, err
 	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL.String(), bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.URL.Path = strings.TrimRight(baseURL.Path, "/") + path
 	req.Header.Set("X-Creator", "mcp-gateway")
 	if data != nil {
 		req.Header.Set("Content-Type", "application/json")

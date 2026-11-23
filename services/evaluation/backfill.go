@@ -208,7 +208,7 @@ const (
 
 func (s *service) backfillRun(ctx context.Context, runID string, generation int64) (int, error) {
 	var run legacyRun
-	if err := s.getJSON(ctx, s.blobs+"/blobs/runs/"+runID+"/run.json", &run); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/blobs/runs/"+runID+"/run.json", &run); err != nil {
 		return 0, err
 	}
 	if run.TraceID == "" {
@@ -220,7 +220,7 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 			Finished string `json:"finished"`
 			Status   string `json:"status"`
 		}
-		_ = s.getJSON(ctx, s.blobs+"/blobs/runs/"+runID+"/metadata.json", &metadata)
+		_ = s.getJSON(ctx, s.blobs, "/blobs/runs/"+runID+"/metadata.json", &metadata)
 		measurement := Measurement{SchemaVersion: 1, ID: hashID("legacy-execution", runID, run.ExecutionID), Kind: kindExecution, RunID: runID, ExecutionID: run.ExecutionID, ParentExecutionID: run.ParentExecutionID, Workflow: run.Workflow, TraceID: run.DistributedTraceID, OccurredAt: run.Started, Status: statusMissing, Missing: []string{}}
 		if run.WorkflowVersion > 0 {
 			measurement.WorkflowVersion = &run.WorkflowVersion
@@ -246,7 +246,7 @@ func (s *service) backfillRun(ctx context.Context, runID string, generation int6
 			ID string `json:"id"`
 		} `json:"objects"`
 	}
-	if err := s.getJSON(ctx, s.blobs+"/trace/"+runID, &listing); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/trace/"+runID, &listing); err != nil {
 		return created, err
 	}
 	for _, item := range listing.Objects {

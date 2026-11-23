@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -428,7 +429,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = w.Write(data)
+	_, _ = io.Copy(w, bytes.NewReader(data))
 }
 
 // getDecisions lists the gate steps of running workflows that wait for a person.

@@ -45,11 +45,13 @@ type httpUpstream struct {
 }
 
 func (u *httpUpstream) RoundTrip(ctx context.Context, body []byte, headers http.Header) (*http.Response, error) {
+	// #nosec G704 -- permitted: upstream URL is operator-configured in mcpconfig.json
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header = headers.Clone()
+	// #nosec G704 -- permitted: upstream URL is operator-configured in mcpconfig.json
 	return u.client.Do(req)
 }
 

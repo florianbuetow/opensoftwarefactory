@@ -31,8 +31,21 @@ func closeAfter(err error, c io.Closer) error {
 	return err
 }
 
+func (s *service) newRequest(ctx context.Context, base, method, path string, body io.Reader) (*http.Request, error) {
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+	req.URL.Path = strings.TrimRight(baseURL.Path, "/") + path
+	return req, nil
+}
+
 func (s *service) readObject(ctx context.Context, id string) (object storedObject, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.blobs+"/blobs/"+id, http.NoBody)
+	req, err := s.newRequest(ctx, s.blobs, http.MethodGet, "/blobs/"+id, http.NoBody)
 	if err != nil {
 		return storedObject{}, err
 	}
@@ -53,7 +66,7 @@ func (s *service) readObject(ctx context.Context, id string) (object storedObjec
 }
 
 func (s *service) readObjectLimited(ctx context.Context, id string, limit int64) (object storedObject, size int64, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.blobs+"/blobs/"+id, http.NoBody)
+	req, err := s.newRequest(ctx, s.blobs, http.MethodGet, "/blobs/"+id, http.NoBody)
 	if err != nil {
 		return storedObject{}, 0, err
 	}
@@ -82,7 +95,7 @@ func (s *service) writeObject(ctx context.Context, id string, value any, conditi
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.blobs+"/blobs/"+id, bytes.NewReader(data))
+	req, err := s.newRequest(ctx, s.blobs, http.MethodPut, "/blobs/"+id, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -180,7 +193,7 @@ func artifactInScope(artifact, prefix string) bool {
 
 func (s *service) listObjects(ctx context.Context, prefix string) ([]string, error) {
 	var listing blobListing
-	if err := s.getJSON(ctx, s.blobs+"/list/"+url.PathEscape(prefix), &listing); err != nil {
+	if err := s.getJSON(ctx, s.blobs, "/list/"+prefix, &listing); err != nil {
 		if errors.Is(err, errNotFound) {
 			return nil, nil
 		}

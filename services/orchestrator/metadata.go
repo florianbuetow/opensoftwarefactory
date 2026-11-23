@@ -133,11 +133,15 @@ func (r agentRegistry) definition(ctx context.Context, ref string) (def agentDef
 	for i, segment := range segments {
 		segments[i] = url.PathEscape(segment)
 	}
-	u := r.base + "/agents/" + strings.Join(segments, "/") + "/" + url.PathEscape(version)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
+	baseURL, err := url.Parse(r.base)
 	if err != nil {
 		return agentDefinition{}, err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL.String(), http.NoBody)
+	if err != nil {
+		return agentDefinition{}, err
+	}
+	req.URL.Path = strings.TrimRight(baseURL.Path, "/") + "/agents/" + strings.Join(segments, "/") + "/" + url.PathEscape(version)
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return agentDefinition{}, errors.New("the agent registry is not reachable")

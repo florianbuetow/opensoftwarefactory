@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -27,13 +28,26 @@ func closeAfter(err error, c io.Closer) error {
 	return err
 }
 
+func (b blobClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	baseURL, err := url.Parse(b.base)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+	req.URL.Path = strings.TrimRight(baseURL.Path, "/") + path
+	return req, nil
+}
+
 func (b blobClient) get(ctx context.Context, id string) ([]byte, error) {
 	data, _, err := b.getWithRevision(ctx, id)
 	return data, err
 }
 
 func (b blobClient) getWithRevision(ctx context.Context, id string) (data []byte, revision string, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/blobs/"+id, http.NoBody)
+	req, err := b.newRequest(ctx, http.MethodGet, "/blobs/"+id, http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}
@@ -62,7 +76,7 @@ func (b blobClient) putConditionalJSON(ctx context.Context, id string, v any, re
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, b.base+"/blobs/"+id, bytes.NewReader(data))
+	req, err := b.newRequest(ctx, http.MethodPut, "/blobs/"+id, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -96,9 +110,14 @@ func (b blobClient) getJSON(ctx context.Context, id string, out any) error {
 }
 
 func (b blobClient) put(ctx context.Context, id string, data []byte, contentType, creator, trace string) (err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, b.base+"/blobs/"+id, bytes.NewReader(data))
+	req, err := b.newRequest(ctx, http.MethodPut, "/blobs/"+id, http.NoBody)
 	if err != nil {
 		return err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	req.ContentLength = int64(len(data))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("X-Creator", creator)
@@ -125,7 +144,7 @@ func (b blobClient) putJSON(ctx context.Context, id string, v any, creator, trac
 }
 
 func (b blobClient) delete(ctx context.Context, id string) (err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, b.base+"/blobs/"+id, http.NoBody)
+	req, err := b.newRequest(ctx, http.MethodDelete, "/blobs/"+id, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -143,7 +162,7 @@ func (b blobClient) delete(ctx context.Context, id string) (err error) {
 // list returns the IDs of the objects directly under a prefix; a prefix that does not exist
 // has none.
 func (b blobClient) list(ctx context.Context, prefix string) (ids []string, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.base+"/list/"+prefix, http.NoBody)
+	req, err := b.newRequest(ctx, http.MethodGet, "/list/"+prefix, http.NoBody)
 	if err != nil {
 		return nil, err
 	}

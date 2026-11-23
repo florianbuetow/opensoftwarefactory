@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 )
 
 const version = "2025-11-25"
@@ -65,10 +67,12 @@ func response(raw []byte, initialized *bool) map[string]any {
 		mu.Lock()
 		calls = append(calls, req.Params.Name)
 		if path := os.Getenv("MOCK_CALLS_FILE"); path != "" {
-			f, _ := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-			if f != nil {
-				fmt.Fprintln(f, req.Params.Name)
-				_ = f.Close()
+			if root, err := os.OpenRoot(filepath.Dir(path)); err == nil {
+				if f, err := root.OpenFile(filepath.Base(path), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+					_, _ = fmt.Fprintln(f, req.Params.Name)
+					_ = f.Close()
+				}
+				_ = root.Close()
 			}
 		}
 		mu.Unlock()
@@ -146,7 +150,8 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(res)
 		})
-		if err := http.ListenAndServe(*addr, nil); err != nil {
+		server := &http.Server{Addr: *addr, ReadHeaderTimeout: 10 * time.Second}
+		if err := server.ListenAndServe(); err != nil {
 			panic(err)
 		}
 		return
