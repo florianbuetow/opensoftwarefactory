@@ -49,6 +49,7 @@ func run() error {
 		Store:             HTTPStore{BaseURL: env("BLOB_URL", "http://blobstore:8080/blobs"), Client: tracedHTTP},
 		RegistryURL:       env("AGENT_REGISTRY_URL", "http://agent-registry:8080"),
 		PolicyRegistryURL: env("POLICY_REGISTRY_URL", "http://policy-registry:8080"),
+		SkillRegistryURL:  env("SKILL_REGISTRY_URL", "http://skill-registry:8080"),
 		LLMURL:            env("LLM_URL", "http://llm-gateway:8080/v1"),
 		EvaluationURL:     env("EVALUATION_URL", "http://evaluation:8080"),
 		MCPGatewayURL:     env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"),

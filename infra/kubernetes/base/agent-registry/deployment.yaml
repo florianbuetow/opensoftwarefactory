@@ -44,6 +44,8 @@ spec:
               value: http://blobstore:8080
             - name: POLICY_REGISTRY_URL
               value: http://policy-registry:8080
+            - name: SKILL_REGISTRY_URL
+              value: http://skill-registry:8080
           volumeMounts:
             - name: local-seeds
               mountPath: /seed-root

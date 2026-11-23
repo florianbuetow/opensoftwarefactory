@@ -40,7 +40,9 @@ type StepRequest struct {
 	ExecutionID       string      `json:"execution_id,omitempty"`
 	ParentExecutionID string      `json:"parent_execution_id,omitempty"`
 	// DevPod is the run's dev pod; empty when the run has none.
-	DevPod string `json:"dev_pod,omitempty"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // InputItem is one step input: the artifact that a source produced in one of its rounds.
@@ -144,6 +146,7 @@ type PromptEvidence struct {
 	SourcePromptArtifact    string           `json:"source_prompt_artifact"`
 	EffectivePromptArtifact string           `json:"effective_prompt_artifact,omitempty"`
 	Policies                []PolicyEvidence `json:"policies,omitempty"`
+	Skills                  []SkillEvidence  `json:"skills,omitempty"`
 }
 
 type PolicyEvidence struct {
@@ -167,6 +170,7 @@ type RunEvent struct {
 	EstimatedOutputTokens *int64    `json:"estimated_output_tokens,omitempty"`
 	EstimationMethod      string    `json:"estimation_method,omitempty"`
 	Error                 string    `json:"error,omitempty"`
+	Warning               string    `json:"warning,omitempty"`
 	Category              string    `json:"error_category,omitempty"`
 	ToolCallID            string    `json:"tool_call_id,omitempty"`
 	Model                 string    `json:"model,omitempty"`
@@ -382,6 +386,7 @@ type Service struct {
 	Store                 Store
 	RegistryURL           string
 	PolicyRegistryURL     string
+	SkillRegistryURL      string
 	LLMURL                string
 	EvaluationURL         string
 	MCPGatewayURL         string
@@ -487,6 +492,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 	ref := name + "@" + version
 	ctx = withCorrelation(ctx, req, ref, attempt)
 	ctx = withDevPod(ctx, req.DevPod, ref, req.TraceID)
+	ctx = withSkills(ctx, req.Skills, req.SkillScriptTimeoutSeconds)
 	record.Agent = ref
 	meta.Creator = "agent:" + ref
 	log = s.Logger.With("run_id", req.TraceID, "step", req.StepID, "agent", ref,
@@ -552,6 +558,12 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 		}
 		log.Info("policy compilation completed", "policies", provenance)
 	}
+	skillNote, skillEvidence, err := s.loadSkillNote(ctx, req.Skills)
+	if err != nil {
+		return StepResult{}, err
+	}
+	prompt += skillNote
+	record.PromptEvidence.Skills = skillEvidence
 	record.PromptEvidence.EffectivePromptArtifact = evidencePrefix + "/systemprompt.effective.md"
 	if err := s.Store.Put(ctx, record.PromptEvidence.EffectivePromptArtifact, []byte(prompt), meta); err != nil {
 		return StepResult{}, fmt.Errorf("writing effective system prompt evidence: %w", err)
@@ -572,13 +584,13 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 
 	var tools []any
 	routes := map[string]toolRoute{}
-	if len(def.Tools) > 0 {
+	if selected := skillTools(ctx, def.Tools); len(selected) > 0 {
 		eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_discovery", Name: "discover tools", Status: "running", Started: time.Now().UTC(), Inputs: inputArtifacts(req)}, "agent.tool_discovery")
 		record.Events = append(record.Events, event)
 		if err := s.checkpointRunRecord(record, req.OutputArtifact, meta, log); err != nil {
 			return StepResult{}, err
 		}
-		if tools, routes, err = s.discoverTools(eventCtx, def.Tools, log); err != nil {
+		if tools, routes, err = s.discoverTools(eventCtx, selected, log); err != nil {
 			record.Events[len(record.Events)-1] = finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
 			_ = s.checkpointRunRecord(record, req.OutputArtifact, meta, log)
 			return StepResult{}, err
@@ -680,6 +692,7 @@ func (s *Service) Process(ctx context.Context, req StepRequest) (result StepResu
 				toolErr = categorizedError{"tool", text}
 			}
 			finished := finishEventSpan(event, eventTrace, status, toolErr)
+			finished.Warning = skillWarning(routes[tc.Function.Name], text)
 			finished.EstimatedInputTokens = &toolInputEstimate
 			finished.EstimationMethod = tokenEstimationMethod
 			if err == nil {
@@ -1013,7 +1026,7 @@ func (s *Service) discoverTools(ctx context.Context, selected []string, log *slo
 	}
 	base := strings.TrimRight(s.MCPGatewayURL, "/")
 	for _, server := range servers {
-		client := &mcpClient{url: base + "/mcp/" + url.PathEscape(server), http: s.HTTP}
+		client := &mcpClient{url: base + "/mcp/" + url.PathEscape(server), service: server, http: s.HTTP}
 		clients = append(clients, client)
 		if err := client.connect(ctx); err != nil {
 			closeClients()
@@ -1034,6 +1047,10 @@ func (s *Service) discoverTools(ctx context.Context, selected []string, log *slo
 		for _, selection := range byServer[server] {
 			tool, ok := available[selection.name]
 			if !ok {
+				if server == skillsService {
+					closeClients()
+					return nil, nil, fmt.Errorf("required skill tool %q is not offered by the MCP gateway", selection.ref)
+				}
 				log.Warn("configured tool not offered by MCP gateway", "tool", selection.ref)
 				continue
 			}
@@ -1045,6 +1062,9 @@ func (s *Service) discoverTools(ctx context.Context, selected []string, log *slo
 			}
 			if server == devPodService {
 				params = trimDevPodSchema(params)
+			}
+			if server == skillsService {
+				params = hideToolArguments(params, skillIdentity)
 			}
 			tools = append(tools, map[string]any{"type": "function", "function": map[string]any{
 				"name": alias, "description": tool.Description, "parameters": params,
@@ -1090,7 +1110,17 @@ func (s *Service) runTool(ctx context.Context, routes map[string]toolRoute, tc t
 	}
 	devPod := route.server == devPodService
 	pod := devPodOf(ctx)
-	if devPod {
+	if route.server == skillsService {
+		refusal, err := setSkillArguments(ctx, route.name, obj)
+		if refusal != "" || err != nil {
+			return refusal, refusal != "", err
+		}
+		data, err := json.Marshal(obj)
+		if err != nil {
+			return "", false, err
+		}
+		args = data
+	} else if devPod {
 		// The harness, which knows the run, sets the pod and who is calling, whatever the
 		// model passed. The stored tool call stays as the model wrote it.
 		if pod == nil || pod.pod == "" {

@@ -48,6 +48,25 @@ const RunDescriptions = (() => {
 
 // ---- Logic without the DOM (covered by merge_batch_ui_test.mjs) ----
 
+function skillToolWarning(event) {
+  return event.kind === "tool_call" && event.warning
+    ? h("p", { className: "tool-warning" }, h("strong", {}, "Warning"), " ", event.warning)
+    : null;
+}
+
+function runSkillVersions(metadata) {
+  const entries = Object.entries(metadata?.agents || {}).flatMap(([agent, settings]) => {
+    const skills = Object.entries(settings?.skills || {});
+    return skills.length ? [
+      h("dt", {}, agent),
+      h("dd", {}, skills.map(([name, version]) => `${name}@${version}`).sort().join(", ")),
+    ] : [];
+  });
+  return entries.length ? h("div", { className: "section" },
+    h("h3", { className: "section-title" }, "Skills"),
+    h("dl", { className: "prompt-evidence-links" }, ...entries)) : null;
+}
+
 const RunsLogic = (() => {
   const isNode = (s) => s?.service === "merge" || s?.service === "batch";
   const count = (n) => Math.max(0, Math.floor(Number(n)) || 0);
@@ -670,6 +689,7 @@ const RunsLogic = (() => {
       interrupted ? h("p", { className: "evidence-warning" }, "This event started, but its end was never recorded.") : null,
       !inputs.length ? h("p", { className: "evidence-warning" }, "This record names no input artifact.") : null,
       event.error ? h("p", { className: "error-line" }, event.error) : null,
+      skillToolWarning(event),
       metricEvidence(record, event),
       promptEvidence(record, event, context.trace),
       ...conversationEvidence(record, event), spans, logs,
@@ -918,6 +938,7 @@ const RunsLogic = (() => {
           : st.error && st.status !== "Running" && !st.gone ? h("div", { className: "section" },
             h("p", { className: "error-line", title: st.error }, rootError(st.error, trace))) : null,
         podSection(st.devPod, live),
+        runSkillVersions(metadata),
         pullRequestSection(pullText ? RunsLogic.pullRequest(pullText) : null, st.pullRequest),
         telemetry,
         executionTimeline(records, { trace, runStatus: st.status, runError: st.error, inputArtifact: r?.input_artifact, artifacts, passArtifacts, retentionDays: observabilityHealth?.retention_days || 0 }),

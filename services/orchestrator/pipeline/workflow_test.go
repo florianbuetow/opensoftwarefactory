@@ -133,6 +133,9 @@ func TestAgentStepsCarryThePinnedAgent(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 	registerExecutionLifecycle(env)
 	var got StepRequest
+	env.RegisterActivityWithOptions(func(context.Context, ResolveAgentSettingsRequest) (AgentExecutionSettings, error) {
+		return AgentExecutionSettings{Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}, nil
+	}, activity.RegisterOptions{Name: ResolveAgentSettingsActivity})
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
 		got = req
 		return StepResult{Artifact: req.OutputArtifact}, nil
@@ -142,8 +145,34 @@ func TestAgentStepsCarryThePinnedAgent(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if got.Agent != "intake@v2" || got.OutputArtifact != "runs/t4/intake" {
+	if got.Agent != "intake@v2" || got.OutputArtifact != "runs/t4/intake" || got.Skills["git"] != "v3" || got.SkillScriptTimeoutSeconds != 300 {
 		t.Fatalf("request %+v", got)
+	}
+}
+
+func TestMissingSkillVersionStopsTheStepWithoutRetry(t *testing.T) {
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestWorkflowEnvironment()
+	registerExecutionLifecycle(env)
+	attempts := 0
+	env.RegisterActivityWithOptions(func(context.Context, ResolveAgentSettingsRequest) (AgentExecutionSettings, error) {
+		attempts++
+		return AgentExecutionSettings{}, temporal.NewNonRetryableApplicationError("the skill registry does not know git@v9", "MissingSkillVersion", nil)
+	}, activity.RegisterOptions{Name: ResolveAgentSettingsActivity})
+	processed := false
+	env.RegisterActivityWithOptions(func(context.Context, StepRequest) (StepResult, error) {
+		processed = true
+		return StepResult{}, nil
+	}, activity.RegisterOptions{Name: DefaultActivity})
+
+	def := Definition{Name: "w", Steps: []Step{{ID: "code", Service: AgentService, Agent: "coder@v1"}}}
+	env.ExecuteWorkflow(Pipeline, Input{TraceID: "missing-skill", Definition: def, Inputs: runInput("runs/missing-skill/input")})
+	err := env.GetWorkflowError()
+	if err == nil || !strings.Contains(err.Error(), "the skill registry does not know git@v9") {
+		t.Fatalf("error %v", err)
+	}
+	if attempts != 1 || processed {
+		t.Fatalf("attempts %d processed %v", attempts, processed)
 	}
 }
 
@@ -279,7 +308,12 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 		"runs/t11/draft":             []byte(`{"title":"draft"}`),
 		session + "/files/result.md": []byte("# Result"),
 	}
-	env.RegisterActivity(&Activities{Store: store})
+	env.RegisterActivity(&Activities{Store: store, LoadAgentSettings: func(_ context.Context, ref string) (AgentExecutionSettings, error) {
+		if ref == "triage@v1" {
+			return AgentExecutionSettings{Skills: map[string]string{"triage": "v2"}, SkillScriptTimeoutSeconds: 45}, nil
+		}
+		return AgentExecutionSettings{}, nil
+	}})
 	var published StepRequest
 	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
 		if req.StepID == "publish" {
@@ -298,6 +332,9 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 		if p.Step != "chat" || p.Agent != "triage@v1" || strings.Join(p.Agents, ",") != "triage@v1,plain@v2" ||
 			show(p.Inputs) != "draft=runs/t11/draft#1" || p.Artifact != "runs/t11/chat" || p.Session != session {
 			t.Errorf("session %+v", p)
+		}
+		if p.Skills["triage"] != "v2" || p.SkillScriptTimeoutSeconds != 45 || p.AgentSettings["triage@v1"].Skills["triage"] != "v2" {
+			t.Errorf("session settings %+v", p)
 		}
 		if string(store[session+"/files/input-draft.json"]) != `{"title":"draft"}` {
 			t.Errorf("input file not opened: %q", store[session+"/files/input-draft.json"])
@@ -349,6 +386,41 @@ func TestInteractiveStepWaitsForACompletionAndHandsOnTheChosenFile(t *testing.T)
 	}
 	if rec.File != "result.md" || rec.CompletedBy != "flo" || rec.Artifact != "runs/t11/chat" || rec.CompletedAt.IsZero() {
 		t.Fatalf("record %+v", rec)
+	}
+}
+
+func TestTerminalChatFailureStopsTheWaitingInteractiveStep(t *testing.T) {
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestWorkflowEnvironment()
+	store := memStore{"runs/chat-failure/draft": []byte("draft"), "runs/chat-failure/metadata.json": []byte(`{}`)}
+	env.RegisterActivity(&Activities{Store: store})
+	published := false
+	env.RegisterActivityWithOptions(func(_ context.Context, req StepRequest) (StepResult, error) {
+		if req.StepID == "publish" {
+			published = true
+		}
+		return StepResult{Artifact: req.OutputArtifact}, nil
+	}, activity.RegisterOptions{Name: DefaultActivity})
+	env.RegisterDelayedCallback(func() {
+		state := pendingState(t, env)
+		if len(state.Sessions) != 1 || state.Sessions[0].Step != "chat" {
+			t.Errorf("pending sessions %+v", state.Sessions)
+		}
+		env.SignalWorkflow(SessionFailureSignal, SessionFailure{Step: "chat", Type: "SkillScriptNeedsDevPod", Error: "The workflow needs a devpod step before this step to run a skill script."})
+	}, time.Second)
+
+	env.ExecuteWorkflow(Pipeline, Input{TraceID: "chat-failure", Definition: interactive(), Inputs: runInput("runs/chat-failure/input")})
+	err := env.GetWorkflowError()
+	if err == nil || !strings.Contains(err.Error(), `step "chat" failed: The workflow needs a devpod step`) {
+		t.Fatalf("error %v", err)
+	}
+	if published {
+		t.Fatal("publish ran after the terminal chat failure")
+	}
+	var metadata map[string]any
+	_ = json.Unmarshal(store["runs/chat-failure/metadata.json"], &metadata)
+	if metadata["status"] != RunFailed || !strings.Contains(fmt.Sprint(metadata["error"]), `step "chat" failed`) {
+		t.Fatalf("metadata %s", store["runs/chat-failure/metadata.json"])
 	}
 }
 

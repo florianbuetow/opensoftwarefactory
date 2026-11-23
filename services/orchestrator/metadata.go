@@ -26,11 +26,13 @@ type WorkflowVersion struct {
 // AgentSettings are the settings of an agent that shape its output, as the agent registry
 // held them when the run started. Temperature is left out when the agent sets none.
 type AgentSettings struct {
-	Model       string   `json:"model"`
-	Effort      string   `json:"effort"`
-	Temperature *float64 `json:"temperature,omitempty"`
-	Tools       []string `json:"tools"`
-	MaxRetries  int      `json:"max_retries"`
+	Model                     string            `json:"model"`
+	Effort                    string            `json:"effort"`
+	Temperature               *float64          `json:"temperature,omitempty"`
+	Tools                     []string          `json:"tools"`
+	MaxRetries                int               `json:"max_retries"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // agentError stands in for the settings of an agent that could not be read.
@@ -91,18 +93,21 @@ func (s *server) runMetadata(ctx context.Context, c Config, def pipeline.Definit
 
 // agentDefinition is the part of an agent's agent.json the orchestrator reads.
 type agentDefinition struct {
-	Description string   `json:"description"`
-	Models      []string `json:"models"`
-	Effort      string   `json:"effort"`
-	Temperature *float64 `json:"temperature"`
-	Tools       []string `json:"tools"`
-	MaxRetries  int      `json:"max_retries"`
+	Description               string   `json:"description"`
+	Models                    []string `json:"models"`
+	Effort                    string   `json:"effort"`
+	Temperature               *float64 `json:"temperature"`
+	Tools                     []string `json:"tools"`
+	MaxRetries                int      `json:"max_retries"`
+	Skills                    []string `json:"skills"`
+	SkillScriptTimeoutSeconds int      `json:"skill_script_timeout_seconds"`
 }
 
 // agentRegistry reads pinned agents from the agent registry.
 type agentRegistry struct {
-	base   string
-	client *http.Client
+	base      string
+	skillBase string
+	client    *http.Client
 }
 
 // newAgentRegistry uses the registry at AGENT_REGISTRY_URL.
@@ -111,7 +116,11 @@ func newAgentRegistry(client *http.Client) agentRegistry {
 	if base == "" {
 		base = "http://agent-registry:8080"
 	}
-	return agentRegistry{base: strings.TrimRight(base, "/"), client: client}
+	skillBase := os.Getenv("SKILL_REGISTRY_URL")
+	if skillBase == "" {
+		skillBase = "http://skill-registry:8080"
+	}
+	return agentRegistry{base: strings.TrimRight(base, "/"), skillBase: strings.TrimRight(skillBase, "/"), client: client}
 }
 
 // definition reads the agent.json of a pinned agent such as demo/coder@v1.
@@ -157,14 +166,60 @@ func (r agentRegistry) settings(ctx context.Context, ref string) (AgentSettings,
 	if err != nil {
 		return AgentSettings{}, err
 	}
-	out := AgentSettings{Effort: def.Effort, Temperature: def.Temperature, Tools: def.Tools, MaxRetries: def.MaxRetries}
+	out := AgentSettings{Effort: def.Effort, Temperature: def.Temperature, Tools: def.Tools, MaxRetries: def.MaxRetries,
+		SkillScriptTimeoutSeconds: def.SkillScriptTimeoutSeconds}
 	if len(def.Models) > 0 {
 		out.Model = def.Models[0]
 	}
 	if out.Tools == nil {
 		out.Tools = []string{}
 	}
+	if len(def.Skills) > 0 {
+		out.Skills = make(map[string]string, len(def.Skills))
+	}
+	for _, ref := range def.Skills {
+		name, version, ok := strings.Cut(ref, "@")
+		if !ok || name == "" || version == "" {
+			return AgentSettings{}, fmt.Errorf("skill %q is not pinned to a version", ref)
+		}
+		if err := r.skillExists(ctx, name, version); err != nil {
+			return AgentSettings{}, err
+		}
+		out.Skills[name] = version
+	}
 	return out, nil
+}
+
+// unknownSkillVersion marks a pinned skill version that cannot be loaded. A workflow must
+// stop instead of retrying because retrying cannot repair an immutable missing version.
+type unknownSkillVersion struct{ ref string }
+
+func (e unknownSkillVersion) Error() string {
+	return fmt.Sprintf("the skill registry does not know %q", e.ref)
+}
+
+func (r agentRegistry) skillExists(ctx context.Context, name, version string) error {
+	segments := strings.Split(name, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	u := r.skillBase + "/skills/" + strings.Join(segments, "/") + "/" + url.PathEscape(version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return errors.New("the skill registry is not reachable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return unknownSkillVersion{ref: name + "@" + version}
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("the skill registry answered %s", resp.Status)
+	}
+	return nil
 }
 
 // storedStatus answers a run's status from runs/<run id>/metadata.json, for a finished run

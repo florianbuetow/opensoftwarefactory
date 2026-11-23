@@ -190,14 +190,15 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The tool server takes the work token only, git-helper the helper token only.
-	if (r.URL.Path == "/op" && !work) || (r.URL.Path != "/op" && !helper) {
+	workPath := r.URL.Path == "/op" || r.URL.Path == "/skill-script"
+	if (workPath && !work) || (!workPath && !helper) {
 		p.calls = append(p.calls, "denied:"+r.URL.Path)
 		w.WriteHeader(403)
 		return
 	}
 	p.bodies[r.URL.Path] = body
 	switch r.URL.Path {
-	case "/op":
+	case "/op", "/skill-script":
 		name, _ := body["op"].(string)
 		args, _ := body["args"].(map[string]any)
 		p.ops = append(p.ops, args)
@@ -206,6 +207,12 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 			command, _ := args["command"].(string)
 			p.calls = append(p.calls, "run:"+command)
 			answer(map[string]any{"ok": true, "result": map[string]any{"exit_code": p.exitCodes[command], "stdout": "ran " + command, "stderr": ""}})
+		case "run_skill_script":
+			p.calls = append(p.calls, "run_skill_script:"+fmt.Sprint(args["script"]))
+			timedOut := args["script"] == "scripts/timeout.sh"
+			cut := args["script"] == "scripts/cut.sh"
+			answer(map[string]any{"ok": true, "result": map[string]any{"exit_code": 0, "stdout": "skill output",
+				"stderr": "skill error", "stdout_cut": cut, "stderr_cut": false, "timed_out": timedOut}})
 		case "read_file":
 			p.calls = append(p.calls, "read_file:"+fmt.Sprint(args["path"]))
 			if args["path"] == "missing.txt" {
@@ -386,6 +393,7 @@ func (w *world) start(registry string) *service {
 	s := newService(cfg, slog.New(slog.DiscardHandler), http.DefaultClient, kube)
 	s.blobs = blobClient{base: w.blobs.srv.URL, http: http.DefaultClient}
 	s.registry = registry
+	s.skillRegistry = registry
 	s.podURL = func(string, int) string { return w.pod.srv.URL }
 	s.resolve = func(string) ([]string, error) { return []string{"140.82.121.3"}, nil }
 	s.now = func() time.Time { w.clockMu.Lock(); defer w.clockMu.Unlock(); return w.clock }

@@ -29,6 +29,84 @@ function commandLines(value) {
   return lines.filter((line) => typeof line === "string").map((line) => line.trim()).filter(Boolean);
 }
 
+function chooseAgentSkills(current, save) {
+  const selected = new Map(current.map((ref) => ref.split("@")));
+  const skill = h("select", { id: "agent-skill-name", disabled: true });
+  const version = h("select", { id: "agent-skill-version", disabled: true });
+  const add = h("button", { type: "button", disabled: true }, "Add skill");
+  const list = h("ul", { className: "skill-picks", "aria-label": "Selected skills" });
+  const problem = h("p", { className: "error-text", role: "alert" });
+  const endpoint = "/api/skills/skills";
+  let entries = [];
+  let request = 0;
+  let closed = false;
+  const field = (input, label) => h("div", { className: "field" }, h("label", { htmlFor: input.id }, label), input);
+  const apply = h("button", { type: "button", className: "primary", onclick: () => {
+    save([...selected].map(([name, v]) => `${name}@${v}`));
+    dialog.close();
+  } }, "Apply");
+  const dialog = openDialog({
+    title: "Choose skills",
+    body: h("div", { className: "skill-picker" }, list,
+      h("div", { className: "row" }, field(skill, "Skill"), field(version, "Version"), add), problem),
+    footer: [h("button", { type: "button", onclick: () => dialog.close() }, "Cancel"), apply],
+    onClose: () => { closed = true; },
+  });
+  const option = (value, label = value) => h("option", { value }, label);
+  const render = (placeholder) => {
+    const available = entries.filter((entry) => !selected.has(entry));
+    skill.replaceChildren(option("", placeholder || (available.length ? "Select skill" : "No skills available")), ...available.map((name) => option(name)));
+    version.replaceChildren(option("", "Select version"));
+    skill.disabled = !available.length;
+    version.disabled = add.disabled = true;
+    list.replaceChildren(...[...selected].map(([name, v]) =>
+      h("li", {}, h("span", {}, `${name} ${v || ""}`),
+        h("button", { type: "button", onclick: async () => {
+          if (await confirmAction(`Remove ${name}?`, "Remove") && !closed) {
+            request++;
+            selected.delete(name);
+            render();
+            skill.focus();
+          }
+        } }, "Remove"))));
+  };
+  skill.onchange = async () => {
+    const id = ++request;
+    const name = skill.value;
+    version.disabled = add.disabled = true;
+    version.replaceChildren(option("", name ? "Loading…" : "Select version"));
+    problem.textContent = "";
+    if (!name) return;
+    try {
+      const data = await api("GET", `${endpoint}/${name.split("/").map(encodeURIComponent).join("/")}`);
+      if (closed || id !== request) return;
+      const versions = [...data.versions].reverse();
+      version.replaceChildren(...(versions.length ? versions.map(({ version: v }) => option(v)) : [option("", "No versions")]));
+      version.disabled = add.disabled = !versions.length;
+    } catch (error) {
+      if (closed || id !== request) return;
+      version.replaceChildren(option("", "Select version"));
+      problem.textContent = error.message;
+    }
+  };
+  add.onclick = () => {
+    if (!skill.value || !version.value || selected.has(skill.value)) return;
+    selected.set(skill.value, version.value);
+    render();
+    skill.focus();
+  };
+  render("Loading…");
+  api("GET", endpoint).then((data) => {
+    if (closed) return;
+    entries = data.entries.map(({ name }) => name);
+    render();
+  }, (error) => {
+    if (closed) return;
+    render();
+    problem.textContent = error.message;
+  });
+}
+
 // agentFields shows the settings of agent.json as fields beside it: a changed field rewrites
 // the JSON, and an edit of the JSON updates the fields. The models, with whether each is
 // available now, come from the LLM gateway, which maps every model name to a provider's model.
@@ -70,6 +148,13 @@ function agentFields(area, areas = {}) {
   const temperature = h("input", { inputMode: "decimal", placeholder: "Not set", autocomplete: "off", maxLength: 6 });
   const tools = h("button", { type: "button", className: "agent-tool-picker-trigger", "aria-haspopup": "dialog" }, "No tools");
   const policies = h("button", { type: "button", className: "agent-policy-picker-trigger", "aria-haspopup": "dialog" }, "No policies");
+  const skills = h("button", { type: "button", "aria-haspopup": "dialog" }, "No skills");
+  const scriptTimeout = h("input", { inputMode: "numeric", autocomplete: "off", placeholder: "180" });
+  const selectedSkills = (config) => Array.isArray(config?.skills) ? config.skills.filter((ref) => typeof ref === "string") : [];
+  skills.onclick = () => chooseAgentSkills(selectedSkills(read()), (refs) => {
+    write((config) => { if (refs.length) config.skills = refs; else delete config.skills; });
+    refresh();
+  });
   const promptArea = areas["systemprompt.md"];
   const description = h("input", { autocomplete: "off", placeholder: "No description" });
   // unpack_inputs is required in agent.json: ticked, the first message holds the inputs' content.
@@ -120,7 +205,7 @@ function agentFields(area, areas = {}) {
   const box = h("div", { className: "file-fields" });
   function refresh() {
     const d = read();
-    for (const c of [model, effort, temperature, retries, tools, policies, unpack, commands, ...texts]) { c.disabled = !d; c.title = d ? "" : "Needs valid JSON in agent.json"; }
+    for (const c of [model, effort, temperature, retries, tools, policies, skills, scriptTimeout, unpack, commands, ...texts]) { c.disabled = !d; c.title = d ? "" : "Needs valid JSON in agent.json"; }
     if (!d) return;
     renderModel(Array.isArray(d.models) ? d.models[0] || "" : "");
     renderEffort(typeof d.effort === "string" ? d.effort : "");
@@ -130,6 +215,10 @@ function agentFields(area, areas = {}) {
     tools.textContent = selectedTools.length ? `${selectedTools.length} tool${selectedTools.length === 1 ? "" : "s"} selected` : "No tools";
     tools.title = selectedTools.length ? selectedTools.join("\n") : "Choose tools";
     renderPolicies();
+    const skillRefs = selectedSkills(d);
+    skills.textContent = skillRefs.length ? `${skillRefs.length} skill${skillRefs.length === 1 ? "" : "s"} selected` : "No skills";
+    skills.title = skillRefs.join("\n");
+    if (document.activeElement !== scriptTimeout) scriptTimeout.value = d.skill_script_timeout_seconds ?? "";
     unpack.checked = d.unpack_inputs === true;
     if (document.activeElement !== description) description.value = d.description ?? "";
     if (document.activeElement !== commands) { commands.value = commandLines(d.commands).join("\n"); growCommands(); }
@@ -146,6 +235,11 @@ function agentFields(area, areas = {}) {
   retries.addEventListener("input", () => write((d) => { const n = parseInt(retries.value, 10); delete d.max_turns; if (n >= 0) d.max_retries = n; else delete d.max_retries; }));
   // Stored as a number and left out when empty or not a number in range.
   temperature.addEventListener("input", () => write((d) => { const n = modelSetting(temperature.value); if (n === null) delete d.temperature; else d.temperature = n; }));
+  scriptTimeout.addEventListener("input", () => write((d) => {
+    if (!scriptTimeout.value.trim()) delete d.skill_script_timeout_seconds;
+    else d.skill_script_timeout_seconds = /^\d+$/.test(scriptTimeout.value) && Number.isSafeInteger(Number(scriptTimeout.value))
+      ? Number(scriptTimeout.value) : scriptTimeout.value;
+  }));
   description.addEventListener("input", () => write((d) => { d.description = description.value; }));
   unpack.addEventListener("change", () => write((d) => { d.unpack_inputs = unpack.checked; }));
   // One pattern per line; a list without patterns is left out, which allows no command.
@@ -179,8 +273,9 @@ function agentFields(area, areas = {}) {
     let next = [], errors = [];
     try {
       const response = await api("GET", "/api/mcp-gateway/api/services");
-      const services = (response.services || []).filter((service) => service.name && !service.error);
-      errors = (response.services || []).filter((service) => service.error).map((service) => service.name);
+      const catalogServices = (response.services || []).filter((service) => service.name !== "skills");
+      const services = catalogServices.filter((service) => service.name && !service.error);
+      errors = catalogServices.filter((service) => service.error).map((service) => service.name);
       const results = await Promise.allSettled(services.map(async (service) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
@@ -307,6 +402,8 @@ function agentFields(area, areas = {}) {
     field("Max retries", retries, "How many more model calls a run may make after the first, such as after a tool call", "retries"),
     toolsField,
     policiesField,
+    field("Skills", skills, "Choose skills and their pinned versions", "skills"),
+    field("Script timeout", scriptTimeout, "Time limit for each skill script, in seconds", "skill-script-timeout", h("span", { "aria-hidden": "true" }, "s")),
     field("Description", description, "What the agent is for, in a few words", "description"),
     unpackField,
     commandsField,

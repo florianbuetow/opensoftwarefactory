@@ -29,7 +29,9 @@ type sessionChatRequest struct {
 	Message   string `json:"message"`
 	CreatedBy string `json:"created_by"`
 	// DevPod is the run's dev pod; empty when the run has none.
-	DevPod string `json:"dev_pod,omitempty"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // chatLog is the stored history of one tab, <session>/chats/<tab>.json. Messages is the
@@ -65,6 +67,7 @@ type TurnEvent struct {
 	EstimatedOutputTokens *int64    `json:"estimated_output_tokens,omitempty"`
 	EstimationMethod      string    `json:"estimation_method,omitempty"`
 	Error                 string    `json:"error,omitempty"`
+	Warning               string    `json:"warning,omitempty"`
 	MeasurementID         string    `json:"measurement_id,omitempty"`
 }
 
@@ -174,8 +177,12 @@ func (s *Service) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadGateway
 		var ce chatError
+		var app *temporal.ApplicationError
 		if errors.As(err, &ce) {
 			status = ce.status
+		} else if errors.As(err, &app) && app.NonRetryable() {
+			writeChatJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": app.Message(), "type": app.Type()})
+			return
 		}
 		writeChatJSON(w, status, map[string]string{"error": err.Error()})
 		return
@@ -236,6 +243,7 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 	defer span.End()
 	ctx = withCorrelation(ctx, StepRequest{TraceID: req.TraceID, StepID: req.StepID, Agent: ref, OutputArtifact: chatID}, ref, 1)
 	ctx = withDevPod(ctx, req.DevPod, ref, req.TraceID)
+	ctx = withSkills(ctx, req.Skills, req.SkillScriptTimeoutSeconds)
 	ctx, cancel := context.WithTimeout(ctx, chatTurnTimeout)
 	defer cancel()
 	log := s.Logger.With("run_id", req.TraceID, "step", req.StepID, "agent", ref, "chat", chatID, "created_by", req.CreatedBy)
@@ -286,6 +294,11 @@ func (s *Service) Chat(ctx context.Context, req sessionChatRequest) (reply, chat
 		if prompt, _, err = s.compilePrompt(ctx, prompt); err != nil {
 			return "", chatID, 0, err
 		}
+		skillNote, _, err := s.loadSkillNote(ctx, req.Skills)
+		if err != nil {
+			return "", chatID, 0, err
+		}
+		prompt += skillNote
 		history.Created = now
 		note := sessionNote(req.Session)
 		if strings.TrimSpace(req.DevPod) != "" {
@@ -335,10 +348,10 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 	maxCalls := 1 + max(def.MaxRetries, 0)
 	var tools []any
 	routes := map[string]toolRoute{}
-	if len(def.Tools) > 0 {
+	if selected := skillTools(ctx, def.Tools); len(selected) > 0 {
 		eventCtx, event, eventTrace := eventSpan(ctx, RunEvent{Kind: "tool_discovery", Started: time.Now().UTC()}, "agent.tool_discovery")
 		var err error
-		if tools, routes, err = s.discoverTools(eventCtx, def.Tools, log); err != nil {
+		if tools, routes, err = s.discoverTools(eventCtx, selected, log); err != nil {
 			finishEventSpan(event, eventTrace, "failed", categorizedError{"mcp_gateway", err.Error()})
 			return "", err
 		}
@@ -386,6 +399,7 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def Definition, hist
 			}
 			toolOutputEstimate := estimateTokens(text)
 			toolEvent.EstimatedOutputTokens = &toolOutputEstimate
+			toolEvent.Warning = skillWarning(routes[tc.Function.Name], text)
 			if toolFailed {
 				finishEventSpan(event, eventTrace, "failed", categorizedError{"tool", text})
 				history.record(toolEvent, "failed", errors.New(text))

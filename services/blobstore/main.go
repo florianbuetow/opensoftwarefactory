@@ -53,7 +53,7 @@ const (
 	traceIndexMarker = ".indexed"
 )
 
-var segmentPattern = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+var segmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Meta describes one stored object.
 type Meta struct {
@@ -177,11 +177,12 @@ type store struct {
 
 // validID reports whether id is a non-empty object ID that cannot escape the root.
 func validID(id string) bool {
-	if id == "" || len(id) > 512 {
+	if id == "" || (len(id) > 512 && !strings.HasPrefix(id, "skills/")) {
 		return false
 	}
-	for _, seg := range strings.Split(id, "/") {
-		if !segmentPattern.MatchString(seg) {
+	parts := strings.Split(id, "/")
+	for _, seg := range parts {
+		if seg == "." || seg == ".." || !segmentPattern.MatchString(seg) || (strings.HasPrefix(seg, ".") && parts[0] != "skills") {
 			return false
 		}
 	}
@@ -194,6 +195,12 @@ func (s store) paths(id string) (object, meta string, ok bool) {
 		return "", "", false
 	}
 	rel := filepath.FromSlash(id)
+	if strings.HasPrefix(id, "skills/") {
+		// A skill can contain both `config` and `config.json/example.txt`. Their metadata
+		// cannot share the ordinary filename-plus-extension layout.
+		key := sha256.Sum256([]byte(id))
+		return filepath.Join(s.objects, rel), filepath.Join(s.meta, ".skill-files", hex.EncodeToString(key[:])+".json"), true
+	}
 	return filepath.Join(s.objects, rel), filepath.Join(s.meta, rel+".json"), true
 }
 
@@ -419,7 +426,14 @@ func (s store) list(w http.ResponseWriter, r *http.Request) {
 	out := Listing{Prefix: prefix, Directories: []string{}, Objects: []Meta{}}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") && prefix != "skills" && !strings.HasPrefix(prefix, "skills/") {
+			continue
+		}
+		id := name
+		if prefix != "" {
+			id = prefix + "/" + name
+		}
+		if s.isUnpublishedStage(id, e) {
 			continue
 		}
 		if e.IsDir() {
@@ -430,15 +444,26 @@ func (s store) list(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		id := name
-		if prefix != "" {
-			id = prefix + "/" + name
-		}
 		out.Objects = append(out.Objects, s.readMeta(id, info))
 	}
 	sort.Strings(out.Directories)
 	sort.Slice(out.Objects, func(i, j int) bool { return out.Objects[i].ID < out.Objects[j].ID })
 	writeJSON(w, out)
+}
+
+// isUnpublishedStage identifies legacy upload files created beside an object before
+// staging moved to the private transactions directory. A real dot-prefixed object has
+// metadata and remains visible.
+func (s store) isUnpublishedStage(id string, entry fs.DirEntry) bool {
+	if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".upload-") {
+		return false
+	}
+	_, metaPath, ok := s.paths(id)
+	if !ok {
+		return true
+	}
+	_, err := os.Stat(metaPath)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // trace returns every object whose metadata carries the trace ID, oldest first.

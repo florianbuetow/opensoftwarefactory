@@ -197,19 +197,22 @@ type TeamInput struct {
 	Run       string         `json:"run,omitempty"`
 	Rejection *TeamRejection `json:"rejection,omitempty"`
 	// DevPod is the run's dev pod, nil when the team works without one.
-	DevPod *DevPod      `json:"dev_pod,omitempty"`
-	Intake *IntakeInput `json:"intake,omitempty"`
+	DevPod               *DevPod      `json:"dev_pod,omitempty"`
+	Intake               *IntakeInput `json:"intake,omitempty"`
+	ResolveAgentSettings bool         `json:"resolve_agent_settings,omitempty"`
 }
 
 // TeamTurnRequest is the input of the agent service's TeamTurn activity. DevPod is the ID of
 // the run's dev pod, empty when the run has none.
 type TeamTurnRequest struct {
-	TraceID string `json:"trace_id"`
-	StepID  string `json:"step_id"`
-	Team    string `json:"team"`
-	Member  string `json:"member"`
-	Agent   string `json:"agent"`
-	DevPod  string `json:"dev_pod,omitempty"`
+	TraceID                   string            `json:"trace_id"`
+	StepID                    string            `json:"step_id"`
+	Team                      string            `json:"team"`
+	Member                    string            `json:"member"`
+	Agent                     string            `json:"agent"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // turnOutcome is what the team loop reads from a finished turn: the reason when the member
@@ -344,8 +347,9 @@ type nestedRun struct {
 	Run        string
 	WorkflowID string
 	// DevPod is the dev pod the nested run works in, nil when it has none.
-	DevPod *DevPod
-	Intake *IntakeInput
+	DevPod               *DevPod
+	Intake               *IntakeInput
+	ResolveAgentSettings bool
 }
 
 // NestedResult is the result of a nested workflow: the artifacts of its steps and the
@@ -382,14 +386,15 @@ func startNested(ctx, ownCtx workflow.Context, run nestedRun) workflow.Future {
 		})
 		var child Result
 		if err := workflow.ExecuteChildWorkflow(childCtx, WorkflowName, Input{
-			TraceID:    run.TraceID,
-			Definition: resolved.Definition,
-			Inputs:     run.Inputs,
-			Prefix:     run.Prefix,
-			Depth:      run.Depth,
-			Run:        run.Run,
-			DevPod:     run.DevPod,
-			Intake:     run.Intake,
+			TraceID:              run.TraceID,
+			Definition:           resolved.Definition,
+			Inputs:               run.Inputs,
+			Prefix:               run.Prefix,
+			Depth:                run.Depth,
+			Run:                  run.Run,
+			DevPod:               run.DevPod,
+			Intake:               run.Intake,
+			ResolveAgentSettings: run.ResolveAgentSettings,
 		}).Get(ctx, &child); err != nil {
 			setter.Set(nil, err)
 			return
@@ -449,6 +454,7 @@ func Team(ctx workflow.Context, in TeamInput) (StepResult, error) {
 
 	selector := workflow.NewSelector(ctx)
 	running := map[string]bool{}
+	agentSettings := map[string]AgentExecutionSettings{}
 	runs := map[string]int{}
 	turns := 0
 	nudges := 0
@@ -488,8 +494,16 @@ func Team(ctx workflow.Context, in TeamInput) (StepResult, error) {
 					runs[name]++
 					turn = startMemberRun(ctx, ownCtx, in, member, opened.Round, runs[name])
 				} else {
+					settings, loaded := agentSettings[member.Ref]
+					if !loaded && in.ResolveAgentSettings {
+						if err := workflow.ExecuteActivity(ownCtx, ResolveAgentSettingsActivity, ResolveAgentSettingsRequest{Agent: member.Ref}).Get(ctx, &settings); err != nil {
+							return StepResult{}, fmt.Errorf("team member %q failed to load agent %q: %w", name, member.Ref, err)
+						}
+						agentSettings[member.Ref] = settings
+					}
 					turn = workflow.ExecuteActivity(turnCtx, TeamTurnActivity, TeamTurnRequest{
 						TraceID: in.TraceID, StepID: in.Step.ID, Team: in.Team, Member: name, Agent: member.Ref, DevPod: pod,
+						Skills: settings.Skills, SkillScriptTimeoutSeconds: settings.SkillScriptTimeoutSeconds,
 					})
 				}
 				selector.AddFuture(turn, func(f workflow.Future) {
@@ -552,11 +566,12 @@ func startMemberRun(ctx, ownCtx workflow.Context, in TeamInput, member TeamMembe
 		var nested NestedResult
 		if err := startNested(ctx, ownCtx, nestedRun{
 			TraceID: in.TraceID, Name: member.Ref, Prefix: prefix, Depth: in.Depth + 1,
-			Inputs:     []Item{{Source: InputSource, Artifact: task.Artifact, Round: 1}},
-			WorkflowID: fmt.Sprintf("%s/%s.r%d.%d", workflow.GetInfo(ctx).WorkflowExecution.ID, member.Name, round, n),
-			Run:        fmt.Sprintf("%s/r%d.%d", in.Run, round, n),
-			DevPod:     in.DevPod,
-			Intake:     in.Intake,
+			Inputs:               []Item{{Source: InputSource, Artifact: task.Artifact, Round: 1}},
+			WorkflowID:           fmt.Sprintf("%s/%s.r%d.%d", workflow.GetInfo(ctx).WorkflowExecution.ID, member.Name, round, n),
+			Run:                  fmt.Sprintf("%s/r%d.%d", in.Run, round, n),
+			DevPod:               in.DevPod,
+			Intake:               in.Intake,
+			ResolveAgentSettings: in.ResolveAgentSettings,
 		}).Get(ctx, &nested); err != nil {
 			setter.Set(nil, err)
 			return

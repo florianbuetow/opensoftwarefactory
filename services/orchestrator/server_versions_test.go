@@ -387,7 +387,8 @@ func TestStartRunWritesMetadata(t *testing.T) {
 	agents := func(_ context.Context, ref string) (AgentSettings, error) {
 		switch ref {
 		case "demo/coder@v1":
-			return AgentSettings{Model: "qwen3.5-9b-mlx", Effort: "low", Temperature: &temperature, Tools: []string{"factory/send_message"}, MaxRetries: 10}, nil
+			return AgentSettings{Model: "qwen3.5-9b-mlx", Effort: "low", Temperature: &temperature, Tools: []string{"factory/send_message"}, MaxRetries: 10,
+				Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}, nil
 		case "demo/triage@v1":
 			return AgentSettings{}, errors.New("the agent registry does not know this agent")
 		}
@@ -430,7 +431,7 @@ func TestStartRunWritesMetadata(t *testing.T) {
 		t.Fatalf("agents %v", meta.Agents)
 	}
 	coder, _ := json.Marshal(meta.Agents["demo/coder@v1"])
-	if string(coder) != `{"effort":"low","max_retries":10,"model":"qwen3.5-9b-mlx","temperature":0.2,"tools":["factory/send_message"]}` {
+	if string(coder) != `{"effort":"low","max_retries":10,"model":"qwen3.5-9b-mlx","skill_script_timeout_seconds":300,"skills":{"git":"v3"},"temperature":0.2,"tools":["factory/send_message"]}` {
 		t.Errorf("coder %s", coder)
 	}
 	// Temperature is left out when the agent sets none.
@@ -486,9 +487,13 @@ func TestAgentRegistryReadsTheSettingsOfAnAgent(t *testing.T) {
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/agents/demo/coder/v1":
-			_, _ = w.Write([]byte(`{"files":{"agent.json":{"description":"Writes code.","models":["first","second"],"effort":"low","temperature":0,"tools":["factory/send_message"],"max_retries":10}}}`))
+			_, _ = w.Write([]byte(`{"files":{"agent.json":{"description":"Writes code.","models":["first","second"],"effort":"low","temperature":0,"tools":["factory/send_message"],"max_retries":10,"skills":["git@v3"],"skill_script_timeout_seconds":300}}}`))
+		case "/skills/git/v3":
+			_, _ = w.Write([]byte(`{"files":{"SKILL.md":"---\nname: git\ndescription: Git procedures\n---\n"}}`))
 		case "/agents/plain/v2":
 			_, _ = w.Write([]byte(`{"files":{"agent.json":{"models":["only"]}}}`))
+		case "/agents/missing-skill/v1":
+			_, _ = w.Write([]byte(`{"files":{"agent.json":{"skills":["gone@v9"]}}}`))
 		case "/agents/broken/v1":
 			w.WriteHeader(http.StatusInternalServerError)
 		default:
@@ -497,6 +502,7 @@ func TestAgentRegistryReadsTheSettingsOfAnAgent(t *testing.T) {
 	}))
 	defer registry.Close()
 	t.Setenv("AGENT_REGISTRY_URL", registry.URL+"/")
+	t.Setenv("SKILL_REGISTRY_URL", registry.URL+"/")
 	agents := newAgentRegistry(http.DefaultClient)
 	ctx := context.Background()
 	coder, err := agents.settings(ctx, "demo/coder@v1")
@@ -505,7 +511,7 @@ func TestAgentRegistryReadsTheSettingsOfAnAgent(t *testing.T) {
 	}
 	// A temperature of 0 is set, so it is recorded.
 	data, _ := json.Marshal(coder)
-	if string(data) != `{"model":"first","effort":"low","temperature":0,"tools":["factory/send_message"],"max_retries":10}` {
+	if string(data) != `{"model":"first","effort":"low","temperature":0,"tools":["factory/send_message"],"max_retries":10,"skills":{"git":"v3"},"skill_script_timeout_seconds":300}` {
 		t.Errorf("coder %s", data)
 	}
 	plain, err := agents.settings(ctx, "plain@v2")
@@ -517,6 +523,9 @@ func TestAgentRegistryReadsTheSettingsOfAnAgent(t *testing.T) {
 		if _, err = agents.settings(ctx, ref); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v", ref, err)
 		}
+	}
+	if _, err = agents.settings(ctx, "missing-skill@v1"); err == nil || !strings.Contains(err.Error(), `does not know "gone@v9"`) {
+		t.Errorf("missing skill: %v", err)
 	}
 	if got := agentDescriber(agents, slog.New(slog.DiscardHandler))(ctx, "demo/coder@v1"); got != "Writes code." {
 		t.Errorf("description %q", got)

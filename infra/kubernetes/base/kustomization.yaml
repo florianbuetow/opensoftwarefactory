@@ -10,6 +10,7 @@ resources:
   - blobstore
   - agent-registry
   - policy-registry
+  - skill-registry
   - tool-gateway
   - mcp-gateway
   - git-host

@@ -37,6 +37,8 @@ spec:
               value: http://agent-registry:8080
             - name: POLICY_REGISTRY_URL
               value: http://policy-registry:8080
+            - name: SKILL_REGISTRY_URL
+              value: http://skill-registry:8080
             - name: LLM_URL
               value: http://llm-gateway:8080/v1
             - name: MCP_GATEWAY_URL

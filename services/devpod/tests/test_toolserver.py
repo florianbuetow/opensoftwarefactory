@@ -9,6 +9,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -237,10 +238,90 @@ class CommandTest(WorkspaceCase):
         self.assertIn("token=[]", result["stdout"])
 
 
+class SkillScriptTest(WorkspaceCase):
+    def run_script(self, script, files=None, args=None, timeout=5, max_lines=1000, max_bytes=10240):
+        skill_files = {"scripts/run.sh": script} if files is None else files
+        return toolserver.run_skill_script({"files": skill_files, "script": "scripts/run.sh", "args": args or [],
+                                            "timeout_seconds": timeout, "max_lines": max_lines,
+                                            "max_bytes": max_bytes})
+
+    def test_runs_directly_with_arguments_in_workspace_and_cleans_up(self):
+        scratch = lambda: {name for name in os.listdir("/tmp") if name.startswith("factory-skill-")}
+        before = scratch()
+        arguments = ["a b; c", "\"quotes\"", "$(echo not-expanded)", "line\nbreak"]
+        result = self.run_script("#!/bin/sh\nprintf '%s\\n' \"$PWD\"\nprintf '<%s>' \"$@\"\nprintf 'problem' >&2\nexit 7\n",
+                                 args=arguments)
+        self.assertEqual(result["exit_code"], 7)
+        self.assertEqual(result["stdout"], self.root + "\n" + "".join(f"<{value}>" for value in arguments))
+        self.assertEqual(result["stderr"], "problem")
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(scratch(), before)
+
+    def test_files_with_shebangs_are_executable_and_other_files_are_available(self):
+        result = self.run_script("#!/bin/sh\ncat \"$(dirname \"$0\")/../data.txt\"\n",
+                          {"scripts/run.sh": "#!/bin/sh\ncat \"$(dirname \"$0\")/../data.txt\"\n", "data.txt": "hello\n"})
+        self.assertEqual(result["stdout"], "hello\n")
+
+    def test_output_keeps_the_last_byte_and_line_windows(self):
+        result = self.run_script("#!/bin/sh\nprintf 'first\\nsecond-long\\nthird\\n'\nprintf 'a\\nb\\nc\\n' >&2\n",
+                          max_lines=2, max_bytes=13)
+        self.assertEqual(result["stdout"], "third\n")
+        self.assertEqual(result["stderr"], "b\nc\n")
+        self.assertTrue(result["stdout_cut"])
+        self.assertTrue(result["stderr_cut"])
+
+    def test_one_line_larger_than_byte_limit_keeps_its_end(self):
+        result = self.run_script("#!/bin/sh\nprintf 'abcdefghijklmnop'\n", max_bytes=5)
+        self.assertEqual(result["stdout"], "lmnop")
+        self.assertTrue(result["stdout_cut"])
+        result = self.run_script("#!/bin/sh\nprintf 'abcdefghijklmnop\\n'\n", max_bytes=5)
+        self.assertEqual(result["stdout"], "mnop\n")
+        self.assertTrue(result["stdout_cut"])
+
+    def test_a_cut_inside_a_utf8_character_uses_replacement(self):
+        result = self.run_script("#!/bin/sh\nprintf 'xéz'\n", max_bytes=2)
+        self.assertEqual(result["stdout"], "\ufffdz")
+        self.assertTrue(result["stdout_cut"])
+
+    def test_concurrent_calls_have_isolated_directories_and_remove_them(self):
+        script = "#!/bin/sh\nprintf '%s\\n' \"$0\"\nsleep 0.2\n"
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            paths = [result["stdout"].strip() for result in executor.map(self.run_script, (script, script))]
+        self.assertNotEqual(paths[0], paths[1])
+        for path in paths:
+            self.assertTrue(path.startswith("/tmp/factory-skill-"))
+            self.assertFalse(os.path.exists(os.path.dirname(os.path.dirname(path))))
+
+    def test_finishing_the_script_kills_background_children(self):
+        result = self.run_script("#!/bin/sh\n(sleep 1; touch unexpected-background-output) &\nprintf 'complete'\n")
+        self.assertEqual(result["stdout"], "complete")
+        time.sleep(1.1)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "unexpected-background-output")))
+
+    def test_timeout_kills_the_process_group_and_keeps_output_ends(self):
+        started = time.monotonic()
+        result = self.run_script("#!/bin/sh\necho before\nsleep 20 &\nwait\n", timeout=1)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["exit_code"], 124)
+        self.assertIn("before", result["stdout"])
+
+    def test_missing_shebang_and_invalid_input_are_refused(self):
+        self.refused(self.run_script, "echo no", "missing a shebang")
+        self.refused(toolserver.run_skill_script,
+                     {"files": {"../run.sh": "#!/bin/sh\n"}, "script": "../run.sh", "args": [],
+                      "timeout_seconds": 1, "max_lines": 1, "max_bytes": 1}, "invalid")
+        self.refused(toolserver.run_skill_script,
+                     {"files": {"run.sh": "#!/bin/sh\n"}, "script": "run.sh", "args": [1],
+                      "timeout_seconds": 1, "max_lines": 1, "max_bytes": 1}, "list of text")
+
+
 class HttpTest(WorkspaceCase):
     def setUp(self):
         super().setUp()
-        self.server = podhttp.serve(0, "secret-token", {"/op": toolserver.handle_op}, host="127.0.0.1")
+        self.server = podhttp.serve(0, "secret-token",
+                                   {"/op": toolserver.handle_op, "/skill-script": toolserver.handle_skill_script},
+                                   host="127.0.0.1", unbounded_paths=("/skill-script",))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -259,6 +340,18 @@ class HttpTest(WorkspaceCase):
 
     def test_health_needs_no_token(self):
         self.assertEqual(self.call("/healthz"), (200, {"ok": True}))
+
+    def test_skill_operation_has_no_regular_request_limit(self):
+        body = {"op": "run_skill_script", "args": {
+            "files": {"run.sh": "#!/bin/sh\necho hello"}, "script": "run.sh",
+            "timeout_seconds": 1, "max_lines": 2, "max_bytes": 16,
+        }}
+        with mock.patch.object(podhttp, "MAX_BODY_BYTES", 32):
+            self.assertEqual(self.call("/op", body, token="secret-token")[0], 413)
+            self.assertEqual(self.call("/skill-script", body, token="wrong")[0], 401)
+            status, response = self.call("/skill-script", body, token="secret-token")
+        self.assertEqual(status, 200)
+        self.assertEqual(response["result"]["stdout"], "hello\n")
 
     def test_missing_or_wrong_token_is_refused(self):
         body = {"op": "list_files", "args": {"path": "."}}

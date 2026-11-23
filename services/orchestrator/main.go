@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"go.temporal.io/sdk/client"
 	temporalotel "go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
@@ -87,13 +89,24 @@ func run() error {
 	w.RegisterActivity(&pipeline.Activities{Store: blobs, Conditional: blobs, EvaluationURL: envString("EVALUATION_URL", "http://evaluation:8080"), HTTPClient: blobs.Client, LoadDefinitions: func() ([]pipeline.Definition, error) {
 		cfg, err := workflows.snapshot()
 		return cfg.Workflows, err
-	}, DescribeAgent: agentDescriber(agents, logger), Connectors: pipeline.NewHTTPConnectorsFromEnv(blobs.Client)})
+	}, DescribeAgent: agentDescriber(agents, logger), LoadAgentSettings: func(ctx context.Context, ref string) (pipeline.AgentExecutionSettings, error) {
+		settings, err := agents.settings(ctx, ref)
+		if err != nil {
+			var missing unknownSkillVersion
+			if errors.As(err, &missing) {
+				return pipeline.AgentExecutionSettings{}, temporal.NewNonRetryableApplicationError(err.Error(), "MissingSkillVersion", err)
+			}
+			return pipeline.AgentExecutionSettings{}, err
+		}
+		return pipeline.AgentExecutionSettings{Skills: settings.Skills, SkillScriptTimeoutSeconds: settings.SkillScriptTimeoutSeconds}, nil
+	}, Connectors: pipeline.NewHTTPConnectorsFromEnv(blobs.Client)})
 	if err = w.Start(); err != nil {
 		return err
 	}
 	defer w.Stop()
 
-	s := &server{workflows: workflows, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger}
+	s := &server{workflows: workflows, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger,
+		agentURL: strings.TrimRight(envString("AGENT_URL", "http://agent:8080"), "/"), httpClient: blobs.Client}
 	httpServer := &http.Server{Addr: *addr, Handler: otelhttp.NewHandler(s.routes(), "orchestrator.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -326,6 +339,15 @@ func (r temporalRunner) Teams(ctx context.Context) ([]RunningTeam, error) {
 // Complete signals the workflow that holds the interactive step.
 func (r temporalRunner) Complete(ctx context.Context, workflowID string, c pipeline.Completion) error {
 	err := r.c.SignalWorkflow(ctx, workflowID, "", pipeline.CompleteSignal, c)
+	var notFound *serviceerror.NotFound
+	if errors.As(err, &notFound) {
+		return errRunNotFound
+	}
+	return err
+}
+
+func (r temporalRunner) FailSession(ctx context.Context, workflowID string, failure pipeline.SessionFailure) error {
+	err := r.c.SignalWorkflow(ctx, workflowID, "", pipeline.SessionFailureSignal, failure)
 	var notFound *serviceerror.NotFound
 	if errors.As(err, &notFound) {
 		return errRunNotFound

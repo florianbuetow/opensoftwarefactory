@@ -8,7 +8,7 @@ const app = fs.readFileSync(new URL("web/app.js", import.meta.url), "utf8");
 const fillSource = app.slice(app.indexOf("function fill("), app.indexOf("// createTree"));
 // The timeline names a step through RunsLogic, which reads the pass of a step with stepPass.
 const passSource = app.slice(app.indexOf("const PASS_PART ="), app.indexOf("// runIndex knows every run"));
-const logicSource = source.slice(source.indexOf("const RunsLogic ="), source.indexOf("(() => {\n  const MAX_ROWS"));
+const logicSource = source.slice(source.indexOf("function skillToolWarning("), source.indexOf("(() => {\n  const MAX_ROWS"));
 const helpers = fillSource + passSource + logicSource + source.slice(source.indexOf("  async function executionRecords"), source.indexOf("  async function renderDetail"));
 
 function h(tag, props = {}, ...children) {

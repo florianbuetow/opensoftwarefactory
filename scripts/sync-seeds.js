@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-export const seedDirectories = ["registry/agents", "registry/policies", "orchestrator", "git-host", "connectors", "factory-ui"];
+export const seedDirectories = ["registry/agents", "registry/policies", "registry/skills", "orchestrator", "git-host", "connectors", "factory-ui"];
 
 // Seeds are operator data. Reject links rather than copying files outside this tree.
 export async function prepareSeeds(directory) {

@@ -33,7 +33,7 @@ func newTestUI(t *testing.T) (*httptest.Server, chan seen) {
 	t.Helper()
 	got := make(chan seen, 1)
 	b := fakeBackend(t, got)
-	h, err := newHandler(backends{orchestrator: b.URL, agents: b.URL, policies: b.URL, blobs: b.URL, llm: b.URL, mcp: b.URL, evaluations: b.URL, connectors: b.URL, gitHost: b.URL, agent: b.URL}, slog.New(slog.DiscardHandler))
+	h, err := newHandler(backends{orchestrator: b.URL, agents: b.URL, policies: b.URL, blobs: b.URL, llm: b.URL, mcp: b.URL, evaluations: b.URL, connectors: b.URL, gitHost: b.URL}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestBlobsProxyAllowsTaskUploads(t *testing.T) {
 	}
 }
 
-func TestAgentProxyForwardsOnlyChat(t *testing.T) {
+func TestChatProxyForwardsOnlyThroughTheOrchestrator(t *testing.T) {
 	ui, got := newTestUI(t)
 	body := `{"trace_id":"abc","step_id":"talk","session":"user-sessions/abc/talk","tab":"triage","agent":"triage@v1","message":"hello","created_by":"ada"}`
 	resp, err := http.Post(ui.URL+"/api/agent/chat", "application/json", strings.NewReader(body))
@@ -248,8 +248,8 @@ func TestAgentProxyForwardsOnlyChat(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("chat: status %d", resp.StatusCode)
 	}
-	if s := <-got; s.method != http.MethodPost || s.path != "/chat" || s.body != body {
-		t.Fatalf("agent got %+v", s)
+	if s := <-got; s.method != http.MethodPost || s.path != "/api/sessions/chat" || s.body != body {
+		t.Fatalf("orchestrator got %+v", s)
 	}
 	for _, c := range []struct{ method, path string }{
 		{"GET", "/api/agent/chat"},
@@ -291,7 +291,7 @@ func TestAgentChatProxyWaitsUntilItsDeadline(t *testing.T) {
 		_, _ = w.Write([]byte(`{"reply":"done"}`))
 	}))
 	t.Cleanup(agent.Close)
-	h, err := newHandler(backends{orchestrator: agent.URL, agents: agent.URL, policies: agent.URL, blobs: agent.URL, agent: agent.URL}, slog.New(slog.DiscardHandler))
+	h, err := newHandler(backends{orchestrator: agent.URL, agents: agent.URL, policies: agent.URL, blobs: agent.URL}, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

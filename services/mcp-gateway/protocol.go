@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"strings"
@@ -141,8 +142,14 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		fail(400, -32601, req.ID, fmt.Errorf("unsupported method %q", req.Method))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	defer cancel()
+	ctx := r.Context()
+	skillCall := service == "skills" && req.Method == "tools/call"
+	// The connector owns the skill script deadline and returns the retained output on timeout.
+	if !skillCall || tool != "run_skill_script" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+	}
 	headers := protocolHeaders(req.Method == "initialize")
 	copyCorrelationHeaders(headers, r.Header)
 	if session := r.Header.Get("Mcp-Session-Id"); session != "" {
@@ -168,11 +175,15 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	typ, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	responseLimit := maxResponse
+	if skillCall {
+		responseLimit = math.MaxInt
+	}
 	if typ == "text/event-stream" {
 		streamOutcome, streamDetail := "success", ""
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		err = streamEvents(resp.Body, func(lines []string) error {
+		err = streamEvents(resp.Body, responseLimit, func(lines []string) error {
 			filtered, err := filterSSE(lines, req, e.config)
 			if err != nil || filtered == nil {
 				return err
@@ -208,7 +219,12 @@ func (g *gateway) proxy(w http.ResponseWriter, r *http.Request) {
 		fail(502, -32603, req.ID, fmt.Errorf("unsupported upstream content type"))
 		return
 	}
-	body, err := readBounded(resp.Body)
+	var body []byte
+	if skillCall {
+		body, err = io.ReadAll(resp.Body)
+	} else {
+		body, err = readBounded(resp.Body)
+	}
 	if err == nil {
 		body, err = filterResponse(body, req, e.config)
 	}
@@ -445,15 +461,15 @@ func readBounded(r io.Reader) ([]byte, error) {
 	return b, err
 }
 
-func streamEvents(r io.Reader, handle func([]string) error) error {
+func streamEvents(r io.Reader, limit int, handle func([]string) error) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4096), maxResponse)
+	scanner.Buffer(make([]byte, 4096), limit)
 	lines := []string{}
 	size := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		size += len(line)
-		if size > maxResponse {
+		if size > limit {
 			return fmt.Errorf("SSE event exceeds limit")
 		}
 		if line == "" {
@@ -501,7 +517,7 @@ func readRPCResponse(resp *http.Response, id json.RawMessage) (map[string]json.R
 	var err error
 	if typ == "text/event-stream" {
 		done := fmt.Errorf("response complete")
-		err = streamEvents(resp.Body, func(lines []string) error {
+		err = streamEvents(resp.Body, maxResponse, func(lines []string) error {
 			var parts []string
 			for _, line := range lines {
 				if strings.HasPrefix(line, "data:") {

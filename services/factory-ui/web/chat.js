@@ -181,11 +181,6 @@ const ChatLogic = (() => {
   const jsonProblem = (text) => prettyJSON(text).error;
 
   // A session opens at #sessions/<trace>/<step>: its blobstore path without user-sessions/.
-  // devPodOf reads the dev pod of a session entry of GET /api/orchestrator/sessions: "dev_pod" is
-  // the pod's ID, or an object with its "id"; "" when the run has no pod. The chat request sends
-  // it on as "dev_pod".
-  const devPodOf = (entry) => { const pod = entry?.dev_pod; return typeof pod === "string" ? pod : pod && typeof pod.id === "string" ? pod.id : ""; };
-
   const sessionHash = (session) => `#sessions/${String(session).replace(/^user-sessions\//, "")}`;
   function sessionFromHash(rest) {
     const path = String(rest || "").split("?")[0].replace(/^\/+|\/+$/g, "");
@@ -194,7 +189,7 @@ const ChatLogic = (() => {
 
   return {
     MAX_UPLOAD_BYTES, PIPE_MARK, validTabId, validFileName, validSession, agentName, newTabId, tabLabels, fileKind, storedFileName,
-    uploadProblem, findMatches, stepMatch, contentText, conversation, mermaidBlocks, maskTablePipes, unmaskPipes, UNDERSCORE_MARK, maskWordUnderscores, unmaskUnderscores, codeFile, prettyJSON, jsonProblem, sessionHash, sessionFromHash, devPodOf,
+    uploadProblem, findMatches, stepMatch, contentText, conversation, mermaidBlocks, maskTablePipes, unmaskPipes, UNDERSCORE_MARK, maskWordUnderscores, unmaskUnderscores, codeFile, prettyJSON, jsonProblem, sessionHash, sessionFromHash,
   };
 })();
 
@@ -543,8 +538,7 @@ const InteractiveSession = (() => {
       let reply = null, failure = "";
       try {
         reply = await api("POST", "/api/agent/chat", {
-          trace_id: o.traceId, step_id: o.step, session, tab: t.id, agent: t.agent, message: text, created_by: creator(),
-          ...(o.devPod ? { dev_pod: o.devPod } : {}), // the run's dev pod, so the agent's tools reach it
+          workflow_id: o.workflowId, step_id: o.step, session, tab: t.id, agent: t.agent, message: text, created_by: creator(),
         });
       } catch (e) { failure = e.message; }
       // The stored log is the truth, also after a failure: the view shows what the agent kept.

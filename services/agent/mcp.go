@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"strings"
@@ -19,6 +20,7 @@ const mcpProtocolVersion = "2025-11-25"
 
 type mcpClient struct {
 	url         string
+	service     string
 	http        *http.Client
 	nextID      atomic.Uint64
 	session     string
@@ -136,12 +138,21 @@ func (c *mcpClient) call(ctx context.Context, method string, params map[string]a
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("mcp gateway: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
+	skillCall := c.service == skillsService && method == "tools/call"
 	var msg *rpcMessage
 	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt == "text/event-stream" {
-		msg, err = nextEvent(resp.Body, id)
+		limit := 16 << 20
+		if skillCall {
+			limit = math.MaxInt
+		}
+		msg, err = nextEvent(resp.Body, id, limit)
 	} else {
 		msg = &rpcMessage{}
-		err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(msg)
+		var body io.Reader = resp.Body
+		if !skillCall {
+			body = io.LimitReader(body, 16<<20)
+		}
+		err = json.NewDecoder(body).Decode(msg)
 	}
 	if err != nil {
 		if ctx.Err() != nil && method != "initialize" {
@@ -232,9 +243,9 @@ func (c *mcpClient) close() error {
 	return fmt.Errorf("mcp gateway: DELETE session: %s", resp.Status)
 }
 
-func nextEvent(r io.Reader, id json.RawMessage) (*rpcMessage, error) {
+func nextEvent(r io.Reader, id json.RawMessage, limit int) (*rpcMessage, error) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	sc.Buffer(make([]byte, 64*1024), limit)
 	var data []string
 	flush := func() (*rpcMessage, error) {
 		if len(data) == 0 {

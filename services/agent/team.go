@@ -25,7 +25,9 @@ type TeamTurnRequest struct {
 	Member  string `json:"member"`
 	Agent   string `json:"agent"`
 	// DevPod is the run's dev pod; empty when the run has none.
-	DevPod string `json:"dev_pod,omitempty"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
 // TeamTurnResult reports how many model calls the turn made; 0 when nothing was unread.
@@ -364,6 +366,11 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 		if prompt, _, err = s.compilePrompt(ctx, prompt); err != nil {
 			return result, err
 		}
+		skillNote, _, err := s.loadSkillNote(ctx, req.Skills)
+		if err != nil {
+			return result, err
+		}
+		prompt += skillNote
 		if err := turn.add(map[string]string{"role": "system", "content": prompt + teamNote(req.Team, team, req.Member, channels)}); err != nil {
 			return result, err
 		}
@@ -408,6 +415,7 @@ func (s *Service) TeamTurn(ctx context.Context, req TeamTurnRequest) (result Tea
 	}
 
 	turnCtx := withTeamTurnTools(withDevPod(ctx, req.DevPod, ref, req.TraceID), req.Team, req.Member)
+	turnCtx = withSkills(turnCtx, req.Skills, req.SkillScriptTimeoutSeconds)
 	reply, err := s.chatTurn(turnCtx, ref, def, &turn, log)
 	if reason, ok := blockedReason(turnCtx); ok {
 		result.Blocked = reason

@@ -111,6 +111,25 @@ class Connectors:
             raise ValueError(answer.get("error") or f"{tool} was refused without a reason")
         return answer.get("result")
 
+    def skill(self, pod: str, agent: str, run: str, version: str, skill: str,
+              tool: str, args: dict[str, Any]) -> Any:
+        """Read or run a carried skill through the connector service."""
+        try:
+            response = self.client.post(
+                "/api/skills/tool",
+                json={"tool": tool, "pod": pod, "agent": agent, "run": run,
+                      "version": version, "skill": skill, "args": args},
+                timeout=None,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"the connector service did not answer {tool}: {type(exc).__name__}") from exc
+        if response.is_error:
+            raise RuntimeError(f"connector service: HTTP {response.status_code}: {response.text.strip()}")
+        answer = response.json()
+        if not answer.get("ok"):
+            raise ValueError(answer.get("error") or f"{tool} was refused without a reason")
+        return answer.get("result")
+
 
 class TraceEvidence:
     """Read-only, bounded access to execution evidence; never accepts arbitrary URLs or SQL."""

@@ -39,6 +39,10 @@ type config struct {
 	poll             time.Duration // pause between two looks at a starting pod
 	mcpURL           string        // URL the MCP gateway uses for the service devpod
 	registerRetry    time.Duration // pause between two registration attempts
+	skillTimeout     int           // default limit for a skill script
+	skillOutputLines int           // retained lines per skill script stream
+	skillOutputBytes int           // retained bytes per skill script stream
+	skillArgsChars   int           // maximum characters in all skill call arguments
 }
 
 type service struct {
@@ -46,6 +50,7 @@ type service struct {
 	blobs           blobClient
 	kube            cluster
 	registry        string
+	skillRegistry   string
 	mcpGateway      string
 	githubAPI       string
 	http            *http.Client // calls to factory services and GitHub
@@ -99,6 +104,7 @@ func run() error {
 	s := newService(cfg, log, client, kube)
 	s.blobs = blobClient{base: strings.TrimRight(env("BLOBSTORE_URL", "http://blobstore:8080"), "/"), http: client}
 	s.registry = strings.TrimRight(env("AGENT_REGISTRY_URL", "http://agent-registry:8080"), "/")
+	s.skillRegistry = strings.TrimRight(env("SKILL_REGISTRY_URL", "http://skill-registry:8080"), "/")
 	s.mcpGateway = strings.TrimRight(env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"), "/")
 	s.githubAPI = strings.TrimRight(env("GITHUB_API_URL", "https://api.github.com"), "/")
 	s.orchestratorURL = strings.TrimRight(env("ORCHESTRATOR_URL", "http://orchestrator:8080"), "/")
@@ -128,6 +134,7 @@ func run() error {
 
 	go s.loadUntilDone(ctx)
 	go s.registerUntilDone(ctx)
+	go s.registerSkillsUntilDone(ctx)
 	go s.registerFactoryUntilDone(ctx)
 	go s.sweepLoop(ctx)
 	go s.runIntake(ctx)
@@ -220,7 +227,18 @@ func configFromEnv() config {
 		poll:             time.Second,
 		mcpURL:           env("DEVPOD_MCP_URL", "http://tool-gateway:8080/mcp"),
 		registerRetry:    5 * time.Second,
+		skillTimeout:     positiveInt("SKILL_SCRIPT_TIMEOUT_SECONDS", 180),
+		skillOutputLines: positiveInt("SKILL_OUTPUT_MAX_LINES", 1000),
+		skillOutputBytes: positiveInt("SKILL_OUTPUT_MAX_BYTES", 10240),
+		skillArgsChars:   positiveInt("SKILL_ARGS_MAX_CHARS", 1000),
 	}
+}
+
+func positiveInt(k string, d int) int {
+	if v, err := strconv.Atoi(os.Getenv(k)); err == nil && v > 0 {
+		return v
+	}
+	return d
 }
 
 func env(k, d string) string {
@@ -257,6 +275,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("GET /api/devpods/{id}/log", s.viewLog)
 	mux.HandleFunc("GET /api/devpods/{id}/diff", s.viewDiff)
 	mux.HandleFunc("POST /api/devpods/{id}/tool", s.tool)
+	mux.HandleFunc("POST /api/skills/tool", s.skillTool)
 	mux.HandleFunc("GET /api/devpods/{id}/publish-requests", s.listPublishRequests)
 	mux.HandleFunc("POST /api/devpods/{id}/publish-requests/{n}/decision", s.decidePublishRequest)
 	mux.HandleFunc("GET /api/intake/bindings", s.listIntakeBindings)

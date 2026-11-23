@@ -20,6 +20,9 @@ const (
 	// OpenSessionActivity and CompleteSessionActivity serve interactive steps.
 	OpenSessionActivity     = "OpenSession"
 	CompleteSessionActivity = "CompleteSession"
+	// ResolveAgentSettingsActivity reads the immutable settings of a pinned agent immediately
+	// before a node starts.
+	ResolveAgentSettingsActivity = "ResolveAgentSettings"
 	// FinishRunActivity completes the metadata of a top-level run.
 	FinishRunActivity = "FinishRun"
 	// InitializeIntakeActivity atomically claims an accepted event before any graph node.
@@ -95,9 +98,32 @@ type Activities struct {
 	// DescribeAgent returns the description of a pinned agent for team.json, or "" when it
 	// is not known. It may be nil.
 	DescribeAgent func(ctx context.Context, ref string) string
+	// LoadAgentSettings reads the execution settings of a pinned agent. It may be nil in
+	// tests and in orchestrators replaying histories from before agent settings were injected.
+	LoadAgentSettings func(ctx context.Context, ref string) (AgentExecutionSettings, error)
 	// Connectors is the connector service, which owns the dev pods. It may be nil for an
 	// orchestrator whose workflows use none.
 	Connectors Connectors
+}
+
+// AgentExecutionSettings are the agent settings that must be fixed for one node execution.
+type AgentExecutionSettings struct {
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+}
+
+// ResolveAgentSettingsRequest names the pinned agent whose node is about to start.
+type ResolveAgentSettingsRequest struct {
+	Agent string `json:"agent"`
+}
+
+// ResolveAgentSettings reads settings outside workflow code so registry I/O stays
+// deterministic and replayable.
+func (a *Activities) ResolveAgentSettings(ctx context.Context, req ResolveAgentSettingsRequest) (AgentExecutionSettings, error) {
+	if a.LoadAgentSettings == nil {
+		return AgentExecutionSettings{}, nil
+	}
+	return a.LoadAgentSettings(ctx, req.Agent)
 }
 
 type IntakeReceipt struct {

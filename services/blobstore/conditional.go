@@ -105,16 +105,13 @@ func (s store) commitPut(id string, body io.Reader, m Meta, condition putConditi
 	if err := ensureDirDurable(filepath.Dir(object), s.objects); err != nil {
 		return "", 0, err
 	}
-	stage, err := os.CreateTemp(filepath.Dir(object), ".upload-*")
+	stage, err := os.CreateTemp(s.transactions, ".upload-*")
 	if err != nil {
 		return "", 0, err
 	}
 	stagePath := stage.Name()
 	defer os.Remove(stagePath)
-	size, copyErr := io.Copy(stage, io.LimitReader(body, maxObjectBytes+1))
-	if copyErr == nil && size > maxObjectBytes {
-		copyErr = &http.MaxBytesError{Limit: maxObjectBytes}
-	}
+	size, copyErr := copyObject(stage, body, objectSizeLimit(id))
 	if copyErr == nil {
 		copyErr = stage.Sync()
 	}
@@ -149,6 +146,26 @@ func (s store) commitPut(id string, body io.Reader, m Meta, condition putConditi
 		return "", 0, err
 	}
 	return revision, 0, nil
+}
+
+// objectSizeLimit preserves the established cap for ordinary blobs. Skills are
+// explicitly unbounded because one immutable skill version may contain large text files.
+func objectSizeLimit(id string) int64 {
+	if strings.HasPrefix(id, "skills/") {
+		return 0
+	}
+	return maxObjectBytes
+}
+
+func copyObject(dst io.Writer, src io.Reader, limit int64) (int64, error) {
+	if limit == 0 {
+		return io.Copy(dst, src)
+	}
+	size, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err == nil && size > limit {
+		err = &http.MaxBytesError{Limit: limit}
+	}
+	return size, err
 }
 
 func (s store) commitDelete(id string) (status int, err error) {
@@ -226,7 +243,7 @@ func (s store) ensureLegacyRevisions() error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		if entry.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(s.objects, path)
@@ -235,6 +252,9 @@ func (s store) ensureLegacyRevisions() error {
 		}
 		id := filepath.ToSlash(rel)
 		if !validID(id) {
+			return nil
+		}
+		if s.isUnpublishedStage(id, entry) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -263,8 +283,11 @@ func (s store) replayTransaction(journalPath string, j transactionJournal) error
 	object, metaPath, _ := s.paths(j.ID)
 	switch j.Operation {
 	case "put":
-		if j.Stage != "" && (filepath.Dir(j.Stage) != filepath.Dir(object) || !strings.HasPrefix(filepath.Base(j.Stage), ".upload-")) {
-			return errors.New("invalid staged object path")
+		if j.Stage != "" {
+			stageDir := filepath.Dir(j.Stage)
+			if (stageDir != filepath.Dir(object) && stageDir != s.transactions) || !strings.HasPrefix(filepath.Base(j.Stage), ".upload-") {
+				return errors.New("invalid staged object path")
+			}
 		}
 		if j.Stage != "" {
 			if err := os.Rename(j.Stage, object); err != nil && !errors.Is(err, fs.ErrNotExist) {

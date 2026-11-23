@@ -41,6 +41,10 @@ spec:
               value: temporal:7233
             - name: BLOB_URL
               value: http://blobstore:8080/blobs
+            - name: AGENT_URL
+              value: http://agent:8080
+            - name: SKILL_REGISTRY_URL
+              value: http://skill-registry:8080
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
           volumeMounts:

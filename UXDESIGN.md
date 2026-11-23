@@ -30,6 +30,7 @@ An engineer at a desk, daytime, two monitors, the factory UI open for hours next
 - Accent `#2f6fde` (light) / `#6b9cf5` (dark): primary action, selection, focus ring. Nothing else is accent.
 - States, same hue in both themes: running `#b7791f` (amber), done `#1f8a4c` (green), failed `#c23a3a` (red), waiting `#7c3aed` (violet), idle `muted`. A state is a filled dot plus a word; never color alone. Blocked (a run an agent ended with report_blocked) is a state of its own in the waiting hue, with a hollow dot, never the failed one: a person has to clear the way. Kubernetes states in Cluster use the same chips: Running and Ready green, Pending amber, failures red.
 - Contrast: all text, placeholders included, meets 4.5:1 in both themes; placeholders use muted, never the browser grey. Only the decorative "·" separators in a meta line are fainter.
+- Warnings use orange text (`#a44900` in light and `#f5a461` in dark) and always show the word **Warning**. A tool call that returns truncated output keeps its completed state and shows the warning in the event details.
 
 ## Layout
 

@@ -10,7 +10,7 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Central deployment list, in rollout order. Images are built from every services/*/Dockerfile.
-services := "jetstream llm-gateway openobserve telemetry-collector temporal blobstore agent-registry policy-registry tool-gateway mcp-gateway git-host connectors orchestrator evaluation agent factory-ui"
+services := "jetstream llm-gateway openobserve telemetry-collector temporal blobstore agent-registry policy-registry skill-registry tool-gateway mcp-gateway git-host connectors orchestrator evaluation agent factory-ui"
 cluster := "opensoftwarefactory"
 context := "kind-" + cluster
 namespace := "opensoftwarefactory"
@@ -85,7 +85,7 @@ reset:
     trap 'printf "\033[0;31m✗ reset failed\033[0m\n" >&2' ERR
     printf "\033[0;34m=== Resetting factory data ===\033[0m\n"
     printf "\033[0;33mThis deletes every workflow, stored artifact, and run history on this host.\033[0m\n"
-    just _reset-data "temporal blobstore orchestrator agent-registry policy-registry" \
+    just _reset-data "temporal blobstore orchestrator agent-registry policy-registry skill-registry" \
         "services/blobstore/data/objects services/blobstore/data/meta" \
         "/var/lib/opensoftwarefactory/temporal"
     printf "\033[0;32m✓ Factory data reset\033[0m\n"
@@ -611,6 +611,7 @@ check:
     node --check scripts/verify-workflow-events.js
     node --test scripts/jetstream.test.js
     node --test services/factory-ui/measurements_ui_test.mjs
+    node --test services/factory-ui/skills_ui_test.mjs
     node --test scripts/seeds.test.js
     node --check scripts/auxiliary-targets.test.js
     node --check scripts/lifecycle.test.js

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +15,25 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSkillObjectsHaveNoSizeLimit(t *testing.T) {
+	if got := objectSizeLimit("skills/git/v1/large.txt"); got != 0 {
+		t.Fatalf("skill size limit = %d, want unlimited", got)
+	}
+	if got := objectSizeLimit("runs/t-1/output"); got != maxObjectBytes {
+		t.Fatalf("ordinary object size limit = %d", got)
+	}
+	var skill bytes.Buffer
+	if size, err := copyObject(&skill, strings.NewReader("123456"), 0); err != nil || size != 6 || skill.String() != "123456" {
+		t.Fatalf("unlimited copy = %d %q %v", size, skill.String(), err)
+	}
+	var ordinary bytes.Buffer
+	size, err := copyObject(&ordinary, strings.NewReader("123456"), 4)
+	var tooLarge *http.MaxBytesError
+	if size != 5 || !errors.As(err, &tooLarge) || tooLarge.Limit != 4 {
+		t.Fatalf("limited copy = %d %T %v", size, err, err)
+	}
+}
 
 func TestConcurrentCreateIfAbsentHasOneWinner(t *testing.T) {
 	srv, _ := newTestServer(t)

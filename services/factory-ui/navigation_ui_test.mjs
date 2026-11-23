@@ -70,8 +70,8 @@ test("each page has one navigation group and groups open by click", () => {
   assert.equal(document.activeElement, tasks);
 
   rail.children[4].onclick();
-  assert.deepEqual(popover.children.map((item) => item.dataset.page || item.className), ["policies", "nav-planned", "artifacts"]);
-  const planned = popover.children[1];
+  assert.deepEqual(popover.children.map((item) => item.dataset.page || item.className), ["policies", "skills", "nav-planned", "artifacts"]);
+  const planned = popover.children.find((item) => item.className === "nav-planned");
   assert.equal(planned.attrs["aria-disabled"], "true");
   assert.equal(planned.children[1].children[0], "Memory");
   assert.equal(planned.children.length, 2);

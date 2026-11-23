@@ -35,6 +35,8 @@ spec:
               value: http://agent-registry:8080
             - name: POLICY_REGISTRY_URL
               value: http://policy-registry:8080
+            - name: SKILL_REGISTRY_URL
+              value: http://skill-registry:8080
             - name: BLOBSTORE_URL
               value: http://blobstore:8080
             - name: LLM_GATEWAY_URL
@@ -47,8 +49,6 @@ spec:
               value: http://connectors:8080
             - name: GIT_HOST_URL
               value: http://git-host:8080
-            - name: AGENT_URL
-              value: http://agent:8080
             - name: OBSERVABILITY_URL
               value: http://openobserve:5080
             - name: OBSERVABILITY_CONFIG

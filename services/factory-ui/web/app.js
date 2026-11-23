@@ -20,6 +20,7 @@ const PAGES = [
   { name: "sessions", title: "Sessions", icon: "chat", tip: "Interactive sessions waiting for a person" },
   { name: "agents", title: "Agents", icon: "agent", tip: "Versioned agent definitions" },
   { name: "policies", title: "Policies", icon: "policy", tip: "Versioned policies" },
+  { name: "skills", title: "Skills", icon: "skill", tip: "Versioned skills" },
   { name: "mcp-gateway", title: "MCP Gateway", icon: "gateway", tip: "MCP passthrough services" },
   { name: "artifacts", title: "Blobstore", icon: "memory", tip: "Runs, tasks, templates, and artifacts" },
   { name: "metrics", title: "Overview", icon: "metrics", tip: "Factory costs, tokens, runtime, and quality metrics" },
@@ -38,7 +39,7 @@ const NAV_GROUPS = [
   { name: "Factory", icon: "workflow", pages: ["intake", "workflows", "agents", "runs", "evaluations", "events"] },
   { name: "Tasks", icon: "gate", pages: ["decisions", "sessions"] },
   { name: "Connectors", icon: "connector", pages: ["connectors", "mcp-gateway"] },
-  { name: "Context", icon: "memory", pages: ["policies", "artifacts"], planned: [{ before: "artifacts", title: "Memory", note: "Planned feature", icon: "memory" }] },
+  { name: "Context", icon: "memory", pages: ["policies", "skills", "artifacts"], planned: [{ before: "artifacts", title: "Memory", note: "Planned feature", icon: "memory" }] },
 ];
 
 // Icons: 16px, 1.5px stroke, currentColor. Static markup only.
@@ -51,6 +52,7 @@ const ICONS = {
   gate: '<path d="M3 13V5l5-3 5 3v8"/><path d="M6 13V9h4v4"/>',
   agent: '<rect x="3" y="5" width="10" height="8" rx="2"/><path d="M8 2v3M6 9h.01M10 9h.01"/>',
   policy: '<path d="M8 2l5 2v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4z"/>',
+  skill: '<path d="M8 2l6 3-6 3-6-3zM2 8l6 3 6-3M2 11l6 3 6-3"/>',
   gateway: '<path d="M2 4h4M10 4h4M6 2v4M10 2v4M4 12h8M8 6v6"/>',
   memory: '<ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>',
   connector: '<path d="M6 2v3M10 2v3M4.5 5h7v3a3.5 3.5 0 0 1-7 0zM8 11.5V14"/>',
@@ -372,7 +374,7 @@ function markdownEditorSection(label, area, resize = () => {}) {
     if (markdown) preview.setText(area.value);
     area.hidden = markdown;
     preview.body.hidden = !markdown;
-    edit.hidden = !markdown;
+    edit.hidden = !markdown || area.readOnly;
     if (!markdown) resize();
   });
   area.addEventListener("input", () => preview.setText(area.value));
@@ -388,7 +390,7 @@ function markdownEditorSection(label, area, resize = () => {}) {
 // Blobstore evidence links are limited to valid blob IDs. They never turn arbitrary URL-looking
 // text into a link, and they always open the corresponding object on the Blobstore page.
 const blobPartPattern = "[A-Za-z0-9_-](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?";
-const blobIDPattern = new RegExp("(?:^|[\\s\"'(])((?:runs|agents|policies|tasks|templates|evaluation-sets|mcp-gateway)/" + blobPartPattern + "(?:/" + blobPartPattern + ")*)", "g");
+const blobIDPattern = new RegExp("(?:^|[\\s\"'(])((?:runs|agents|policies|skills|tasks|templates|evaluation-sets|mcp-gateway)/" + blobPartPattern + "(?:/" + blobPartPattern + ")*)", "g");
 function validBlobID(id) {
   return String(id || "").length <= 512 && String(id || "").split("/").every((part) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(part));
 }
@@ -418,6 +420,7 @@ function promptEvidenceLinks(record) {
   row("Source prompt", ["Recorded", evidence.source_prompt_artifact], ["Registry", evidence.agent_source_artifact]);
   row("Effective prompt", ["Recorded", evidence.effective_prompt_artifact]);
   for (const policy of evidence.policies || []) row(`Policy ${policy.id} ${policy.version}`, ["Recorded", policy.snapshot_artifact], ["Registry", policy.source_artifact]);
+  for (const skill of evidence.skills || []) row(`Skill ${skill.name} ${skill.version}`, ["Registry", skill.source_artifact]);
   return rows.length ? h("dl", { className: "prompt-evidence-links" }, ...rows) : null;
 }
 function blobReferencePanel(text, excluded = []) {
@@ -1194,6 +1197,7 @@ const PANELS = {
   judges: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   agents: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   policies: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
+  skills: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   "mcp-gateway": [
     { column: ".list-panel", prop: "--col-list", min: 200, max: 480 },
     { column: ".mcp-test", prop: "--col-detail", min: 320, max: 720, edge: "left" },
@@ -1324,7 +1328,7 @@ function setupPanels() {
 }
 
 // Pages whose actions record the acting person: the chip turns red there when empty.
-const NEEDS_NAME = new Set(["workflows", "decisions", "sessions", "agents", "policies", "artifacts"]);
+const NEEDS_NAME = new Set(["workflows", "decisions", "sessions", "agents", "policies", "skills", "artifacts"]);
 
 function updateNameWarning() {
   const missing = NEEDS_NAME.has(activeTab) && !creator();

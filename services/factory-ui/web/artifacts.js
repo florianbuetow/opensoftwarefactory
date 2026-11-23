@@ -280,6 +280,7 @@
         parsed.prompt_evidence.source_prompt_artifact,
         parsed.prompt_evidence.effective_prompt_artifact,
         ...(parsed.prompt_evidence.policies || []).flatMap((policy) => [policy.source_artifact, policy.snapshot_artifact]),
+        ...(parsed.prompt_evidence.skills || []).map((skill) => skill.source_artifact),
       ] : [];
       fill(detail, h("div", { className: "content-format" }, view.toggle), evidence, blobReferencePanel(text, excluded), view.body);
     } catch (e) {

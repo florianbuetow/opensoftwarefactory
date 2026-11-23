@@ -124,6 +124,25 @@ func newTestRegistryWithPolicies(t *testing.T, policies http.Handler) (*httptest
 	return srv, blobs
 }
 
+func newTestSkillRegistry(t *testing.T, seed string) (*httptest.Server, *fakeBlobstore) {
+	t.Helper()
+	blobs := newFakeBlobstore()
+	blobSrv := httptest.NewServer(blobs)
+	t.Cleanup(blobSrv.Close)
+	reg := &registry{
+		prefix: "skills", files: []string{"SKILL.md"}, openFiles: true,
+		blobs: blobClient{base: blobSrv.URL, client: http.DefaultClient}, logger: slog.New(slog.DiscardHandler),
+	}
+	if seed != "" {
+		if err := reg.seedWithRetry(t.Context(), seed, time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(reg.routes())
+	t.Cleanup(srv.Close)
+	return srv, blobs
+}
+
 func call(t *testing.T, method, url, body string, headers map[string]string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(method, url, strings.NewReader(body))
@@ -489,5 +508,191 @@ func TestFoldersGroupEntries(t *testing.T) {
 	}
 	if code, _ := call(t, http.MethodDelete, srv.URL+"/agents/translation/en-2-de", "", nil); code != http.StatusNoContent {
 		t.Fatalf("delete in folder %d", code)
+	}
+}
+
+func TestSkillRegistryStoresReadsAndDeletesNestedFiles(t *testing.T) {
+	srv, blobs := newTestSkillRegistry(t, "")
+	root := "---\nname: git\ndescription: Git procedures\n---\n# Git\n"
+	release := "---\nname: release\ndescription: Create a release\n---\n# Release\n"
+	body, _ := json.Marshal(map[string]any{"files": map[string]any{
+		"SKILL.md": root, "release/SKILL.md": release, "release/scripts/tag.sh": "#!/bin/sh\necho tag\n",
+		"release/settings.json": `{"version":1}`,
+	}})
+	code, response := call(t, http.MethodPost, srv.URL+"/skills/git", string(body), nil)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, response)
+	}
+	if got := string(blobs.data["skills/git/v1/release/scripts/tag.sh"]); got != "#!/bin/sh\necho tag\n" {
+		t.Fatalf("nested script = %q", got)
+	}
+	code, response = call(t, http.MethodGet, srv.URL+"/skills/git/v1", "", nil)
+	if code != http.StatusOK || !strings.Contains(response, `"release/scripts/tag.sh":"#!/bin/sh\necho tag\n"`) ||
+		!strings.Contains(response, `"release/settings.json":"{\"version\":1}"`) {
+		t.Fatalf("read = %d %s", code, response)
+	}
+	code, response = call(t, http.MethodGet, srv.URL+"/skills", "", nil)
+	if code != http.StatusOK || !strings.Contains(response, `"name":"git"`) || strings.Contains(response, `"name":"git/release"`) {
+		t.Fatalf("entries = %d %s", code, response)
+	}
+	if code, response = call(t, http.MethodDelete, srv.URL+"/skills/git/v1", "", nil); code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", code, response)
+	}
+	if _, reserved := blobs.data["skills/git/.retired-v1"]; !reserved || len(blobs.data) != 1 {
+		t.Fatalf("expected only the retired version marker: %v", blobs.data)
+	}
+}
+
+func TestDeletedSkillVersionsAreNeverReissued(t *testing.T) {
+	srv, _ := newTestSkillRegistry(t, "")
+	entry := srv.URL + "/skills/git"
+	body := `{"files":{"SKILL.md":"---\nname: git\ndescription: Versioned guide\n---\n"}}`
+	check := func(method, route, payload string, wantCode int, wantText string) {
+		t.Helper()
+		if code, response := call(t, method, route, payload, nil); code != wantCode || !strings.Contains(response, wantText) {
+			t.Fatalf("%s %s: %d %s", method, route, code, response)
+		}
+	}
+	check(http.MethodPost, entry, body, http.StatusCreated, `"version":"v1"`)
+	check(http.MethodPost, entry, body, http.StatusCreated, `"version":"v2"`)
+	check(http.MethodDelete, entry+"/v2", "", http.StatusNoContent, "")
+	check(http.MethodPost, entry, body, http.StatusCreated, `"version":"v3"`)
+	check(http.MethodGet, entry+"/v2", "", http.StatusNotFound, "")
+	check(http.MethodDelete, entry, "", http.StatusNoContent, "")
+	check(http.MethodGet, srv.URL+"/skills", "", http.StatusOK, `"entries":[]`)
+	check(http.MethodPost, entry, body, http.StatusCreated, `"version":"v4"`)
+	for _, version := range []string{"v1", "v2", "v3"} {
+		check(http.MethodGet, entry+"/"+version, "", http.StatusNotFound, "")
+	}
+}
+
+func TestSkillRegistryValidatesPathsTextAndFrontMatter(t *testing.T) {
+	srv, blobs := newTestSkillRegistry(t, "")
+	validRoot := "---\nname: git\ndescription: Git procedures\n---\n"
+	for name, files := range map[string]map[string]any{
+		"missing root":       {"notes.md": "text"},
+		"absolute path":      {"SKILL.md": validRoot, "/script.sh": "x"},
+		"parent path":        {"SKILL.md": validRoot, "scripts/../x": "x"},
+		"non text":           {"SKILL.md": validRoot, "data.json": map[string]any{"x": 1}},
+		"null text":          {"SKILL.md": validRoot, "notes.md": nil},
+		"folder is a file":   {"SKILL.md": validRoot, "scripts": "x", "scripts/run.sh": "x"},
+		"root name mismatch": {"SKILL.md": "---\nname: other\ndescription: Git\n---\n"},
+		"empty description":  {"SKILL.md": "---\nname: git\ndescription: ''\n---\n"},
+		"subskill mismatch":  {"SKILL.md": validRoot, "release/SKILL.md": "---\nname: deploy\ndescription: Release\n---\n"},
+	} {
+		body, _ := json.Marshal(map[string]any{"files": files})
+		if code, response := call(t, http.MethodPost, srv.URL+"/skills/git", string(body), nil); code != http.StatusUnprocessableEntity {
+			t.Errorf("%s accepted: %d %s", name, code, response)
+		}
+	}
+	if len(blobs.data) != 0 {
+		t.Fatalf("invalid skill wrote files: %v", blobs.data)
+	}
+	reg := registry{prefix: "skills", files: []string{"SKILL.md"}, openFiles: true}
+	invalidUTF8 := json.RawMessage(append([]byte{'"'}, append([]byte{0xff}, '"')...))
+	if _, err := reg.encodeFiles(map[string]json.RawMessage{"SKILL.md": invalidUTF8}); err == nil || !strings.Contains(err.Error(), `file "SKILL.md" must be UTF-8 text`) {
+		t.Fatalf("invalid UTF-8 error = %v", err)
+	}
+}
+
+func TestIncompleteSkillIsInvisibleAndItsFilesAreRemovedOnRetry(t *testing.T) {
+	srv, blobs := newTestSkillRegistry(t, "")
+	blobs.mu.Lock()
+	id := "skills/git/v1/stale/files.txt"
+	blobs.data[id] = []byte("unpublished")
+	blobs.meta[id] = objectMeta{ID: id}
+	blobs.mu.Unlock()
+	if code, response := call(t, http.MethodGet, srv.URL+"/skills/git/v1", "", nil); code != http.StatusNotFound {
+		t.Fatalf("incomplete skill read = %d %s", code, response)
+	}
+	if code, response := call(t, http.MethodPost, srv.URL+"/skills/git",
+		`{"files":{"SKILL.md":"---\nname: git\ndescription: Git procedures\n---\n"}}`, nil); code != http.StatusCreated || !strings.Contains(response, `"version":"v1"`) {
+		t.Fatalf("retry = %d %s", code, response)
+	}
+	if code, response := call(t, http.MethodGet, srv.URL+"/skills/git/v1", "", nil); code != http.StatusOK || strings.Contains(response, "stale") {
+		t.Fatalf("published skill read = %d %s", code, response)
+	}
+}
+
+func TestSkillCanExceedTheFixedRegistryBodyLimit(t *testing.T) {
+	srv, blobs := newTestSkillRegistry(t, "")
+	large := strings.Repeat("a", maxBodyBytes)
+	body, err := json.Marshal(map[string]any{"files": map[string]string{
+		"SKILL.md": "---\nname: git\ndescription: Git procedures\n---\n", "large.txt": large,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, response := call(t, http.MethodPost, srv.URL+"/skills/git", string(body), nil); code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, response)
+	}
+	if got := len(blobs.data["skills/git/v1/large.txt"]); got != len(large) {
+		t.Fatalf("stored %d bytes, want %d", got, len(large))
+	}
+}
+
+func TestSkillSeedStoresNestedFiles(t *testing.T) {
+	seed := t.TempDir()
+	dir := filepath.Join(seed, "git", "v2", "scripts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "git", "v2", "SKILL.md"), []byte("---\nname: git\ndescription: Git procedures\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "status.sh"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, blobs := newTestSkillRegistry(t, seed)
+	if got := string(blobs.data["skills/git/v2/scripts/status.sh"]); got != "#!/bin/sh\n" {
+		t.Fatalf("seeded script = %q", got)
+	}
+	if code, response := call(t, http.MethodGet, srv.URL+"/skills/git/v2", "", nil); code != http.StatusOK || !strings.Contains(response, "scripts/status.sh") {
+		t.Fatalf("seed read = %d %s", code, response)
+	}
+}
+
+func TestAgentSkillReferencesArePinnedUniqueAndExist(t *testing.T) {
+	var requests []string
+	skills := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		if r.URL.Path == "/skills/git/v3" {
+			writeJSON(w, http.StatusOK, map[string]any{"version": "v3", "files": map[string]string{"SKILL.md": "text"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(skills.Close)
+	blobs := newFakeBlobstore()
+	blobSrv := httptest.NewServer(blobs)
+	t.Cleanup(blobSrv.Close)
+	reg := &registry{
+		prefix: "agents", files: []string{"systemprompt.md", "agent.json"},
+		blobs: blobClient{base: blobSrv.URL, client: http.DefaultClient}, policiesURL: skills.URL,
+		skillsURL: skills.URL, http: skills.Client(), logger: slog.New(slog.DiscardHandler),
+	}
+	srv := httptest.NewServer(reg.routes())
+	t.Cleanup(srv.Close)
+	post := func(agent map[string]any) (int, string) {
+		agent["unpack_inputs"] = true
+		body, _ := json.Marshal(map[string]any{"files": map[string]any{"systemprompt.md": "prompt", "agent.json": agent}})
+		return call(t, http.MethodPost, srv.URL+"/agents/coder", string(body), nil)
+	}
+	if code, response := post(map[string]any{"skills": []string{"git@v3"}, "skill_script_timeout_seconds": 300}); code != http.StatusCreated {
+		t.Fatalf("valid = %d %s", code, response)
+	}
+	if len(requests) != 1 || requests[0] != "/skills/git/v3" {
+		t.Fatalf("requests = %v", requests)
+	}
+	for name, agent := range map[string]map[string]any{
+		"unpinned":  {"skills": []string{"git"}},
+		"latest":    {"skills": []string{"git@latest"}},
+		"duplicate": {"skills": []string{"git@v3", "git@v2"}},
+		"missing":   {"skills": []string{"git@v9"}},
+		"timeout":   {"skill_script_timeout_seconds": 0},
+	} {
+		if code, response := post(agent); code != http.StatusUnprocessableEntity {
+			t.Errorf("%s accepted: %d %s", name, code, response)
+		}
 	}
 }

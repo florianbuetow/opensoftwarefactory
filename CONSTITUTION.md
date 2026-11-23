@@ -19,9 +19,9 @@ Edits are new versions.
 └──────────┘    └──────────┘
 ```
 
-Same rule for agents, policies, and workflows. Skills follow the same rule. That registry is not built yet.
+Same rule for agents, policies, skills, and workflows.
 
-- `services/registry/` stores `agents/<name>/v<N>/systemprompt.md` and `agent.json`, and `policies/<name>/v<N>/policy.md`. A posted save is the next `v<N>`.
+- `services/registry/` stores agent prompts and settings, policies, and skill folders. A posted save is the next `v<N>`.
 - `services/orchestrator/store.go` stores `workflows/<name>/v<N>/workflow.json`.
 - `services/orchestrator/workflows.go` assigns the next version in `postWorkflowVersion`. `patchWorkflowDescription` edits the description of the version you have open.
 - `services/factory-ui/web/agents.js`, `policies.js`, `workflows.js`, and `runs.js` are the screens. Re-run is in `runs.js`.

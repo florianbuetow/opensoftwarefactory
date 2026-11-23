@@ -372,7 +372,7 @@ test("a message is posted once, the view shows the stored log afterwards, and th
   input.dispatch("keydown", { key: "Enter", shiftKey: false, preventDefault() { prevented = true; } });
   assert.equal(prevented, true);
   assert.equal(ui.posts().length, 1);
-  assert.deepEqual(ui.posts()[0].body, { trace_id: "trace-1", step_id: "talk", session: SESSION, tab: "triage", agent: "triage@v1", message: "What is in the files?", created_by: "ada" });
+  assert.deepEqual(ui.posts()[0].body, { workflow_id: "wf-run-1", step_id: "talk", session: SESSION, tab: "triage", agent: "triage@v1", message: "What is in the files?", created_by: "ada" });
 
   // Busy: the message shows at once, the box is empty, and further sends do nothing.
   assert.equal(input.value, "");
@@ -665,7 +665,7 @@ test("the hash names the session, also one of a routed child run; a waiting one 
   await page.show("/done/talk");
   assert.equal(page.mounts.length, 2);
   assert.ok(page.mounts[0].destroyed);
-  assert.deepEqual(plain({ ...page.mounts[1].options, onComplete: undefined, filesContainer: undefined }), { session: "user-sessions/done/talk", traceId: "done", workflow: "bug-triage", step: "talk", devPod: "", closed: true });
+  assert.deepEqual(plain({ ...page.mounts[1].options, onComplete: undefined, filesContainer: undefined }), { session: "user-sessions/done/talk", traceId: "done", workflow: "bug-triage", step: "talk", closed: true });
   assert.deepEqual(page.rows().map((r) => r.title), ["Bug Triage › Talk", "Bug Triage › Talk", "Bug Triage › Talk"], "kept in the list while the page is open");
 
   // A session that does not exist gives way to the open one; nothing new is mounted.

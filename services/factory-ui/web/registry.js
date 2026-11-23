@@ -101,7 +101,7 @@ async function runExclusive(state, control, operation) {
   finally { state.busy = false; if (control?.isConnected) control.disabled = false; }
 }
 
-function registryTab({ tab, base, noun, files }) {
+function registryTab({ tab, base, noun, files, fileTree }) {
   const LAST_KEY = `factory.last.${tab}`;
   const plural = `${noun[0].toUpperCase()}${noun.slice(1)}s`.replace("Policys", "Policies");
   // draft is a new version being written ({ name, version }): shown in the tree, stored when saved.
@@ -285,11 +285,11 @@ function registryTab({ tab, base, noun, files }) {
       groupProblem.textContent = nameProblem.textContent = "";
       const g = groupValue(), n = name.value.trim();
       const fail = (p, field, text) => { p.textContent = text; field.focus(); return ""; };
-      if (!g) return fail(groupProblem, group, "Enter a group.");
-      if (!validName(g)) return fail(groupProblem, group, "Use lowercase letters, digits, and dashes; separate nested groups with /.");
+      if (!g && !fileTree) return fail(groupProblem, group, "Enter a group.");
+      if (g && !validName(g)) return fail(groupProblem, group, "Use lowercase letters, digits, and dashes; separate nested groups with /.");
       if (!n) return fail(nameProblem, name, "Enter a name.");
       if (n.includes("/") || !validName(n)) return fail(nameProblem, name, "Use lowercase letters, digits, and dashes.");
-      if (!validName(`${g}/${n}`)) return fail(groupProblem, group, "Groups nest at most three deep.");
+      if (!validName(full())) return fail(groupProblem, group, "Groups nest at most three deep.");
       if (full() !== except && state.entries.some((e) => e.name === full())) return fail(nameProblem, name, `${full()} already exists.`);
       if (full() !== except && folderPaths().has(full())) return fail(nameProblem, name, `${full()} is a group.`);
       return full();
@@ -307,7 +307,8 @@ function registryTab({ tab, base, noun, files }) {
     state.versions.delete(name);
     try {
       for (const { v, c } of contents) {
-        await api("POST", `${base}/${enc(target)}`, { files: c.files }, { "X-Creator": v.creator || creator() || "unknown" });
+        const moved = fileTree ? fileTree.renameEntry(c.files, name, target) : c.files;
+        await api("POST", `${base}/${enc(target)}`, { files: moved }, { "X-Creator": v.creator || creator() || "unknown" });
       }
     } catch (e) {
       for (const { v, c } of contents) await api("POST", `${base}/${enc(name)}`, { files: c.files }, { "X-Creator": v.creator || "unknown" }).catch(() => {});
@@ -348,6 +349,7 @@ function registryTab({ tab, base, noun, files }) {
 
   // collectFiles reads the editors into the request body, parsing the JSON files.
   function collectFiles(areas) {
+    if (fileTree) return areas.collect();
     const out = {};
     for (const f of files) {
       const text = areas[f.name].value;
@@ -410,7 +412,7 @@ function registryTab({ tab, base, noun, files }) {
         setSaveState(`Saved ${res.version}`);
         location.hash = `#${tab}/${res.name}/${res.version}`;
       } catch (e) {
-        if (/policy/i.test(e.message)) problem.textContent = e.message;
+        if (fileTree || /policy|skill/i.test(e.message)) problem.textContent = e.message;
         else setStatus(`Not saved: ${e.message}`, "error");
       }
     });
@@ -453,8 +455,7 @@ function registryTab({ tab, base, noun, files }) {
   // renderContent shows a version's files. The Save row appears with the first edit, or at
   // once for a draft version, which Cancel discards.
   function renderContent(c, draft = false) {
-    const areas = {};
-    const original = {};
+    let areas;
     const problem = h("p", { className: "error-text", role: "alert" });
     const actions = h("div", { className: "section actions", hidden: true });
     const save = h("button", { type: "button", className: "primary", onclick: async () => {
@@ -466,6 +467,19 @@ function registryTab({ tab, base, noun, files }) {
       renderContent(c);
     } }, "Cancel");
     actions.append(cancel, save);
+    if (fileTree) {
+      const readOnly = !draft && c.version !== state.versions.get(c.name)?.[0]?.version;
+      areas = fileTree.render(c.files, { readOnly, onChange(dirty) {
+        state.unsaved = dirty;
+        actions.hidden = !dirty && !draft;
+      } }, editor, autosize);
+      actions.hidden = readOnly || !draft;
+      detail.replaceChildren(problem, areas.element, actions);
+      if (draft) areas.focus();
+      return;
+    }
+    areas = {};
+    const original = {};
     const check = () => {
       state.unsaved = files.some((f) => areas[f.name].value !== original[f.name]);
       actions.hidden = !state.unsaved && !draft;
@@ -486,7 +500,7 @@ function registryTab({ tab, base, noun, files }) {
     try {
       const versions = await loadVersions(name);
       const c = await api("GET", `${base}/${enc(name)}/${encodeURIComponent(from)}`);
-      const next = `v${Math.max(0, ...versions.map((v) => parseInt(v.version.slice(1), 10) || 0)) + 1}`;
+      const next = fileTree ? "Draft version" : `v${Math.max(0, ...versions.map((v) => parseInt(v.version.slice(1), 10) || 0)) + 1}`;
       state.unsaved = false;
       state.name = name;
       state.version = from;
@@ -507,12 +521,17 @@ function registryTab({ tab, base, noun, files }) {
     state.name = state.version = "";
     tree.select(null);
     const id = nameFields(`${tab}-new`, prefill?.group ? `${prefill.group}/` : "");
-    const areas = {};
-    for (const f of files) areas[f.name] = editor(f, prefill?.files?.[f.name] ?? f.template(""), () => { state.unsaved = true; });
+    const areas = fileTree ? fileTree.render(Object.fromEntries(files.map((f) => [f.name, f.template("")])), {
+      onChange() { state.unsaved = true; },
+    }, editor, autosize) : {};
+    if (!fileTree) {
+      for (const f of files) areas[f.name] = editor(f, prefill?.files?.[f.name] ?? f.template(""), () => { state.unsaved = true; });
+    }
     const problem = h("p", { className: "error-text", role: "alert" });
     const submit = async () => { const n = id.check(); if (n) await create(n, areas, problem); };
     // The JSON names the entry by its full name, kept in step with the two fields.
     const syncName = () => {
+      if (fileTree) { areas.syncName(id.name.value.trim()); return; }
       for (const f of files.filter((x) => x.json)) {
         try {
           const obj = JSON.parse(areas[f.name].value);
@@ -527,8 +546,7 @@ function registryTab({ tab, base, noun, files }) {
     detail.replaceChildren(
       problem,
       h("section", { className: "section" }, id.row),
-      ...settingsSections(areas),
-      ...files.map((f) => fileSection(f, areas[f.name])),
+      ...(fileTree ? [areas.element] : [...settingsSections(areas), ...files.map((f) => fileSection(f, areas[f.name]))]),
       h("div", { className: "section actions" },
         h("button", { type: "button", onclick: () => { state.unsaved = false; show(""); } }, "Cancel"),
         h("button", { type: "button", className: "primary", onclick: submit }, `Create ${noun}`)),
@@ -548,7 +566,7 @@ function registryTab({ tab, base, noun, files }) {
       const c = await api("GET", `${base}/${enc(source)}/${encodeURIComponent(v)}`);
       let name = `${source}-copy`;
       for (let n = 2; state.entries.some((e) => e.name === name); n++) name = `${source}-copy-${n}`;
-      const copy = { ...c.files };
+      const copy = fileTree ? fileTree.renameEntry(c.files, source, name) : { ...c.files };
       for (const f of files.filter((x) => x.json)) {
         const json = copy[f.name];
         if (json && typeof json === "object" && json.name === source) copy[f.name] = { ...json, name };

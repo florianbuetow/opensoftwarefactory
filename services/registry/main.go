@@ -24,23 +24,28 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.yaml.in/yaml/v3"
 )
 
 const maxBodyBytes = 16 << 20
+const retiredSkillVersionPrefix = ".retired-"
 
 // segmentPattern matches one segment of a name; a name is up to maxDepth segments.
 var segmentPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -77,6 +82,7 @@ func main() {
 func run() error {
 	prefix := flag.String("prefix", "agents", "blobstore prefix and URL path of the entries, such as agents or policies")
 	files := flag.String("files", "systemprompt.md,agent.json", "comma-separated files every version must contain")
+	openFiles := flag.Bool("open-files", false, "allow additional text files below each version")
 	seed := flag.String("seed", "", "directory with <name>/<version>/<files> to store when missing")
 	addr := flag.String("addr", ":8080", "listen address")
 	flag.Parse()
@@ -99,8 +105,10 @@ func run() error {
 	reg := &registry{
 		prefix:      *prefix,
 		files:       strings.Split(*files, ","),
+		openFiles:   *openFiles,
 		blobs:       blobClient{base: strings.TrimRight(env("BLOBSTORE_URL", "http://blobstore:8080"), "/"), client: tracedHTTP},
 		policiesURL: strings.TrimRight(env("POLICY_REGISTRY_URL", "http://policy-registry:8080"), "/"),
+		skillsURL:   strings.TrimRight(env("SKILL_REGISTRY_URL", "http://skill-registry:8080"), "/"),
 		http:        tracedHTTP,
 		logger:      logger,
 	}
@@ -137,11 +145,13 @@ func tracedHTTPClient() *http.Client {
 type registry struct {
 	prefix      string
 	files       []string
+	openFiles   bool
 	blobs       blobClient
 	policiesURL string
+	skillsURL   string
 	http        *http.Client
 	logger      *slog.Logger
-	mu          sync.Mutex // serializes version allocation
+	mu          sync.RWMutex // serializes version allocation and publication
 }
 
 // Entry summarizes one named entry and its versions.
@@ -182,6 +192,10 @@ func (r *registry) routes() http.Handler {
 // getPath serves /{name} (the versions) and /{name}/{version} (one version):
 // a last segment that is a version or "latest" names a version.
 func (r *registry) getPath(w http.ResponseWriter, req *http.Request) {
+	if r.openFiles {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	path := strings.Trim(req.PathValue("path"), "/")
 	if i := strings.LastIndexByte(path, '/'); i > 0 {
 		last := path[i+1:]
@@ -194,6 +208,10 @@ func (r *registry) getPath(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *registry) listEntries(w http.ResponseWriter, req *http.Request) {
+	if r.openFiles {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 	names, err := r.names(req.Context())
 	if err != nil {
 		r.fail(w, err)
@@ -221,6 +239,10 @@ func (r *registry) listEntries(w http.ResponseWriter, req *http.Request) {
 // deleteEntry removes an entry with every version it has, or, when the path ends in a
 // version (/{name}/v<N>), that one version alone.
 func (r *registry) deleteEntry(w http.ResponseWriter, req *http.Request) {
+	if r.openFiles {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+	}
 	name := strings.Trim(req.PathValue("name"), "/")
 	only := ""
 	if i := strings.LastIndexByte(name, '/'); i > 0 {
@@ -255,14 +277,42 @@ func (r *registry) deleteEntry(w http.ResponseWriter, req *http.Request) {
 		versions = kept
 	}
 	for _, v := range versions {
-		for _, f := range r.files {
-			if err := r.blobs.delete(req.Context(), r.prefix+"/"+name+"/"+v.Version+"/"+f); err != nil && !errors.Is(err, errNotFound) {
-				writeError(w, http.StatusBadGateway, err.Error())
+		files, err := r.versionFiles(req.Context(), name, v.Version)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		if r.openFiles {
+			// Reserve the version number before the first file is removed.
+			if err := r.blobs.put(req.Context(), r.retiredSkillVersionID(name, v.Version), nil, "skill-registry"); err != nil {
+				r.fail(w, err)
 				return
 			}
 		}
+		if err := r.deleteFiles(req.Context(), name, v.Version, files); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (r *registry) retiredSkillVersionID(name, version string) string {
+	return r.prefix + "/" + name + "/" + retiredSkillVersionPrefix + version
+}
+
+func (r *registry) deleteFiles(ctx context.Context, name, version string, files []string) error {
+	if r.openFiles {
+		// Unpublish first so an interrupted delete does not expose a partial version.
+		marker := r.files[0]
+		files = append([]string{marker}, slices.DeleteFunc(files, func(file string) bool { return file == marker })...)
+	}
+	for _, file := range files {
+		if err := r.blobs.delete(ctx, r.prefix+"/"+name+"/"+version+"/"+file); err != nil && !errors.Is(err, errNotFound) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *registry) listVersions(w http.ResponseWriter, req *http.Request, name string) {
@@ -323,7 +373,11 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 	var body struct {
 		Files map[string]json.RawMessage `json:"files"`
 	}
-	d := json.NewDecoder(http.MaxBytesReader(w, req.Body, maxBodyBytes))
+	reader := io.Reader(req.Body)
+	if !r.openFiles {
+		reader = http.MaxBytesReader(w, req.Body, maxBodyBytes)
+	}
+	d := json.NewDecoder(reader)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -333,6 +387,12 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
+	}
+	if r.openFiles {
+		if err := validateSkillFiles(name, files); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 	}
 	if r.prefix == "agents" {
 		if err := validateModelSettings(files["agent.json"]); err != nil {
@@ -345,6 +405,15 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 		}
 		if err := validateOutputContract(files["agent.json"]); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if err := r.validateSkillReferences(req.Context(), files["agent.json"]); err != nil {
+			var statusErr *skillValidationError
+			if errors.As(err, &statusErr) {
+				writeError(w, statusErr.status, statusErr.Error())
+			} else {
+				writeError(w, http.StatusBadGateway, "cannot validate skills")
+			}
 			return
 		}
 		if err := r.validatePolicyReferences(req.Context(), string(files["systemprompt.md"])); err != nil {
@@ -377,12 +446,28 @@ func (r *registry) createVersion(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
-	next := 1
+	var last int
 	if len(versions) > 0 {
-		n, _ := versionNumber(versions[len(versions)-1].Version)
-		next = n + 1
+		last, _ = versionNumber(versions[len(versions)-1].Version)
 	}
-	version := "v" + strconv.Itoa(next)
+	if r.openFiles {
+		l, err := r.blobs.list(req.Context(), r.prefix+"/"+name)
+		if err != nil && !errors.Is(err, errNotFound) {
+			r.fail(w, err)
+			return
+		}
+		for _, object := range l.Objects {
+			version, retired := strings.CutPrefix(filepath.Base(object.ID), retiredSkillVersionPrefix)
+			if n, valid := versionNumber(version); retired && valid {
+				last = max(last, n)
+			}
+		}
+	}
+	if last == math.MaxInt {
+		writeError(w, http.StatusConflict, "no version numbers remain for this entry")
+		return
+	}
+	version := "v" + strconv.Itoa(last+1)
 	if err = r.write(req.Context(), name, version, files, creator); err != nil {
 		r.fail(w, err)
 		return
@@ -443,6 +528,78 @@ type policyValidationError struct {
 
 func (e *policyValidationError) Error() string { return e.text }
 
+type skillValidationError struct {
+	status int
+	text   string
+}
+
+func (e *skillValidationError) Error() string { return e.text }
+
+func (r *registry) validateSkillReferences(ctx context.Context, agentJSON []byte) error {
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(agentJSON, &settings); err != nil {
+		return &skillValidationError{status: http.StatusUnprocessableEntity, text: `file "agent.json" must be a JSON object`}
+	}
+	if raw, ok := settings["skill_script_timeout_seconds"]; ok {
+		var timeout int
+		if err := json.Unmarshal(raw, &timeout); err != nil || timeout <= 0 {
+			return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("agent.json: skill_script_timeout_seconds must be a positive integer, got %s", raw)}
+		}
+	}
+	raw, ok := settings["skills"]
+	if !ok {
+		return nil
+	}
+	var references []string
+	if err := json.Unmarshal(raw, &references); err != nil || references == nil {
+		return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("agent.json: skills must be a list of pinned skill versions, got %s", raw)}
+	}
+	seen := map[string]bool{}
+	for _, reference := range references {
+		at := strings.LastIndexByte(reference, '@')
+		if at <= 0 || at == len(reference)-1 {
+			return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("agent.json: skill %q must include a pinned version such as @v1", reference)}
+		}
+		name, version := reference[:at], reference[at+1:]
+		if !validName(name) {
+			return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("agent.json: skill %q has an invalid name", reference)}
+		}
+		if _, valid := versionNumber(version); !valid {
+			return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("agent.json: skill %q must use a pinned version such as v1", reference)}
+		}
+		if seen[name] {
+			return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("agent.json: skill %q is listed more than once", name)}
+		}
+		seen[name] = true
+		parts := strings.Split(name, "/")
+		for i := range parts {
+			parts[i] = url.PathEscape(parts[i])
+		}
+		endpoint := r.skillsURL + "/skills/" + strings.Join(parts, "/") + "/" + version
+		fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			cancel()
+			return err
+		}
+		resp, err := r.http.Do(req)
+		if err != nil {
+			cancel()
+			return err
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		cancel()
+		if resp.StatusCode == http.StatusNotFound {
+			return &skillValidationError{status: http.StatusUnprocessableEntity, text: fmt.Sprintf("skill %q does not exist", reference)}
+		}
+		if resp.StatusCode/100 != 2 {
+			return fmt.Errorf("skill registry GET %s: %s", endpoint, resp.Status)
+		}
+	}
+	return nil
+}
+
 func (r *registry) validatePolicyReferences(ctx context.Context, prompt string) error {
 	tokens, err := parsePolicyTokens(prompt)
 	if err != nil {
@@ -487,6 +644,24 @@ func (r *registry) validatePolicyReferences(ctx context.Context, prompt string) 
 // bytes to store: JSON files are stored as given, other files as their text.
 func (r *registry) encodeFiles(files map[string]json.RawMessage) (map[string][]byte, error) {
 	out := map[string][]byte{}
+	if r.openFiles {
+		for _, file := range r.files {
+			if _, ok := files[file]; !ok {
+				return nil, fmt.Errorf("file %q is required", file)
+			}
+		}
+		for file, raw := range files {
+			if !utf8.Valid(raw) {
+				return nil, fmt.Errorf("file %q must be UTF-8 text", file)
+			}
+			var text *string
+			if err := json.Unmarshal(raw, &text); err != nil || text == nil {
+				return nil, fmt.Errorf("file %q must be text", file)
+			}
+			out[file] = []byte(*text)
+		}
+		return out, nil
+	}
 	for _, f := range r.files {
 		raw, ok := files[f]
 		if !ok {
@@ -517,6 +692,86 @@ func (r *registry) encodeFiles(files map[string]json.RawMessage) (map[string][]b
 		}
 	}
 	return out, nil
+}
+
+var skillPathSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var skillFrontMatterNamePattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+func validateFilePath(path string) error {
+	if path == "" || strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+		return fmt.Errorf("file %q must be a relative path with no empty segment", path)
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "" || segment == "." || segment == ".." || !skillPathSegmentPattern.MatchString(segment) {
+			return fmt.Errorf("file %q has invalid path segment %q; use only letters, digits, dots, dashes, and underscores", path, segment)
+		}
+	}
+	return nil
+}
+
+func validateSkillFiles(entry string, files map[string][]byte) error {
+	for path, content := range files {
+		if err := validateFilePath(path); err != nil {
+			return err
+		}
+		if !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
+			return fmt.Errorf("file %q must be UTF-8 text without NUL bytes", path)
+		}
+		for folder := filepath.Dir(path); folder != "."; folder = filepath.Dir(folder) {
+			if _, exists := files[folder]; exists {
+				return fmt.Errorf("file %q cannot be stored because %q is also a file", path, folder)
+			}
+		}
+		if filepath.Base(path) != "SKILL.md" {
+			continue
+		}
+		expected := strings.Split(entry, "/")
+		name := expected[len(expected)-1]
+		if dir := filepath.ToSlash(filepath.Dir(path)); dir != "." {
+			parts := strings.Split(dir, "/")
+			name = parts[len(parts)-1]
+		}
+		if err := validateSkillFrontMatter(path, name, string(content)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSkillFrontMatter(path, expectedName, content string) error {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if len(lines) < 3 || lines[0] != "---" {
+		return fmt.Errorf("file %q must start with YAML front matter", path)
+	}
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == "---" {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return fmt.Errorf("file %q has unclosed YAML front matter", path)
+	}
+	var frontMatter struct {
+		Name        string `yaml:"name"`
+		Description string `yaml:"description"`
+	}
+	if err := yaml.Unmarshal([]byte(strings.Join(lines[1:end], "\n")), &frontMatter); err != nil {
+		return fmt.Errorf("file %q has invalid YAML front matter: %w", path, err)
+	}
+	name := frontMatter.Name
+	if !skillFrontMatterNamePattern.MatchString(name) || len(name) > 64 {
+		return fmt.Errorf("file %q front matter name must be lowercase letters, digits, and dashes, at most 64 characters", path)
+	}
+	if name != expectedName {
+		return fmt.Errorf("file %q front matter name %q must equal its folder name %q", path, name, expectedName)
+	}
+	description := strings.TrimSpace(frontMatter.Description)
+	if description == "" || utf8.RuneCountInString(frontMatter.Description) > 1024 {
+		return fmt.Errorf("file %q front matter description must be non-empty and at most 1024 characters", path)
+	}
+	return nil
 }
 
 // names walks the folders and returns every entry name, such as "group/name".
@@ -592,8 +847,11 @@ func (r *registry) folderConflict(ctx context.Context, name string) (string, err
 	if err != nil {
 		return "", err
 	}
-	if len(l.Directories) > 0 {
-		return fmt.Sprintf("%s is a folder", name), nil
+	for _, dir := range l.Directories {
+		_, staged := versionNumber(dir)
+		if !r.openFiles || !staged {
+			return fmt.Sprintf("%s is a folder", name), nil
+		}
 	}
 	return "", nil
 }
@@ -614,10 +872,18 @@ func (r *registry) versions(ctx context.Context, name string) ([]Version, error)
 			continue
 		}
 		files, err := r.blobs.list(ctx, r.prefix+"/"+name+"/"+d)
+		if r.openFiles && err != nil && !errors.Is(err, errNotFound) {
+			return nil, err
+		}
 		if err != nil || len(files.Objects) == 0 {
 			continue
 		}
-		out = append(out, Version{Version: d, Created: files.Objects[0].Created, Creator: files.Objects[0].Creator})
+		for _, meta := range files.Objects {
+			if !r.openFiles || strings.HasSuffix(meta.ID, "/"+r.files[0]) {
+				out = append(out, Version{Version: d, Created: meta.Created, Creator: meta.Creator})
+				break
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, _ := versionNumber(out[i].Version)
@@ -629,15 +895,22 @@ func (r *registry) versions(ctx context.Context, name string) ([]Version, error)
 
 func (r *registry) read(ctx context.Context, name, version string) (Content, error) {
 	c := Content{Name: name, Version: version, Files: map[string]json.RawMessage{}}
-	for _, f := range r.files {
+	files, err := r.versionFiles(ctx, name, version)
+	if err != nil {
+		return Content{}, err
+	}
+	if r.openFiles && !slicesContains(files, r.files[0]) {
+		return Content{}, errNotFound
+	}
+	for _, f := range files {
 		data, meta, err := r.blobs.get(ctx, r.prefix+"/"+name+"/"+version+"/"+f)
 		if err != nil {
 			return Content{}, err
 		}
-		if c.Created.IsZero() {
+		if (!r.openFiles && c.Created.IsZero()) || (r.openFiles && f == r.files[0]) {
 			c.Created, c.Creator = meta.Created, meta.Creator
 		}
-		if strings.HasSuffix(f, ".json") && json.Valid(data) {
+		if !r.openFiles && strings.HasSuffix(f, ".json") && json.Valid(data) {
 			c.Files[f] = json.RawMessage(data)
 			continue
 		}
@@ -648,12 +921,71 @@ func (r *registry) read(ctx context.Context, name, version string) (Content, err
 }
 
 func (r *registry) write(ctx context.Context, name, version string, files map[string][]byte, creator string) error {
-	for _, f := range r.files {
+	paths := make([]string, 0, len(files))
+	for f := range files {
+		paths = append(paths, f)
+	}
+	sort.Strings(paths)
+	if r.openFiles {
+		staged, err := r.versionFiles(ctx, name, version)
+		if err != nil && !errors.Is(err, errNotFound) {
+			return err
+		}
+		if slicesContains(staged, r.files[0]) {
+			return fmt.Errorf("skill %s@%s is already stored", name, version)
+		}
+		if len(staged) != 0 {
+			if err := r.deleteFiles(ctx, name, version, staged); err != nil {
+				return err
+			}
+		}
+		// Write the required root last so readers cannot see a partial version.
+		marker := r.files[0]
+		paths = append(slices.DeleteFunc(paths, func(path string) bool { return path == marker }), marker)
+	}
+	for _, f := range paths {
 		if err := r.blobs.put(ctx, r.prefix+"/"+name+"/"+version+"/"+f, files[f], creator); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *registry) versionFiles(ctx context.Context, name, version string) ([]string, error) {
+	if !r.openFiles {
+		return append([]string(nil), r.files...), nil
+	}
+	root := r.prefix + "/" + name + "/" + version
+	var files []string
+	var walk func(string, string) error
+	walk = func(id, relative string) error {
+		listing, err := r.blobs.list(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, object := range listing.Objects {
+			file := strings.TrimPrefix(object.ID, id+"/")
+			if relative != "" {
+				file = relative + "/" + file
+			}
+			files = append(files, file)
+		}
+		for _, directory := range listing.Directories {
+			child := directory
+			if relative != "" {
+				child = relative + "/" + directory
+			}
+			if err := walk(id+"/"+directory, child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(root, ""); err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 // seedWithRetry stores the seed versions that do not exist yet, waiting for
@@ -711,19 +1043,61 @@ func (r *registry) seedDir(ctx context.Context, dir, name string) error {
 }
 
 func (r *registry) seedVersion(ctx context.Context, dir, name, version string) error {
+	if r.openFiles {
+		if _, _, err := r.blobs.get(ctx, r.retiredSkillVersionID(name, version)); err == nil {
+			return nil
+		} else if !errors.Is(err, errNotFound) {
+			return err
+		}
+	}
 	id := r.prefix + "/" + name + "/" + version
-	if _, err := r.blobs.list(ctx, id); err == nil {
-		return nil // already stored
+	if listing, err := r.blobs.list(ctx, id); err == nil {
+		if !r.openFiles {
+			return nil // already stored
+		}
+		for _, object := range listing.Objects {
+			if object.ID == id+"/"+r.files[0] {
+				return nil
+			}
+		}
 	} else if !errors.Is(err, errNotFound) {
 		return err
 	}
 	files := map[string][]byte{}
-	for _, f := range r.files {
-		data, err := os.ReadFile(filepath.Join(dir, f))
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(dir, path)
 		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if !r.openFiles && !slicesContains(r.files, relative) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[relative] = data
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("seed %s/%s: %w", name, version, err)
+	}
+	for _, required := range r.files {
+		if _, ok := files[required]; !ok {
+			return fmt.Errorf("seed %s/%s: file %q is required", name, version, required)
+		}
+	}
+	if r.openFiles {
+		if err := validateSkillFiles(name, files); err != nil {
 			return fmt.Errorf("seed %s/%s: %w", name, version, err)
 		}
-		files[f] = data
 	}
 	if r.prefix == "agents" {
 		if err := validateOutputContract(files["agent.json"]); err != nil {
@@ -735,6 +1109,15 @@ func (r *registry) seedVersion(ctx context.Context, dir, name, version string) e
 	}
 	r.logger.Info("seeded", "prefix", r.prefix, "name", name, "version", version)
 	return nil
+}
+
+func slicesContains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *registry) fail(w http.ResponseWriter, err error) {

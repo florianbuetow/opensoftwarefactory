@@ -45,6 +45,18 @@ const DecisionSignal = "decision"
 // CompleteSignal is the Temporal signal that delivers a Completion to an interactive step.
 const CompleteSignal = "complete"
 
+// SessionFailureSignal ends an interactive step when a chat turn encountered a failure that
+// the workflow contract says is terminal.
+const SessionFailureSignal = "session-failure"
+
+// SessionFailure is sent only for a terminal error of a chat turn belonging to an open
+// interactive step.
+type SessionFailure struct {
+	Step  string `json:"step"`
+	Type  string `json:"type"`
+	Error string `json:"error"`
+}
+
 // PendingQuery is the Temporal query that returns the gate steps waiting for a decision and
 // the interactive steps waiting for their session to be completed.
 const PendingQuery = "pending"
@@ -142,6 +154,9 @@ type Input struct {
 	// Intake is set only for automatically accepted factory events. Manual and legacy
 	// inputs leave it nil and replay the original command path.
 	Intake *IntakeInput `json:"intake,omitempty"`
+	// ResolveAgentSettings is set by new parent workflows for nested team workflows. An
+	// absent field preserves histories recorded before skills were supported.
+	ResolveAgentSettings bool `json:"resolve_agent_settings,omitempty"`
 }
 
 // IntakeInput is the immutable trigger snapshot accepted by the orchestrator.
@@ -173,20 +188,22 @@ type Result struct {
 // StepRequest is the activity input every service receives. DevPod is the ID of the run's
 // dev pod, empty when the step works without one.
 type StepRequest struct {
-	TraceID           string `json:"trace_id"`
-	ExecutionID       string `json:"execution_id,omitempty"`
-	ParentExecutionID string `json:"parent_execution_id,omitempty"`
-	Workflow          string `json:"workflow"`
-	StepID            string `json:"step_id"`
-	Agent             string `json:"agent,omitempty"`
-	Inputs            []Item `json:"inputs"`
-	OutputArtifact    string `json:"output_artifact"`
-	DevPod            string `json:"dev_pod,omitempty"`
-	ProducerRunID     string `json:"producer_run_id,omitempty"`
-	TargetRunID       string `json:"target_run_id,omitempty"`
-	TargetExecutionID string `json:"target_execution_id,omitempty"`
-	MappingVersion    string `json:"mapping_version,omitempty"`
-	BindingRevision   string `json:"binding_revision,omitempty"`
+	TraceID                   string            `json:"trace_id"`
+	ExecutionID               string            `json:"execution_id,omitempty"`
+	ParentExecutionID         string            `json:"parent_execution_id,omitempty"`
+	Workflow                  string            `json:"workflow"`
+	StepID                    string            `json:"step_id"`
+	Agent                     string            `json:"agent,omitempty"`
+	Inputs                    []Item            `json:"inputs"`
+	OutputArtifact            string            `json:"output_artifact"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+	ProducerRunID             string            `json:"producer_run_id,omitempty"`
+	TargetRunID               string            `json:"target_run_id,omitempty"`
+	TargetExecutionID         string            `json:"target_execution_id,omitempty"`
+	MappingVersion            string            `json:"mapping_version,omitempty"`
+	BindingRevision           string            `json:"binding_revision,omitempty"`
 }
 
 // StepResult is the activity output every service returns: the artifact the step wrote. The
@@ -251,7 +268,12 @@ type PendingSession struct {
 	// Pass is the pass of a session that runs after a merge or batch.
 	Pass int `json:"pass,omitempty"`
 	// DevPod is the ID of the run's dev pod, left out when the session works without one.
-	DevPod string `json:"dev_pod,omitempty"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+	// AgentSettings maps every selectable pinned agent to the skills and timeout sent with
+	// that agent's chat requests.
+	AgentSettings map[string]AgentExecutionSettings `json:"agent_settings,omitempty"`
 }
 
 // RoundsQuery is the Temporal query that returns how often every step that ran again after
@@ -357,6 +379,7 @@ func Pipeline(ctx workflow.Context, in Input) (Result, error) {
 			return Result{}, err
 		}
 	}
+	in.ResolveAgentSettings = workflow.GetVersion(ctx, "factory-skills-v1", workflow.DefaultVersion, 1) == 1
 	if version == 1 && in.Intake != nil && in.Depth == 0 {
 		var initialized InitializeIntakeResult
 		activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -620,6 +643,14 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 		StartToCloseTimeout: time.Minute,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 	})
+	loadAgentSettings := func(ref string) (AgentExecutionSettings, error) {
+		if !in.ResolveAgentSettings || ref == "" {
+			return AgentExecutionSettings{}, nil
+		}
+		var settings AgentExecutionSettings
+		err := workflow.ExecuteActivity(ownCtx, ResolveAgentSettingsActivity, ResolveAgentSettingsRequest{Agent: ref}).Get(ctx, &settings)
+		return settings, err
+	}
 
 	// ask opens a decision for a person about the first of the publish requests an agent of
 	// the step made in the dev pod, and delivers the step's output once all are decided. A
@@ -934,6 +965,24 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 			complete(sessionSteps[session.Step], g, "", out.items())
 		})
 	})
+	if in.ResolveAgentSettings {
+		sessionFailures := workflow.GetSignalChannel(ctx, SessionFailureSignal)
+		selector.AddReceive(sessionFailures, func(c workflow.ReceiveChannel, _ bool) {
+			var failed SessionFailure
+			c.Receive(ctx, &failed)
+			if failed.Type != "SkillScriptNeedsDevPod" {
+				logger.Warn("ignoring non-terminal session failure", "step", failed.Step, "type", failed.Type)
+				return
+			}
+			if _, waiting := sessions[failed.Step]; !waiting {
+				logger.Warn("ignoring failure without a waiting session", "step", failed.Step, "type", failed.Type)
+				return
+			}
+			pending--
+			delete(sessions, failed.Step)
+			failure = fmt.Errorf("step %q failed: %s", failed.Step, failed.Error)
+		})
+	}
 
 	for {
 		res.Rounds = roundsOf(kept)
@@ -1052,10 +1101,27 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				})
 				continue
 			case InteractiveService:
+				agentSettings := make(map[string]AgentExecutionSettings, len(s.SessionAgents()))
+				for _, ref := range s.SessionAgents() {
+					settings, err := loadAgentSettings(ref)
+					if err != nil {
+						pending--
+						failure = fmt.Errorf("step %q failed to load agent %q: %w", s.ID, ref, err)
+						break
+					}
+					agentSettings[ref] = settings
+				}
+				if failure != nil {
+					continue
+				}
 				session := PendingSession{
 					Step: s.ID, Agent: s.Agent, Agents: s.SessionAgents(), Inputs: stepInputs,
 					Artifact: output, Session: SessionPath(in.Prefix, name), Pass: passes[s.ID], DevPod: podID(s.ID),
+					AgentSettings: agentSettings,
 				}
+				primary := agentSettings[s.Agent]
+				session.Skills = primary.Skills
+				session.SkillScriptTimeoutSeconds = primary.SkillScriptTimeoutSeconds
 				open := OpenSessionRequest{TraceID: in.TraceID, Session: session.Session, Inputs: stepInputs, DevPod: session.DevPod, Rejection: rejections[s.ID]}
 				delete(rejections, s.ID)
 				selector.AddFuture(workflow.ExecuteActivity(ownCtx, OpenSessionActivity, open), func(f workflow.Future) {
@@ -1110,7 +1176,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 					TraceID: in.TraceID, Name: s.Workflow, Inputs: stepInputs,
 					Prefix: output, Depth: in.Depth + 1, Run: run, DevPod: podOf(s.ID),
 					WorkflowID: workflow.GetInfo(ctx).WorkflowExecution.ID + "/" + name,
-					Intake:     in.Intake,
+					Intake:     in.Intake, ResolveAgentSettings: in.ResolveAgentSettings,
 				})
 				selector.AddFuture(nested, func(f workflow.Future) {
 					pending--
@@ -1140,7 +1206,7 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				teamIn := TeamInput{
 					TraceID: in.TraceID, Workflow: in.Definition.Name, Step: s, Inputs: stepInputs, Prefix: in.Prefix,
 					Artifact: output, Team: team.Team, Depth: in.Depth, Run: run, Rejection: rejections[s.ID], DevPod: podOf(s.ID),
-					Intake: in.Intake,
+					Intake: in.Intake, ResolveAgentSettings: in.ResolveAgentSettings,
 				}
 				delete(rejections, s.ID)
 				stepCtx, cancelStep := workflow.WithCancel(ctx)
@@ -1172,16 +1238,24 @@ func runPipeline(ctx workflow.Context, in Input, held **DevPod) (Result, error) 
 				})
 				continue
 			}
+			settings, err := loadAgentSettings(s.Agent)
+			if err != nil {
+				pending--
+				failure = fmt.Errorf("step %q failed to load agent %q: %w", s.ID, s.Agent, err)
+				continue
+			}
 			req := StepRequest{
-				TraceID:           in.TraceID,
-				ExecutionID:       in.ExecutionID,
-				ParentExecutionID: in.ParentExecutionID,
-				Workflow:          in.Definition.Name,
-				StepID:            s.ID,
-				Agent:             s.Agent,
-				Inputs:            stepInputs,
-				OutputArtifact:    output,
-				DevPod:            podID(s.ID),
+				TraceID:                   in.TraceID,
+				ExecutionID:               in.ExecutionID,
+				ParentExecutionID:         in.ParentExecutionID,
+				Workflow:                  in.Definition.Name,
+				StepID:                    s.ID,
+				Agent:                     s.Agent,
+				Inputs:                    stepInputs,
+				OutputArtifact:            output,
+				DevPod:                    podID(s.ID),
+				Skills:                    settings.Skills,
+				SkillScriptTimeoutSeconds: settings.SkillScriptTimeoutSeconds,
 			}
 			if in.Intake != nil {
 				var target struct {
@@ -1316,14 +1390,15 @@ func startRoute(ctx, ownCtx workflow.Context, in Input, name string, stepInputs 
 		})
 		var child Result
 		err := workflow.ExecuteChildWorkflow(childCtx, WorkflowName, Input{
-			TraceID:    in.TraceID,
-			Definition: routed.Definition,
-			Inputs:     routed.Inputs,
-			Prefix:     ArtifactID(in.Prefix, name),
-			Depth:      in.Depth + 1,
-			Run:        run,
-			DevPod:     pod,
-			Intake:     in.Intake,
+			TraceID:              in.TraceID,
+			Definition:           routed.Definition,
+			Inputs:               routed.Inputs,
+			Prefix:               ArtifactID(in.Prefix, name),
+			Depth:                in.Depth + 1,
+			Run:                  run,
+			DevPod:               pod,
+			Intake:               in.Intake,
+			ResolveAgentSettings: in.ResolveAgentSettings,
 		}).Get(ctx, &child)
 		setter.Set(child, err)
 	})

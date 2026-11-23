@@ -41,6 +41,8 @@ spec:
               value: http://blobstore:8080
             - name: AGENT_REGISTRY_URL
               value: http://agent-registry:8080
+            - name: SKILL_REGISTRY_URL
+              value: http://skill-registry:8080
             - name: MCP_GATEWAY_URL
               value: http://mcp-gateway:8080
             - name: DEVPOD_NAMESPACE

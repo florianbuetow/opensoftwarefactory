@@ -620,6 +620,32 @@ def _devpod_text(result: Any) -> str:
     return json.dumps(result, indent=1, ensure_ascii=False)
 
 
+def read_skill(pod: str, agent: str, run: str, version: str, skill: str, file: str = "SKILL.md") -> str:
+    """Read a text file from a skill carried by this agent.
+
+    pod, agent, run and version are filled in by the system; do not pass them.
+    skill is the carried skill's name. file is its relative path and defaults to
+    the root SKILL.md. Read that file before using a skill, then follow its
+    instructions to read any further files it names.
+    Example: read_skill(skill="git", file="release/SKILL.md").
+    """
+    return connectors.skill(pod, agent, run, version, skill, "read_skill", {"file": file})
+
+
+def run_skill_script(pod: str, agent: str, run: str, version: str, skill: str, script: str,
+                     args: list[str] = [], timeout_seconds: int = 0) -> dict:
+    """Run one script from a skill carried by this agent in the run's dev pod.
+
+    pod, agent, run, version and timeout_seconds are filled in by the system; do
+    not pass them. skill names the carried skill, script is a relative path in
+    it, and args are passed directly as separate arguments without a shell.
+    The exit code and the retained ends of standard output and error are returned.
+    Example: run_skill_script(skill="git", script="release/scripts/tag.sh", args=["1.4.0"]).
+    """
+    return connectors.skill(pod, agent, run, version, skill, "run_skill_script",
+                            {"script": script, "args": args, "timeout_seconds": timeout_seconds})
+
+
 def _now() -> str:
     """Return the UTC time as RFC 3339 with microseconds, so messages of two queues order by it."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")

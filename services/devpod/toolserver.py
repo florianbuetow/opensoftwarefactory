@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from podhttp import Refusal, serve, take_token  # noqa: E402
@@ -286,8 +287,129 @@ def run_command(args):
     return result
 
 
+# ---------------------------------------------------------------- skill scripts
+
+class OutputWindow:
+    """Keep only the tail of one output stream without ever retaining it in full."""
+
+    def __init__(self, max_bytes):
+        self.max_bytes = max_bytes
+        self.data = bytearray()
+        self.cut = False
+        self.starts_midline = False
+
+    def add(self, chunk):
+        self.data.extend(chunk)
+        if len(self.data) <= self.max_bytes:
+            return
+        remove = len(self.data) - self.max_bytes
+        dropped = self.data[:remove]
+        del self.data[:remove]
+        self.cut = True
+        self.starts_midline = dropped[-1:] != b"\n"
+
+    def text(self, max_lines):
+        data = bytes(self.data)
+        _, newline, remaining = data.partition(b"\n")
+        if self.starts_midline and newline and remaining:
+            data = remaining
+        lines = data.splitlines(keepends=True)
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            self.cut = True
+        return b"".join(lines).decode("utf-8", errors="replace")
+
+
+def _read_stream(stream, window):
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                return
+            window.add(chunk)
+    finally:
+        stream.close()
+
+
+def _skill_files(args, root):
+    files = args.get("files")
+    if not isinstance(files, dict) or not files:
+        raise Refusal("The skill has no files, so its script cannot be run. Fix the stored skill version.")
+    script = text_arg(args, "script")
+    for path, content in files.items():
+        if (not isinstance(path, str) or not path or os.path.isabs(path) or "\x00" in path
+                or any(part in ("", ".", "..") for part in path.split("/"))):
+            raise Refusal("The skill file path %r is invalid. Fix the stored skill version." % path)
+        if not isinstance(content, str):
+            raise Refusal("The skill file %s is not text. Fix the stored skill version." % path)
+        target = os.path.join(root, *path.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        encoded = content.encode("utf-8")
+        with open(target, "wb") as handle:
+            handle.write(encoded)
+        if encoded.startswith(b"#!"):
+            os.chmod(target, 0o700)
+    return script
+
+
+def run_skill_script(args):
+    timeout = int_arg(args, "timeout_seconds")
+    max_lines = int_arg(args, "max_lines")
+    max_bytes = int_arg(args, "max_bytes")
+    if timeout is None or timeout < 1:
+        raise Refusal("timeout_seconds must be a positive whole number.")
+    if max_lines is None or max_lines < 1:
+        raise Refusal("max_lines must be a positive whole number.")
+    if max_bytes is None or max_bytes < 1:
+        raise Refusal("max_bytes must be a positive whole number.")
+    arguments = args.get("args", [])
+    if not isinstance(arguments, list) or any(not isinstance(item, str) for item in arguments):
+        raise Refusal("args must be a list of text arguments.")
+
+    with tempfile.TemporaryDirectory(prefix="factory-skill-", dir="/tmp") as root:
+        script = _skill_files(args, root)
+        executable = os.path.join(root, *script.split("/"))
+        if not os.path.isfile(executable):
+            raise Refusal("The skill script %s does not exist. Choose a script listed by the skill." % script)
+        with open(executable, "rb") as handle:
+            if not handle.read(2).startswith(b"#!"):
+                raise Refusal("The skill script %s could not be started: missing a shebang line. "
+                              "Fix the script and save a new skill version." % script)
+        stdout = OutputWindow(max_bytes)
+        stderr = OutputWindow(max_bytes)
+        try:
+            process = subprocess.Popen([executable] + arguments, cwd=WORKSPACE, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       env=command_environment(), start_new_session=True)
+        except OSError as error:
+            reason = "missing a shebang line" if error.errno == 8 else str(error)
+            raise Refusal("The skill script %s could not be started: %s. Fix the script and save a new skill version."
+                          % (script, reason))
+        readers = [threading.Thread(target=_read_stream, args=(process.stdout, stdout), daemon=True),
+                   threading.Thread(target=_read_stream, args=(process.stderr, stderr), daemon=True)]
+        for reader in readers:
+            reader.start()
+        timed_out = False
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stop(process)
+            process.wait()
+            code = 124
+        finally:
+            # A finished script may leave children holding the pipes. Always stop the
+            # session so the readers close and no child survives the call.
+            stop(process)
+        for reader in readers:
+            reader.join(timeout=5)
+        return {"exit_code": code, "stdout": stdout.text(max_lines), "stderr": stderr.text(max_lines),
+                "stdout_cut": stdout.cut, "stderr_cut": stderr.cut, "timed_out": timed_out}
+
+
 OPS = {"list_files": list_files, "read_file": read_file, "write_file": write_file,
-       "edit_file": edit_file, "search": search, "run_command": run_command}
+       "edit_file": edit_file, "search": search, "run_command": run_command,
+       "run_skill_script": run_skill_script}
 
 
 def handle_op(body):
@@ -302,11 +424,18 @@ def handle_op(body):
     return {"ok": True, "result": OPS[name](args)}
 
 
+def handle_skill_script(body):
+    if body.get("op") != "run_skill_script":
+        raise Refusal("This endpoint runs skill scripts. Use /op for other operations.")
+    return handle_op(body)
+
+
 def main():
     token = take_token()
     if not token:
         sys.stderr.write("POD_TOKEN is not set; every call will be refused.\n")
-    server = serve(int(os.environ.get("PORT", "8080")), token, {"/op": handle_op})
+    server = serve(int(os.environ.get("PORT", "8080")), token, {"/op": handle_op, "/skill-script": handle_skill_script},
+                   unbounded_paths=("/skill-script",))
     server.serve_forever()
 
 

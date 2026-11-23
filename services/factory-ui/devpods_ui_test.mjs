@@ -482,14 +482,8 @@ test("a publish decision is read in one place and is never a step of the run", a
   assert.match(runs, /if \(st\.status === "Running" && waitingPublish\(id\)\) return "waiting";/);
 });
 
-test("a chat message carries the dev pod of its session's run", () => {
-  const context = {};
-  vm.runInNewContext(`${chat.slice(chat.indexOf("const ChatLogic ="), chat.indexOf("const InteractiveSession ="))}\nglobalThis.out = ChatLogic;`, context);
-  const { devPodOf } = context.out;
-  assert.equal(devPodOf({ dev_pod: "pod-1" }), "pod-1");
-  assert.equal(devPodOf({ dev_pod: { id: "pod-1", repository: "claims-build" } }), "pod-1");
-  assert.equal(devPodOf({}), "");
-  assert.equal(devPodOf(undefined), "");
-  assert.match(chat, /\.\.\.\(o\.devPod \? \{ dev_pod: o\.devPod \} : \{\}\),/);
-  assert.match(read("sessions.js"), /devPod: ChatLogic\.devPodOf\(entry\),/);
+test("a chat message identifies its waiting workflow and leaves runtime settings to the server", () => {
+  assert.match(chat, /workflow_id: o\.workflowId,/);
+  assert.doesNotMatch(chat, /dev_pod|skill_script_timeout_seconds|skills:/);
+  assert.doesNotMatch(read("sessions.js"), /devPod:|agentSettings:/);
 });

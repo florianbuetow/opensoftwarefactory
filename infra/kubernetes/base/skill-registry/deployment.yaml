@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skill-registry
+  labels:
+    app.kubernetes.io/name: skill-registry
+spec:
+  replicas: 1
+  # Version numbers are allocated in process; keep a single writer.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: skill-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: skill-registry
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: skill-registry
+          image: opensoftwarefactory-registry:local
+          imagePullPolicy: Never
+          args:
+            - -seed
+            - /seed-root/current/registry/skills
+            - -prefix
+            - skills
+            - -files
+            - SKILL.md
+            - -open-files
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: skill-registry
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: http://telemetry-collector:4318/v1/traces
+            - name: BLOBSTORE_URL
+              value: http://blobstore:8080
+          volumeMounts:
+            - name: local-seeds
+              mountPath: /seed-root
+              readOnly: true
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: local-seeds
+          hostPath:
+            path: /var/lib/opensoftwarefactory/seeds
+            type: Directory

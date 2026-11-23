@@ -120,7 +120,6 @@
     state.controller = InteractiveSession.mount(main, {
       session: entry.session, traceId: entry.trace_id, workflowId: entry.workflow_id, workflow: entry.workflow, step: entry.step,
       agent: entry.agent, agents: entry.agents, artifact: entry.artifact, inputs: entry.inputs,
-      devPod: ChatLogic.devPodOf(entry), // the run's dev pod goes with every chat message
       filesContainer: files, closed: !entry.waiting,
       // The menu badge and the run's waiting state follow at once, not at the next poll.
       onComplete: () => {

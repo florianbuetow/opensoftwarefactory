@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,10 +24,12 @@ type fakeRunner struct {
 	decision error
 	removed  []string
 
-	sessions   []WaitingSession
-	teams      []RunningTeam
-	completed  map[string]pipeline.Completion
-	completion error
+	sessions       []WaitingSession
+	teams          []RunningTeam
+	completed      map[string]pipeline.Completion
+	completion     error
+	failedSessions map[string]pipeline.SessionFailure
+	failSessionErr error
 }
 
 func (f *fakeRunner) Teams(context.Context) ([]RunningTeam, error) { return f.teams, nil }
@@ -41,6 +44,17 @@ func (f *fakeRunner) Complete(_ context.Context, id string, c pipeline.Completio
 		f.completed = map[string]pipeline.Completion{}
 	}
 	f.completed[id] = c
+	return nil
+}
+
+func (f *fakeRunner) FailSession(_ context.Context, id string, failure pipeline.SessionFailure) error {
+	if f.failSessionErr != nil {
+		return f.failSessionErr
+	}
+	if f.failedSessions == nil {
+		f.failedSessions = map[string]pipeline.SessionFailure{}
+	}
+	f.failedSessions[id] = failure
 	return nil
 }
 
@@ -356,6 +370,8 @@ func TestSessions(t *testing.T) {
 	runner.sessions = []WaitingSession{{WorkflowID: "t/route", TraceID: "t", Workflow: "feature", PendingSession: pipeline.PendingSession{
 		Step: "chat", Agent: "triage@v1", Agents: []string{"triage@v1", "plain@v2"},
 		Inputs: []pipeline.Item{{Source: "spec", Artifact: "runs/t/route/spec", Round: 1}}, Artifact: "runs/t/route/chat", Session: "user-sessions/t/route/chat",
+		Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300,
+		AgentSettings: map[string]pipeline.AgentExecutionSettings{"triage@v1": {Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}},
 	}}}
 	code, body = call(t, http.MethodGet, srv.URL+"/api/sessions", "")
 	want := `{"sessions":[{"workflow_id":"t/route","trace_id":"t","workflow":"feature","step":"chat","agent":"triage@v1","agents":["triage@v1","plain@v2"],"inputs":[{"source":"spec","artifact":"runs/t/route/spec","round":1}],"artifact":"runs/t/route/chat","session":"user-sessions/t/route/chat"}]}`
@@ -396,6 +412,66 @@ func TestSessions(t *testing.T) {
 	runner.completion = errRunNotFound
 	if code, _ = call(t, http.MethodPost, srv.URL+"/api/sessions/complete", ok); code != http.StatusNotFound {
 		t.Fatalf("finished workflow %d", code)
+	}
+}
+
+func TestSessionChatUsesPinnedServerSettingsAndStopsOnlyForMissingDevPod(t *testing.T) {
+	var received []SessionChatRequest
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req SessionChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		received = append(received, req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Message {
+		case "needs pod":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"error":"The workflow needs a devpod step before this step to run a skill script.","type":"SkillScriptNeedsDevPod"}`))
+		case "ordinary failure":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"error":"bad input","type":"InvalidAgent"}`))
+		default:
+			_, _ = w.Write([]byte(`{"reply":"done"}`))
+		}
+	}))
+	defer agent.Close()
+
+	workflows := storeWorkflows(t, sampleConfig)
+	runner, store := &fakeRunner{}, newMemStore()
+	runner.sessions = []WaitingSession{{WorkflowID: "workflow-1", TraceID: "trace-1", Workflow: "feature", PendingSession: pipeline.PendingSession{
+		Step: "chat", Pass: 2, Agent: "triage@v1", Agents: []string{"triage@v1", "plain@v2"}, Session: "user-sessions/trace-1/chat.pass-2", DevPod: "pod-1",
+		AgentSettings: map[string]pipeline.AgentExecutionSettings{"plain@v2": {Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}},
+	}}}
+	s := &server{workflows: workflows, blobs: store, runner: runner, logger: slog.New(slog.DiscardHandler), agentURL: agent.URL, httpClient: http.DefaultClient}
+	srv := httptest.NewServer(s.routes())
+	defer srv.Close()
+
+	post := func(message string) (int, string) {
+		body := fmt.Sprintf(`{"workflow_id":"workflow-1","trace_id":"forged","step_id":"chat","session":"user-sessions/trace-1/chat.pass-2","tab":"plain","agent":"plain@v2","message":%q,"created_by":"ada","dev_pod":"forged","skills":{"evil":"v9"},"skill_script_timeout_seconds":1}`, message)
+		return call(t, http.MethodPost, srv.URL+"/api/sessions/chat", body)
+	}
+	if code, body := post("hello"); code != http.StatusOK || strings.TrimSpace(body) != `{"reply":"done"}` {
+		t.Fatalf("success %d %s", code, body)
+	}
+	got := received[0]
+	if got.TraceID != "trace-1" || got.StepID != "chat" || got.Session != "user-sessions/trace-1/chat.pass-2" || got.DevPod != "pod-1" || got.Skills["git"] != "v3" || len(got.Skills) != 1 || got.SkillScriptTimeoutSeconds != 300 {
+		t.Fatalf("agent request %+v", got)
+	}
+	runner.sessions[0].AgentSettings = nil
+	if code, _ := post("legacy session"); code != http.StatusOK || received[1].Skills != nil || received[1].SkillScriptTimeoutSeconds != 0 {
+		t.Fatalf("legacy session status %d request %+v", code, received[1])
+	}
+	if code, _ := post("ordinary failure"); code != http.StatusUnprocessableEntity || len(runner.failedSessions) != 0 {
+		t.Fatalf("ordinary failure status %d signals %+v", code, runner.failedSessions)
+	}
+	if code, _ := post("needs pod"); code != http.StatusUnprocessableEntity {
+		t.Fatalf("needs pod status %d", code)
+	}
+	if failed := runner.failedSessions["workflow-1"]; failed.Step != "chat" || failed.Type != "SkillScriptNeedsDevPod" || !strings.Contains(failed.Error, "needs a devpod step") {
+		t.Fatalf("workflow failure %+v", failed)
+	}
+	badAgent := `{"workflow_id":"workflow-1","step_id":"chat","session":"user-sessions/trace-1/chat.pass-2","tab":"x","agent":"other@v1","message":"hello","created_by":"ada"}`
+	if code, _ := call(t, http.MethodPost, srv.URL+"/api/sessions/chat", badAgent); code != http.StatusUnprocessableEntity || len(received) != 4 {
+		t.Fatalf("unknown agent status %d calls %d", code, len(received))
 	}
 }
 

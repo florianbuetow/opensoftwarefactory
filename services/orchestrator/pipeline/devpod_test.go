@@ -195,7 +195,10 @@ func podEnv(t *testing.T, definitions ...Definition) (*testsuite.TestWorkflowEnv
 	store := listStore{newSyncStore()}
 	connectors := &fakeConnectors{exec: map[string]PodExecResult{}}
 	agents := &agentStub{store: store, blocked: map[string]string{}}
-	env.RegisterActivity(&Activities{Store: store, Connectors: connectors, LoadDefinitions: func() ([]Definition, error) { return definitions, nil }})
+	env.RegisterActivity(&Activities{Store: store, Connectors: connectors, LoadDefinitions: func() ([]Definition, error) { return definitions, nil },
+		LoadAgentSettings: func(context.Context, string) (AgentExecutionSettings, error) {
+			return AgentExecutionSettings{Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300}, nil
+		}})
 	env.RegisterWorkflowWithOptions(Pipeline, workflow.RegisterOptions{Name: WorkflowName})
 	env.RegisterWorkflowWithOptions(Team, workflow.RegisterOptions{Name: TeamWorkflowName})
 	env.RegisterActivityWithOptions(agents.process, activity.RegisterOptions{Name: DefaultActivity})
@@ -412,7 +415,7 @@ func TestPodReachesSessionsTeamsAndNestedWorkflows(t *testing.T) {
 	}, activity.RegisterOptions{Name: TeamTurnActivity})
 	env.RegisterDelayedCallback(func() {
 		state := pendingState(t, env)
-		if len(state.Sessions) != 1 || state.Sessions[0].DevPod != "pod-1" {
+		if len(state.Sessions) != 1 || state.Sessions[0].DevPod != "pod-1" || state.Sessions[0].Skills["git"] != "v3" || state.Sessions[0].SkillScriptTimeoutSeconds != 300 {
 			t.Errorf("sessions %+v", state.Sessions)
 		}
 		_ = store.Put(context.Background(), "user-sessions/"+podRun+"/talk/files/result.md", []byte("result"), Meta{})
@@ -426,8 +429,11 @@ func TestPodReachesSessionsTeamsAndNestedWorkflows(t *testing.T) {
 	if got := store.text("user-sessions/" + podRun + "/talk/session.json"); !strings.Contains(got, `"dev_pod": "pod-1"`) || !strings.Contains(got, `"trace_id": "`+podRun+`"`) {
 		t.Errorf("session.json %s", got)
 	}
-	if len(turns) == 0 || turns[0].DevPod != "pod-1" {
+	if len(turns) == 0 || turns[0].DevPod != "pod-1" || turns[0].Skills["git"] != "v3" || turns[0].SkillScriptTimeoutSeconds != 300 {
 		t.Errorf("team turns %+v", turns)
+	}
+	if deep := agents.runsOf("deep"); len(deep) != 1 || deep[0].Skills["git"] != "v3" || deep[0].SkillScriptTimeoutSeconds != 300 {
+		t.Errorf("nested process requests %+v", deep)
 	}
 	turn, _ := json.Marshal(turns[0])
 	if !strings.Contains(string(turn), `"dev_pod":"pod-1"`) {

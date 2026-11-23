@@ -51,12 +51,16 @@ func blockedReason(ctx context.Context) (string, bool) {
 // trimDevPodSchema removes the arguments the harness sets from the parameter schema the model
 // is shown. A schema it cannot read is returned unchanged.
 func trimDevPodSchema(raw json.RawMessage) json.RawMessage {
+	return hideToolArguments(raw, devPodIdentity)
+}
+
+func hideToolArguments(raw json.RawMessage, names []string) json.RawMessage {
 	var schema map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &schema); err != nil || schema == nil {
 		return raw
 	}
 	hidden := map[string]bool{}
-	for _, name := range devPodIdentity {
+	for _, name := range names {
 		hidden[name] = true
 	}
 	var props map[string]json.RawMessage

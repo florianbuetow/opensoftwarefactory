@@ -122,6 +122,67 @@ func TestListShowsDirectoriesAndObjects(t *testing.T) {
 	}
 }
 
+func TestDotPrefixedSkillPathsAreStoredAndListed(t *testing.T) {
+	srv, root := newTestServer(t)
+	ids := []string{"skills/git/v1/.config", "skills/git/v1/scripts/.helper"}
+	for _, id := range ids {
+		if got := do(t, http.MethodPut, srv.URL+"/blobs/"+id, id, nil); got.StatusCode != http.StatusNoContent {
+			t.Fatalf("PUT %s: %d", id, got.StatusCode)
+		}
+		got := do(t, http.MethodGet, srv.URL+"/blobs/"+id, "", nil)
+		data, _ := io.ReadAll(got.Body)
+		if got.StatusCode != http.StatusOK || string(data) != id {
+			t.Fatalf("GET %s: %d %q", id, got.StatusCode, data)
+		}
+	}
+	version := listing(t, srv.URL+"/list/skills/git/v1")
+	if strings.Join(version.Directories, ",") != "scripts" || len(version.Objects) != 1 || version.Objects[0].ID != ids[0] {
+		t.Fatalf("version listing %+v", version)
+	}
+	scripts := listing(t, srv.URL+"/list/skills/git/v1/scripts")
+	if len(scripts.Objects) != 1 || scripts.Objects[0].ID != ids[1] {
+		t.Fatalf("scripts listing %+v", scripts)
+	}
+
+	// A legacy interrupted upload has no metadata and must remain private.
+	orphan := filepath.Join(root, "objects", "skills", "git", "v1", ".upload-orphan")
+	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	version = listing(t, srv.URL+"/list/skills/git/v1")
+	for _, object := range version.Objects {
+		if object.ID == "skills/git/v1/.upload-orphan" {
+			t.Fatalf("internal upload exposed: %+v", version)
+		}
+	}
+}
+
+func TestValidIDAllowsSafeDotSegments(t *testing.T) {
+	for _, id := range []string{"skills/git/v1/.config", "skills/git/v1/a..b", "skills/git/v1/scripts/.helper"} {
+		if !validID(id) {
+			t.Errorf("valid dot path rejected: %q", id)
+		}
+	}
+	for _, id := range []string{"skills/./v1/file", "skills/../v1/file", "skills//v1/file"} {
+		if validID(id) {
+			t.Errorf("unsafe dot path accepted: %q", id)
+		}
+	}
+}
+
+func TestSkillFileMetadataDoesNotConflictWithNestedJSONPaths(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for _, id := range []string{"skills/git/v1/config", "skills/git/v1/config.json/values.txt"} {
+		if resp := do(t, http.MethodPut, srv.URL+"/blobs/"+id, "value", map[string]string{"X-Creator": "skill-author"}); resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("PUT %s: %d", id, resp.StatusCode)
+		}
+		resp := do(t, http.MethodGet, srv.URL+"/blobs/"+id, "", nil)
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Creator") != "skill-author" {
+			t.Fatalf("GET %s: %d %v", id, resp.StatusCode, resp.Header)
+		}
+	}
+}
+
 func TestTraceListsObjectsInCreationOrder(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for _, id := range []string{"runs/t-9/input", "runs/t-9/intake", "runs/t-9/triage"} {
@@ -409,6 +470,9 @@ func TestRejectsEscapingIDs(t *testing.T) {
 	}
 	if _, _, ok := s.paths("runs/0b7e/step-1.json"); !ok {
 		t.Error("rejected valid id")
+	}
+	if _, _, ok := s.paths("skills/git/v1/.hidden"); !ok {
+		t.Error("rejected valid dot-prefixed skill path")
 	}
 }
 

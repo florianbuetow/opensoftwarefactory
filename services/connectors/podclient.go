@@ -110,18 +110,30 @@ func (s *service) callPod(ctx context.Context, id string, port int, method, path
 		return 0, nil, fmt.Errorf("dev pod %s does not answer: %w", id, err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	var response io.Reader = resp.Body
+	if path != "/skill-script" {
+		response = io.LimitReader(response, 64<<20)
+	}
+	data, err := io.ReadAll(response)
 	return resp.StatusCode, data, err
 }
 
 // op runs one operation of the tool server in the work container.
 func (s *service) op(ctx context.Context, id, name string, args any) (json.RawMessage, error) {
+	return s.opWithin(ctx, id, name, args, 11*time.Minute)
+}
+
+func (s *service) opWithin(ctx context.Context, id, name string, args any, limit time.Duration) (json.RawMessage, error) {
 	if args == nil {
 		args = map[string]any{}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 11*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	status, data, err := s.callPod(ctx, id, workPort, http.MethodPost, "/op", map[string]any{"op": name, "args": args})
+	path := "/op"
+	if name == "run_skill_script" {
+		path = "/skill-script"
+	}
+	status, data, err := s.callPod(ctx, id, workPort, http.MethodPost, path, map[string]any{"op": name, "args": args})
 	if err != nil {
 		return nil, err
 	}

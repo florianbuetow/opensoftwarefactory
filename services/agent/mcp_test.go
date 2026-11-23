@@ -130,7 +130,7 @@ func TestNextEventStopsAtMatchingResponse(t *testing.T) {
 	stream := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n" +
 		"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[]}}\n\n" +
 		"data: this would be invalid JSON\n\n"
-	msg, err := nextEvent(strings.NewReader(stream), json.RawMessage("2"))
+	msg, err := nextEvent(strings.NewReader(stream), json.RawMessage("2"), 16<<20)
 	if err != nil {
 		t.Fatal(err)
 	}

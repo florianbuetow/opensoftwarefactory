@@ -6,6 +6,7 @@
   --accent: #2f6fde; --accent-fg: #ffffff; --accent-tint: rgb(47 111 222 / .12); --accent-text: #2a63c7;
   --running: #b7791f; --done: #1f8a4c; --failed: #c23a3a; --waiting: #7c3aed;
   --danger-text: #b83232; --hover: rgb(22 27 36 / .05); --shadow: 0 8px 28px rgb(22 27 36 / .16);
+  --warning-text: #a44900;
   --node-fill: #ffffff; --edge: #8b95a5;
   --font: -apple-system, "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
@@ -17,6 +18,7 @@
     --text: #e7ebf2; --muted: #9aa5b5;
     --accent: #6b9cf5; --accent-fg: #0d1117; --accent-tint: rgb(107 156 245 / .16); --accent-text: #8db3f8;
     --danger-text: #f07c7c; --hover: rgb(231 235 242 / .06); --shadow: 0 8px 28px rgb(0 0 0 / .45);
+    --warning-text: #f5a461;
     --node-fill: #1f2530; --edge: #75809a;
     color-scheme: dark;
   }
@@ -538,6 +540,7 @@ span.step-agent { color: var(--muted); } /* an agent that no longer exists is na
 .evidence-links { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-left: auto; font-size: .8125rem; }
 .evidence-note { margin: 0; color: var(--muted); font-size: .8125rem; }
 .evidence-warning, .telemetry-warning { margin: 0; color: var(--danger-text); font-size: .8125rem; }
+.tool-warning { color: var(--warning-text); font-size: .8125rem; overflow-wrap: anywhere; }
 .telemetry-warning { padding: 8px 10px; border: 1px solid var(--failed); border-radius: 6px; background: rgb(194 58 58 / .12); }
 .execution-evidence details { margin-top: 8px; }
 .execution-evidence summary { cursor: pointer; font-size: .8125rem; font-weight: 500; }
@@ -600,6 +603,20 @@ pre.logs.wrap { white-space: pre-wrap; }
 .registry-detail .section.actions { display: flex; justify-content: flex-end; gap: 8px; border-bottom: 0; }
 .registry-detail .section.actions[hidden] { display: none; }
 .registry-detail .section { border-bottom: 0; padding-bottom: 0; } /* files stack 24 px apart, as in the node panel */
+.skill-file-layout { display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(0, 3fr); gap: 16px; }
+.skill-file-layout > .tree { border: 1px solid var(--line); border-radius: 6px; align-self: start; padding: 8px 0; }
+.registry-detail .skill-file-editor > .section { padding: 0; }
+.skill-file-editor .section-title { overflow-wrap: anywhere; }
+.registry-detail #agent-skill-script-timeout { width: 5.5rem; }
+.skill-picker, .skill-picks { display: grid; gap: 8px; }
+.skill-picks { margin: 0; padding: 0; list-style: none; }
+.skill-picks li { display: flex; align-items: center; justify-content: space-between; gap: 8px; overflow-wrap: anywhere; }
+.skill-picker .row { flex-wrap: wrap; align-items: end; }
+.skill-picker select { max-width: 100%; }
+.skill-picker .error-text:empty { display: none; }
+@media (max-width: 760px) {
+  .skill-file-layout { grid-template-columns: minmax(0, 1fr); }
+}
 .mcp-config .panel-body, .mcp-test .panel-body { padding: 0; }
 .mcp-editor { display: block; width: 100%; min-height: 104px; resize: vertical; background: var(--canvas); }
 .mcp-config .section, .mcp-test .section { border-bottom: 0; padding-bottom: 0; }

@@ -47,7 +47,7 @@ services/
   mcp-gateway/        MCP passthrough routing, tool filtering, and stdio process management (Go)
   openobserve/        Configuration template for OpenObserve: logs, metrics, and traces
   orchestrator/       Runs the workflows on Temporal: steps, gates, and routes (Go)
-  registry/           Agent and policy versions; deployed twice, as both registries (Go)
+  registry/           Agent, policy, and skill versions, each with its own registry deployment (Go)
   tool-gateway/       MCP server for the functions in tools/tools.py (Python)
 infra/
   kind/               KIND cluster configuration
@@ -69,7 +69,7 @@ package.json          Node settings for scripts/ (ES modules, Node 24+)
 - Node.js 24 or later
 - Go 1.26 or later
 - `uv`
-- LM Studio, running locally with the model `qwen3.5-9b-mlx` loaded
+- A local LLM runtime with an OpenAI-compatible API. The default is LM Studio with the model `qwen3.5-9b-mlx` loaded; for another one, see [Using another LLM runtime](#using-another-llm-runtime)
 
 ## Commands
 
@@ -103,6 +103,33 @@ scratch/
 ```
 
 Mounts are fixed when the cluster is created. After adding one, delete and create the cluster again.
+
+### Using another LLM runtime
+
+`just init` creates `services/llm-gateway/config/config.yaml` for LM Studio. For another runtime, replace its `providers:` block with one like this, then run `just deploy` if the cluster is already running:
+
+```yaml
+providers:
+  - name: ollama
+    base_url: http://host.lima.internal:11434/v1
+    auth:
+      type: none
+    streaming: true
+    models:
+      "qwen3:8b": "qwen3:8b"
+```
+
+The gateway runs inside the cluster and reaches your machine as `host.lima.internal`, never as `localhost` or `127.0.0.1`. Leave out `model_discovery`; it works only with LM Studio. Under `models:`, list each model by the ID the runtime reports at `/v1/models`, and select it for the agents in the Factory UI.
+
+Default ports:
+
+```
+LM Studio    1234
+Ollama       11434
+llama.cpp    8080
+vLLM         8000
+Jan          1337
+```
 
 ## Contributing
 

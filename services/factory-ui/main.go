@@ -4,10 +4,11 @@
 //	/api/orchestrator/*  ORCHESTRATOR_URL     /api/*
 //	/api/agents/*        AGENT_REGISTRY_URL   /*  (the UI calls /api/agents/agents/...)
 //	/api/policies/*      POLICY_REGISTRY_URL  /*  (the UI calls /api/policies/policies/...)
+//	/api/skills/*        SKILL_REGISTRY_URL   /*  (the UI calls /api/skills/skills/...)
 //	/api/blobs/*         BLOBSTORE_URL        /*  (reads; writes only tasks/<collection>/<file>,
 //	                                              templates/tasks/, and interactive session files;
 //	                                              deletes only task files and session files)
-//	/api/agent/chat      AGENT_URL            /chat (POST only: one message of an interactive session)
+//	/api/agent/chat      ORCHESTRATOR_URL     /api/sessions/chat (POST only: one message of an interactive session)
 //	/api/cluster/*       the Kubernetes API, read-only, see clusterProxy
 //	/api/llm/v1/models   LLM_GATEWAY_URL      /v1/models (the model list only; the UI never calls a model)
 //	/api/mcp-gateway/*   MCP_GATEWAY_URL      /*
@@ -42,9 +43,9 @@ var webFiles embed.FS
 // backends names the proxy targets.
 type backends struct {
 	orchestrator, agents, policies, blobs, llm, mcp, evaluations string
+	skills                                                       string
 	connectors                                                   string // the connector service: repositories and dev pods
 	gitHost                                                      string // the demo Git server
-	agent                                                        string // the agent service, for interactive chat
 	cluster                                                      *clusterProxy
 	observability                                                *observabilityClient
 }
@@ -64,13 +65,13 @@ func run() error {
 		orchestrator: env("ORCHESTRATOR_URL", "http://orchestrator:8080"),
 		agents:       env("AGENT_REGISTRY_URL", "http://agent-registry:8080"),
 		policies:     env("POLICY_REGISTRY_URL", "http://policy-registry:8080"),
+		skills:       env("SKILL_REGISTRY_URL", "http://skill-registry:8080"),
 		blobs:        env("BLOBSTORE_URL", "http://blobstore:8080"),
 		llm:          env("LLM_GATEWAY_URL", "http://llm-gateway:8080"),
 		mcp:          env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"),
 		evaluations:  env("EVALUATION_URL", "http://evaluation:8080"),
 		connectors:   env("CONNECTORS_URL", "http://connectors:8080"),
 		gitHost:      env("GIT_HOST_URL", "http://git-host:8080"),
-		agent:        env("AGENT_URL", "http://agent:8080"),
 		cluster:      &clusterProxy{apiBase: inClusterAPI(), dir: serviceAccountDir, logger: logger},
 		observability: loadObservability(validateObservabilityURL(env("OBSERVABILITY_URL", "http://openobserve:5080")),
 			env("OBSERVABILITY_CONFIG", "/openobserve/config/openobserve.env"),
@@ -138,6 +139,13 @@ func newHandler(b backends, logger *slog.Logger) (http.Handler, error) {
 		}
 		mux.Handle("/api/evaluations/", p)
 	}
+	if b.skills != "" {
+		p, err := newProxy("/api/skills", b.skills, "", logger)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/api/skills/", p)
+	}
 	if b.connectors != "" {
 		p, err := newProxy("/api/connectors", b.connectors, "/api", logger)
 		if err != nil {
@@ -174,10 +182,10 @@ func newHandler(b backends, logger *slog.Logger) (http.Handler, error) {
 		}
 		mux.Handle("GET /api/llm/v1/models", p)
 	}
-	// The agent service is reachable for one call alone: a message of an interactive session.
-	// A turn runs every model and tool call before it answers, so it gets a long deadline.
-	if b.agent != "" {
-		p, err := newProxy("/api/agent", b.agent, "", logger)
+	// Interactive chat goes through the orchestrator, which verifies the waiting session and
+	// supplies the pinned agent settings. A turn may make several model and tool calls.
+	if b.orchestrator != "" {
+		p, err := newProxy("/api/agent", b.orchestrator, "/api/sessions", logger)
 		if err != nil {
 			return nil, err
 		}

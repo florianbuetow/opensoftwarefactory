@@ -93,6 +93,23 @@ type CompleteRequest struct {
 	pipeline.Completion
 }
 
+// SessionChatRequest is one browser chat turn. Skill settings in the body are accepted for
+// compatibility and ignored; the orchestrator always derives them from the waiting session's
+// pinned agent.
+type SessionChatRequest struct {
+	WorkflowID                string            `json:"workflow_id"`
+	TraceID                   string            `json:"trace_id"`
+	StepID                    string            `json:"step_id"`
+	Session                   string            `json:"session"`
+	Tab                       string            `json:"tab"`
+	Agent                     string            `json:"agent"`
+	Message                   string            `json:"message"`
+	CreatedBy                 string            `json:"created_by"`
+	DevPod                    string            `json:"dev_pod,omitempty"`
+	Skills                    map[string]string `json:"skills,omitempty"`
+	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+}
+
 // RunningTeam is a team step of a running workflow.
 type RunningTeam struct {
 	WorkflowID string `json:"workflow_id"`
@@ -112,6 +129,7 @@ type Runner interface {
 	Decide(ctx context.Context, workflowID string, d pipeline.Decision) error
 	Sessions(ctx context.Context) ([]WaitingSession, error)
 	Complete(ctx context.Context, workflowID string, c pipeline.Completion) error
+	FailSession(ctx context.Context, workflowID string, failure pipeline.SessionFailure) error
 	Teams(ctx context.Context) ([]RunningTeam, error)
 	Remove(ctx context.Context, traceID string) error
 }
@@ -127,9 +145,11 @@ type server struct {
 	blobs     pipeline.Store
 	runner    Runner
 	// agents reads the settings of a pinned agent for the run metadata. It may be nil.
-	agents func(ctx context.Context, ref string) (AgentSettings, error)
-	logger *slog.Logger
-	events *eventService
+	agents     func(ctx context.Context, ref string) (AgentSettings, error)
+	logger     *slog.Logger
+	events     *eventService
+	agentURL   string
+	httpClient *http.Client
 }
 
 func (s *server) routes() http.Handler {
@@ -153,6 +173,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/decisions", s.getDecisions)
 	mux.HandleFunc("POST /api/decisions", s.postDecision)
 	mux.HandleFunc("GET /api/sessions", s.getSessions)
+	mux.HandleFunc("POST /api/sessions/chat", s.postSessionChat)
 	mux.HandleFunc("POST /api/sessions/complete", s.postSessionComplete)
 	mux.HandleFunc("GET /api/teams", s.getTeams)
 	return mux
@@ -482,7 +503,115 @@ func (s *server) getSessions(w http.ResponseWriter, r *http.Request) {
 	if sessions == nil {
 		sessions = []WaitingSession{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	// Execution settings authorize the server-to-server agent call. They are not part of the
+	// browser session contract.
+	public := make([]WaitingSession, len(sessions))
+	copy(public, sessions)
+	for i := range public {
+		public[i].Skills = nil
+		public[i].SkillScriptTimeoutSeconds = 0
+		public[i].AgentSettings = nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": public})
+}
+
+func (s *server) postSessionChat(w http.ResponseWriter, r *http.Request) {
+	var req SessionChatRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		s.fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.WorkflowID == "" || req.StepID == "" || req.Session == "" || req.Agent == "" {
+		s.fail(w, http.StatusBadRequest, errors.New("workflow_id, step_id, session, and agent are required"))
+		return
+	}
+	sessions, err := s.runner.Sessions(r.Context())
+	if err != nil {
+		s.fail(w, http.StatusBadGateway, err)
+		return
+	}
+	var waiting *WaitingSession
+	for i := range sessions {
+		candidate := &sessions[i]
+		if candidate.WorkflowID == req.WorkflowID && candidate.Step == req.StepID && candidate.Session == req.Session {
+			waiting = candidate
+			break
+		}
+	}
+	if waiting == nil {
+		s.fail(w, http.StatusNotFound, errors.New("no such waiting session"))
+		return
+	}
+	allowed := waiting.Agent == req.Agent
+	for _, ref := range waiting.Agents {
+		allowed = allowed || ref == req.Agent
+	}
+	if !allowed {
+		s.fail(w, http.StatusUnprocessableEntity, fmt.Errorf("agent %q does not belong to this session", req.Agent))
+		return
+	}
+	settings, known := waiting.AgentSettings[req.Agent]
+	if !known && req.Agent == waiting.Agent {
+		settings = pipeline.AgentExecutionSettings{Skills: waiting.Skills, SkillScriptTimeoutSeconds: waiting.SkillScriptTimeoutSeconds}
+	}
+	out := struct {
+		TraceID                   string            `json:"trace_id"`
+		StepID                    string            `json:"step_id"`
+		Session                   string            `json:"session"`
+		Tab                       string            `json:"tab"`
+		Agent                     string            `json:"agent"`
+		Message                   string            `json:"message"`
+		CreatedBy                 string            `json:"created_by"`
+		DevPod                    string            `json:"dev_pod,omitempty"`
+		Skills                    map[string]string `json:"skills,omitempty"`
+		SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
+	}{
+		TraceID: waiting.TraceID, StepID: waiting.Step, Session: waiting.Session, Tab: req.Tab,
+		Agent: req.Agent, Message: req.Message, CreatedBy: req.CreatedBy, DevPod: waiting.DevPod,
+		Skills: settings.Skills, SkillScriptTimeoutSeconds: settings.SkillScriptTimeoutSeconds,
+	}
+	body, _ := json.Marshal(out)
+	agentURL := strings.TrimRight(s.agentURL, "/")
+	if agentURL == "" {
+		s.fail(w, http.StatusServiceUnavailable, errors.New("the agent service is not configured"))
+		return
+	}
+	forward, err := http.NewRequestWithContext(r.Context(), http.MethodPost, agentURL+"/chat", strings.NewReader(string(body)))
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	forward.Header.Set("Content-Type", "application/json")
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(forward)
+	if err != nil {
+		s.fail(w, http.StatusBadGateway, errors.New("the agent service is not reachable"))
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(http.MaxBytesReader(w, response.Body, maxBodyBytes))
+	if err != nil {
+		s.fail(w, http.StatusBadGateway, errors.New("the agent service returned an unreadable answer"))
+		return
+	}
+	if response.StatusCode == http.StatusUnprocessableEntity {
+		var failure struct {
+			Error string `json:"error"`
+			Type  string `json:"type"`
+		}
+		if json.Unmarshal(responseBody, &failure) == nil && failure.Type == "SkillScriptNeedsDevPod" {
+			if err = s.runner.FailSession(r.Context(), waiting.WorkflowID, pipeline.SessionFailure{Step: waiting.Step, Type: failure.Type, Error: failure.Error}); err != nil {
+				s.fail(w, http.StatusBadGateway, fmt.Errorf("failing the session workflow: %w", err))
+				return
+			}
+		}
+	}
+	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
+	w.WriteHeader(response.StatusCode)
+	_, _ = w.Write(responseBody)
 }
 
 // getTeams lists the team steps of running workflows.

@@ -89,7 +89,9 @@ def reporting_errors(fn: Any) -> Any:
         else:
             message = f"{type(exc).__name__}: {exc}".strip().split("\n", 1)[0].removesuffix(":")
             log("ERROR", "tool failed", tool=fn.__name__, error=message, traceback=traceback.format_exc())
-        return CallToolResult(content=[TextContent(type="text", text=message[:MAX_ERROR_TEXT])], is_error=True)
+        if fn.__name__ not in ("read_skill", "run_skill_script"):
+            message = message[:MAX_ERROR_TEXT]
+        return CallToolResult(content=[TextContent(type="text", text=message)], is_error=True)
 
     if inspect.iscoroutinefunction(fn):
 
