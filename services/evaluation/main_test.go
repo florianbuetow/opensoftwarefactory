@@ -474,3 +474,122 @@ func TestExportIsAZipWithReadmeSetAndRunFolders(t *testing.T) {
 		t.Errorf("an unknown set is 404, got %d", code)
 	}
 }
+
+func TestListSetsValidationAndExportEdgeCases(t *testing.T) {
+	f, blob, orch := newFixture(t)
+	srv := testEvaluation(t, blob.URL, orch.URL)
+
+	// Health check.
+	if code, _ := request(t, http.MethodGet, srv.URL+"/healthz", ""); code != http.StatusOK {
+		t.Fatalf("healthz = %d", code)
+	}
+
+	// listRuns error paths.
+	for _, query := range []string{
+		"started_from=bad",
+		"started_to=bad",
+		"duration_min_ms=-1",
+		"duration_max_ms=abc",
+		"duration_min_ms=100&duration_max_ms=50",
+		"cursor=!!!",
+		"limit=0",
+	} {
+		if code, _ := request(t, http.MethodGet, srv.URL+"/api/runs?"+query, ""); code != http.StatusBadRequest {
+			t.Fatalf("listRuns(%s) = %d", query, code)
+		}
+	}
+
+	// Create two sets, remove one run source, and list sets.
+	code, data := request(t, http.MethodPost, srv.URL+"/api/sets", `{"name":"Set One","run_ids":["`+runA+`","`+runB+`"]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create set 1 = %d %s", code, data)
+	}
+	var set1 EvaluationSet
+	_ = json.Unmarshal(data, &set1)
+
+	code, data = request(t, http.MethodPost, srv.URL+"/api/sets", `{"name":"Set Two","run_ids":["`+runB+`"]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create set 2 = %d %s", code, data)
+	}
+	var set2 EvaluationSet
+	_ = json.Unmarshal(data, &set2)
+
+	f.mu.Lock()
+	delete(f.runs, runA)
+	f.mu.Unlock()
+
+	code, data = request(t, http.MethodGet, srv.URL+"/api/sets", "")
+	if code != http.StatusOK {
+		t.Fatalf("list sets = %d %s", code, data)
+	}
+	var listed struct {
+		Sets []setSummary `json:"sets"`
+	}
+	if err := json.Unmarshal(data, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Sets) != 2 {
+		t.Fatalf("sets count = %d", len(listed.Sets))
+	}
+	missingCounts := map[string]int{}
+	for _, summary := range listed.Sets {
+		missingCounts[summary.ID] = summary.MissingRunCount
+	}
+	if missingCounts[set1.ID] != 1 || missingCounts[set2.ID] != 0 {
+		t.Fatalf("missing counts = %+v", missingCounts)
+	}
+
+	// getSet / createSet / updateSet error paths.
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/sets/not-a-uuid", ""); code != http.StatusNotFound {
+		t.Fatalf("getSet invalid id = %d", code)
+	}
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/sets", `{"name":"","run_ids":[]}`); code != http.StatusBadRequest {
+		t.Fatalf("empty name = %d", code)
+	}
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/sets", `{"name":"Bad UUID","run_ids":["not-a-uuid"]}`); code != http.StatusBadRequest {
+		t.Fatalf("bad run uuid = %d", code)
+	}
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/sets", `{"name":"Missing run","run_ids":["`+runA+`"]}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing run = %d", code)
+	}
+	if code, _ := request(t, http.MethodPut, srv.URL+"/api/sets/not-a-uuid", `{"name":"X","run_ids":[]}`); code != http.StatusBadRequest {
+		t.Fatalf("update invalid id = %d", code)
+	}
+	if code, _ := request(t, http.MethodPut, srv.URL+"/api/sets/99999999-9999-4999-8999-999999999999", `{"name":"X","run_ids":[]}`); code != http.StatusNotFound {
+		t.Fatalf("update missing set = %d", code)
+	}
+	if code, _ := request(t, http.MethodPut, srv.URL+"/api/sets/"+set2.ID, `{"name":"Set One","run_ids":[]}`); code != http.StatusConflict {
+		t.Fatalf("update duplicate name = %d", code)
+	}
+
+	// Export set with a deleted source run includes manifest note.
+	res := get(t, srv.URL+"/api/sets/"+set1.ID+"/export")
+	defer closeBody(t, res.Body)
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK || !bytes.Contains(body, []byte("PK")) {
+		t.Fatalf("export with deleted source = %d", res.StatusCode)
+	}
+
+	// Export helper edge cases: safeName, classify, refine.
+	if safeName("---") != "set" {
+		t.Fatalf("safeName = %q", safeName("---"))
+	}
+	for id, wantRole := range map[string]string{
+		"user-sessions/t/s/files/note.md": "session file",
+		"user-sessions/t/s/other":         "session data",
+		"teams/t/s/team.json":             "team manifest",
+		"teams/t/s/files/input-1.md":      "team input",
+		"teams/t/s/files/out.md":          "team file",
+		"teams/t/s/other":                 "team data",
+	} {
+		if _, role, _, _ := classify("t", id); role != wantRole {
+			t.Errorf("classify(%s) role = %q, want %q", id, role, wantRole)
+		}
+	}
+	if role, _ := refine(roleStepOutput, "d", []byte(`{"other":1}`)); role != roleStepOutput {
+		t.Fatalf("refine non-matching JSON = %q", role)
+	}
+	if role, _ := refine(roleStepOutput, "d", []byte(`plain text`)); role != roleStepOutput {
+		t.Fatalf("refine plain text = %q", role)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -423,5 +424,78 @@ func TestServesVendoredMermaid(t *testing.T) {
 	resp := get(t, ui.URL+"/app.js?v=1")
 	if got := resp.header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("app.js Cache-Control = %q, want no-store", got)
+	}
+}
+
+type failingCloser struct{ err error }
+
+func (f failingCloser) Close() error { return f.err }
+
+func TestEnvAndCloseAfter(t *testing.T) {
+	t.Setenv("FACTORY_UI_TEST_ENV", "")
+	if got := env("FACTORY_UI_TEST_ENV", "fallback"); got != "fallback" {
+		t.Fatalf("unset env = %q", got)
+	}
+	t.Setenv("FACTORY_UI_TEST_ENV", "custom")
+	if got := env("FACTORY_UI_TEST_ENV", "fallback"); got != "custom" {
+		t.Fatalf("set env = %q", got)
+	}
+
+	baseErr := errors.New("base")
+	closeErr := errors.New("close")
+	joined := closeAfter(baseErr, failingCloser{err: closeErr})
+	if !errors.Is(joined, baseErr) || !errors.Is(joined, closeErr) {
+		t.Fatalf("closeAfter = %v", joined)
+	}
+}
+
+func TestNewHandlerValidationAndOptionalRoutes(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	base := func() *backends {
+		return &backends{orchestrator: "http://x", agents: "http://x", policies: "http://x", blobs: "http://x"}
+	}
+	const badURL = "not-a-url"
+	badCases := []struct {
+		apply func(*backends)
+		name  string
+	}{
+		{func(b *backends) { b.orchestrator = badURL }, "orchestrator"},
+		{func(b *backends) { b.evaluations = badURL }, "evaluations"},
+		{func(b *backends) { b.skills = badURL }, "skills"},
+		{func(b *backends) { b.connectors = badURL }, "connectors"},
+		{func(b *backends) { b.gitHost = badURL }, "gitHost"},
+		{func(b *backends) { b.mcp = badURL }, "mcp"},
+		{func(b *backends) { b.llm = badURL }, "llm"},
+	}
+	for _, tc := range badCases {
+		b := base()
+		tc.apply(b)
+		if _, err := newHandler(b, logger); err == nil {
+			t.Errorf("%s: expected error for invalid backend URL", tc.name)
+		}
+	}
+
+	got := make(chan seen, 1)
+	backend := fakeBackend(t, got)
+	b := base()
+	b.skills = backend.URL
+	b.observability = &observabilityClient{http: http.DefaultClient}
+	h, err := newHandler(b, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := httptest.NewServer(h)
+	t.Cleanup(ui.Close)
+
+	resp := get(t, ui.URL+"/api/skills/skills/demo")
+	if resp.status != http.StatusCreated {
+		t.Fatalf("skills status = %d", resp.status)
+	}
+	if s := <-got; s.path != "/skills/demo" {
+		t.Fatalf("skills path = %q", s.path)
+	}
+	obs := get(t, ui.URL+"/api/observability/health")
+	if obs.status != http.StatusOK {
+		t.Fatalf("observability health = %d", obs.status)
 	}
 }

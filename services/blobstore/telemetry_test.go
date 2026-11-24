@@ -71,3 +71,38 @@ func TestHTTPSpansContinueIncomingTraceOnSuccessAndError(t *testing.T) {
 		}
 	}
 }
+
+func TestInitTelemetry(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
+	})
+
+	t.Run("disabled when endpoint unset", func(t *testing.T) {
+		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+		shutdown, err := initTelemetry(t.Context(), "blobstore")
+		if err != nil {
+			t.Fatalf("initTelemetry: %v", err)
+		}
+		if err := shutdown(t.Context()); err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	})
+
+	t.Run("configured with valid endpoint", func(t *testing.T) {
+		collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(collector.Close)
+		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL)
+		shutdown, err := initTelemetry(t.Context(), "blobstore")
+		if err != nil {
+			t.Fatalf("initTelemetry: %v", err)
+		}
+		if err := shutdown(t.Context()); err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	})
+}

@@ -214,3 +214,94 @@ func TestClusterOutsideCluster(t *testing.T) {
 		t.Fatalf("got %d %s", resp.status, resp.body)
 	}
 }
+
+func TestInClusterAPI(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	if got := inClusterAPI(); got != "" {
+		t.Fatalf("empty env = %q", got)
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	if got := inClusterAPI(); got != "" {
+		t.Fatalf("missing port = %q", got)
+	}
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	if got := inClusterAPI(); got != "https://10.0.0.1:443" {
+		t.Fatalf("ipv4 = %q", got)
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "::1")
+	if got := inClusterAPI(); got != "https://[::1]:443" {
+		t.Fatalf("ipv6 = %q", got)
+	}
+}
+
+func TestClusterServiceAccountAndUpstreamErrors(t *testing.T) {
+	// Invalid ca.crt causes 500 cannot read the service account.
+	dir := t.TempDir()
+	for name, data := range map[string]string{"token": "tok", "namespace": "factory", "ca.crt": "not-a-cert"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &clusterProxy{apiBase: "https://127.0.0.1:1", dir: dir, logger: slog.New(slog.DiscardHandler)}
+	rec := httptest.NewRecorder()
+	clusterUI(t, c).ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/nodes", http.NoBody))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("invalid ca.crt = %d %s", rec.Code, rec.Body)
+	}
+
+	// Non-JSON Kubernetes error falls back to resp.Status; pod list failures return 502.
+	var mode string
+	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch mode {
+		case "plain-500":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("internal error"))
+		case "bad-pods-json":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{not-json"))
+		case "pods-500":
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(api.Close)
+	dir2 := t.TempDir()
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: api.Certificate().Raw})
+	for name, data := range map[string][]byte{"ca.crt": ca, "token": []byte("tok"), "namespace": []byte("factory")} {
+		if err := os.WriteFile(filepath.Join(dir2, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c2 := &clusterProxy{apiBase: api.URL, dir: dir2, logger: slog.New(slog.DiscardHandler)}
+	h := clusterUI(t, c2)
+
+	mode = "plain-500"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/nodes", http.NoBody))
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "500") {
+		t.Fatalf("plain-500 = %d %s", rec.Code, rec.Body)
+	}
+
+	for _, m := range []string{"bad-pods-json", "pods-500"} {
+		mode = m
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/api-1/log", http.NoBody))
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("%s = %d %s", m, rec.Code, rec.Body)
+		}
+	}
+
+	// Unreachable API server returns 502 for direct resource and pod log lookup.
+	api.Close()
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/nodes", http.NoBody))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable nodes = %d %s", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/cluster/pods/api-1/log", http.NoBody))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable pod log = %d %s", rec.Code, rec.Body)
+	}
+}

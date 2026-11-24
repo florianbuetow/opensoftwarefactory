@@ -541,3 +541,333 @@ func TestHTTPGatewayForwardsAndClosesSession(t *testing.T) {
 		t.Fatalf("GET status %d", getRes.StatusCode)
 	}
 }
+
+type errCloser struct {
+	io.Reader
+	err error
+}
+
+func (e errCloser) Close() error { return e.err }
+
+type stubUpstream struct {
+	roundTrip func(context.Context, []byte, http.Header) (*http.Response, error)
+	del       func(context.Context, http.Header) (*http.Response, error)
+	closed    bool
+}
+
+func (s *stubUpstream) RoundTrip(ctx context.Context, body []byte, h http.Header) (*http.Response, error) {
+	return s.roundTrip(ctx, body, h)
+}
+
+func (s *stubUpstream) Delete(ctx context.Context, h http.Header) (*http.Response, error) {
+	return s.del(ctx, h)
+}
+
+func (s *stubUpstream) Close() error {
+	s.closed = true
+	return nil
+}
+
+func TestConfigValidationAndNewUpstreamEdgeCases(t *testing.T) {
+	cases := []string{
+		`{"mcpconfig":{"transport":"streamable-http","url":"http://example.com/mcp","command":"x"}}`,
+		`{"mcpconfig":{"transport":"streamable-http","url":"http://example.com/mcp#frag"}}`,
+		`{"mcpconfig":{"transport":"stdio","command":"x","url":"http://example.com"}}`,
+		`{"mcpconfig":{"transport":"stdio","command":"x","args":["bad\u0000arg"]}}`,
+		`{"mcpconfig":{"transport":"stdio","command":"x","env":{"":"val"}}}`,
+		`{"mcpconfig":{"transport":"stdio","command":"x","env":{"A=B":"val"}}}`,
+		`{"mcpconfig":{"transport":"stdio","command":"x","env":{"A":"bad\u0000val"}}}`,
+	}
+	for _, raw := range cases {
+		if _, err := decodeConfig([]byte(raw)); err == nil {
+			t.Errorf("accepted invalid config: %s", raw)
+		}
+	}
+	if _, err := newUpstream(&Connection{Transport: "unknown"}); err == nil {
+		t.Fatal("expected error for unknown transport")
+	}
+}
+
+func TestGatewayReadHealthSaveAndRemoveErrors(t *testing.T) {
+	var failDelete bool
+	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodDelete:
+			if failDelete {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer blob.Close()
+
+	g := newGateway(blobStore{base: blob.URL, client: blob.Client()}, slog.New(slog.DiscardHandler))
+	oldUp := &stubUpstream{}
+	g.entries["svc"] = &entry{
+		config:   Config{MCPConfig: Connection{Transport: "streamable-http", URL: "http://old.invalid/mcp"}, Allowlist: []string{"echo"}, Denylist: []string{}},
+		upstream: oldUp,
+	}
+	g.invalid["broken"] = "missing allowlist.json"
+	defer g.close()
+
+	h := g.routes()
+
+	// Health check.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("healthz = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Read existing, invalid, and missing services.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/services/svc", http.NoBody))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"echo"`) {
+		t.Fatalf("read existing = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/services/broken", http.NoBody))
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "configuration unavailable") {
+		t.Fatalf("read invalid = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/services/missing", http.NoBody))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("read missing = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Save with invalid name and invalid body.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/services/.bad", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("save invalid name = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/services/svc", strings.NewReader(`not-json`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("save invalid body = %d", rec.Code)
+	}
+
+	// Save with changed MCPConfig replaces and closes the old upstream.
+	updated := `{"mcpconfig":{"transport":"streamable-http","url":"http://new.invalid/mcp"},"allowlist":["echo"],"denylist":[]}`
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/services/svc", strings.NewReader(updated)))
+	if rec.Code != http.StatusOK || !oldUp.closed {
+		t.Fatalf("save changed upstream = %d closed=%v", rec.Code, oldUp.closed)
+	}
+
+	// Remove with invalid name and store failure.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/services/.bad", http.NoBody))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("remove invalid name = %d", rec.Code)
+	}
+	failDelete = true
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/services/svc", http.NoBody))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("remove store failure = %d", rec.Code)
+	}
+
+	// Test-connection for missing service.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/services/missing/test-connection", http.NoBody))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("test-connection missing = %d", rec.Code)
+	}
+
+	// closeResponse logs close error without panicking.
+	g.closeResponse(&http.Response{Body: errCloser{Reader: strings.NewReader(""), err: fmt.Errorf("close boom")}}, "svc")
+}
+
+func TestProxyErrorResponsesAndCloseSession(t *testing.T) {
+	var roundTripResp *http.Response
+	var roundTripErr error
+	var deleteResp *http.Response
+	var deleteErr error
+
+	g := newGateway(blobStore{}, slog.New(slog.DiscardHandler))
+	g.entries["svc"] = &entry{
+		config: Config{Allowlist: []string{"echo"}},
+		upstream: &stubUpstream{
+			roundTrip: func(context.Context, []byte, http.Header) (*http.Response, error) {
+				return roundTripResp, roundTripErr
+			},
+			del: func(context.Context, http.Header) (*http.Response, error) {
+				return deleteResp, deleteErr
+			},
+		},
+	}
+	h := g.routes()
+
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/mcp/svc", strings.NewReader(body))
+		req.Header = protocolHeaders(false)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Upstream HTTP 503 copies status, Content-Type, Retry-After, and body.
+	roundTripResp = &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Header:     http.Header{"Content-Type": {"text/plain"}, "Retry-After": {"12"}},
+		Body:       io.NopCloser(strings.NewReader("overloaded")),
+	}
+	rec := call(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "12" || rec.Header().Get("Content-Type") != "text/plain" || rec.Body.String() != "overloaded" {
+		t.Fatalf("503 copy = %d %v %q", rec.Code, rec.Header(), rec.Body.String())
+	}
+
+	// Unsupported upstream Content-Type -> 502.
+	roundTripResp = &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"text/plain"}},
+		Body:       io.NopCloser(strings.NewReader("plain")),
+	}
+	rec = call(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("unsupported content-type = %d", rec.Code)
+	}
+
+	// Upstream RoundTrip error -> 502.
+	roundTripResp, roundTripErr = nil, fmt.Errorf("dial failed")
+	rec = call(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("roundTrip error = %d", rec.Code)
+	}
+
+	// closeSession: missing service (404), upstream error (502), upstream 405 (405), upstream 503 (503).
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/mcp/missing", http.NoBody))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("closeSession missing = %d", rec.Code)
+	}
+	deleteResp, deleteErr = nil, fmt.Errorf("network down")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/mcp/svc", http.NoBody))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("closeSession error = %d", rec.Code)
+	}
+	deleteResp, deleteErr = &http.Response{StatusCode: http.StatusMethodNotAllowed, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/mcp/svc", http.NoBody))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("closeSession 405 = %d", rec.Code)
+	}
+	deleteResp = &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Header:     http.Header{"Content-Type": {"application/json"}, "Retry-After": {"5"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":"busy"}`)),
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/mcp/svc", http.NoBody))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "5" {
+		t.Fatalf("closeSession 503 = %d %v", rec.Code, rec.Header())
+	}
+}
+
+func TestParseRequestFilterAndRPCEdgeCases(t *testing.T) {
+	badRequests := []struct {
+		hdr  http.Header
+		body string
+	}{
+		{protocolHeaders(false), `not-json`},
+		{protocolHeaders(false), `{"jsonrpc":"1.0","id":1,"method":"tools/list"}`},
+		{protocolHeaders(false), `{"jsonrpc":"2.0","method":"tools/list"}`},
+		{protocolHeaders(false), `{"jsonrpc":"2.0","id":null,"method":"tools/list"}`},
+		{protocolHeaders(false), `{"jsonrpc":"2.0","id":true,"method":"tools/list"}`},
+		{http.Header{"Mcp-Protocol-Version": {"wrong"}}, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + protocolVersion + `"}}`},
+		{protocolHeaders(false), `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}`},
+	}
+	for _, tc := range badRequests {
+		if _, _, err := parseRequest([]byte(tc.body), tc.hdr); err == nil {
+			t.Errorf("parseRequest accepted %s", tc.body)
+		}
+	}
+
+	// rpcError with invalid raw ID substitutes null.
+	rec := httptest.NewRecorder()
+	rpcError(rec, http.StatusBadRequest, -32600, json.RawMessage(`{bad`), fmt.Errorf("bad"))
+	if !strings.Contains(rec.Body.String(), `"id":null`) {
+		t.Fatalf("rpcError = %s", rec.Body.String())
+	}
+
+	// filterResponse edge cases.
+	req := rpcRequest{Method: methodToolsList, ID: json.RawMessage(`1`)}
+	cfg := &Config{Allowlist: []string{"echo"}}
+	for _, bad := range []string{
+		`not-json`,
+		`{"jsonrpc":"1.0","id":1,"result":{}}`,
+		`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`,
+		`{"jsonrpc":"2.0","id":1}`,
+	} {
+		if _, err := filterResponse([]byte(bad), req, cfg); err == nil {
+			t.Errorf("filterResponse accepted %s", bad)
+		}
+	}
+	if out, err := filterResponse([]byte(`{"jsonrpc":"2.0","method":"notifications/progress","params":{}}`), req, cfg); err != nil || out == nil {
+		t.Fatalf("progress notification: %s %v", out, err)
+	}
+	if out, err := filterResponse([]byte(`{"jsonrpc":"2.0","method":"notifications/other","params":{}}`), req, cfg); err != nil || out != nil {
+		t.Fatalf("other notification: %s %v", out, err)
+	}
+	if out, err := filterResponse([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"err"}}`), req, cfg); err != nil || out == nil {
+		t.Fatalf("error passthrough: %s %v", out, err)
+	}
+
+	// filterSSE with no data lines passes lines through; non-progress notification returns nil.
+	if lines, err := filterSSE([]string{": keepalive"}, req, cfg); err != nil || len(lines) != 1 {
+		t.Fatalf("filterSSE comment: %v %v", lines, err)
+	}
+	if lines, err := filterSSE([]string{`data: {"jsonrpc":"2.0","method":"notifications/other"}`}, req, cfg); err != nil || lines != nil {
+		t.Fatalf("filterSSE dropped notification: %v %v", lines, err)
+	}
+
+	// validateInitialize invalid capabilities shapes.
+	if err := validateInitialize(map[string]json.RawMessage{"protocolVersion": json.RawMessage(`"` + protocolVersion + `"`), "capabilities": json.RawMessage(`"bad"`)}); err == nil {
+		t.Fatal("accepted non-object capabilities")
+	}
+	if err := validateInitialize(map[string]json.RawMessage{"protocolVersion": json.RawMessage(`"` + protocolVersion + `"`), "capabilities": json.RawMessage(`{"tools":"bad"}`)}); err == nil {
+		t.Fatal("accepted non-object tools capability")
+	}
+
+	// readRPCResponse error cases.
+	if _, err := readRPCResponse(&http.Response{StatusCode: http.StatusInternalServerError, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, json.RawMessage(`1`)); err == nil {
+		t.Fatal("accepted HTTP 500")
+	}
+	if _, err := readRPCResponse(&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"error":{"code":-1}}`))}, json.RawMessage(`1`)); err == nil {
+		t.Fatal("accepted JSON-RPC error")
+	}
+	if _, err := readRPCResponse(&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":2,"result":{}}`))}, json.RawMessage(`1`)); err == nil {
+		t.Fatal("accepted missing matching id")
+	}
+	if got, _ := responseOutcome([]byte(`not-json`), methodToolsCall); got != outcomeError {
+		t.Fatalf("invalid json outcome = %s", got)
+	}
+}
+
+func TestInitTelemetry(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	shutdown, err := initTelemetry(context.Background(), "mcp-gateway-test")
+	if err != nil {
+		t.Fatalf("noop telemetry: %v", err)
+	}
+	if err = shutdown(context.Background()); err != nil {
+		t.Fatalf("noop shutdown: %v", err)
+	}
+
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces")
+	shutdown, err = initTelemetry(context.Background(), "mcp-gateway-test")
+	if err != nil {
+		t.Fatalf("configured telemetry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = shutdown(ctx)
+}

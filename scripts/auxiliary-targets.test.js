@@ -21,6 +21,10 @@ async function fixture(options = {}) {
     "services/openobserve/data",
   ]) await mkdir(path.join(root, directory), { recursive: true });
   await writeFile(path.join(root, "services/factory-ui/web/app.js"), "'use strict';\n");
+  await writeFile(path.join(root, "scripts/ci-go.sh"), '#!/bin/sh\nprintf "ci-go.sh %s\\n" "$*" >> "$AUX_LOG"\n');
+  await chmod(path.join(root, "scripts/ci-go.sh"), 0o755);
+  await writeFile(path.join(root, "scripts/ci-python.sh"), '#!/bin/sh\nprintf "ci-python.sh %s\\n" "$*" >> "$AUX_LOG"\n');
+  await chmod(path.join(root, "scripts/ci-python.sh"), 0o755);
   for (const module of ["llm-gateway", "blobstore", "mcp-gateway", "orchestrator", "registry", "evaluation", "agent", "factory-ui"])
     await mkdir(path.join(root, "services", module), { recursive: true });
 
@@ -84,13 +88,17 @@ exit 0
   return { calls, env, root, run };
 }
 
-test("init invokes each idempotent configuration generator", async () => {
+test("init runs check, invokes each idempotent configuration generator, and initializes CI tools", async () => {
   const f = await fixture();
   try {
-    assert.match(f.run(["init"]), /Local configuration initialized/);
+    const out = f.run(["init"]);
+    assert.match(out, /Required tools available/);
+    assert.match(out, /Local configuration initialized/);
     const calls = await f.calls();
     for (const script of ["init-llm-gateway.js", "init-openobserve.js", "init-orchestrator.js", "generate-kind-config.js"])
       assert.match(calls, new RegExp(`node scripts/${script.replaceAll(".", "\\.")}`));
+    assert.match(calls, /ci-go\.sh init/);
+    assert.match(calls, /uv sync --project config\/ci\/python --locked/);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
@@ -113,15 +121,22 @@ test("render uses only the local Kustomize source", async () => {
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
-test("check invokes every configured validation family", async () => {
+test("check verifies required workstation and CI tools", async () => {
   const f = await fixture();
   try {
-    assert.match(f.run(["check"]), /All checks passed/);
+    assert.match(f.run(["check"]), /Required tools available/);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test("test invokes JS/UI, manifest, Go, and Python suites", async () => {
+  const f = await fixture();
+  try {
+    f.run(["test"]);
     const calls = await f.calls();
     assert.match(calls, /node --test .*auxiliary-targets\.test\.js/);
     assert.match(calls, /kubectl kustomize/);
-    assert.match(calls, /go -C services\/factory-ui test -race/);
-    assert.match(calls, /uv run --project services\/tool-gateway --locked pytest/);
+    assert.match(calls, /ci-go\.sh test/);
+    assert.match(calls, /ci-python\.sh test/);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 

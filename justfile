@@ -21,22 +21,43 @@ _default:
     @just help
 
 
-# Initialize local configuration and KIND host mounts without overwriting credentials.
+# Check that required workstation and CI tools are installed.
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo ""
+    trap 'printf "\033[0;31m✗ check failed\033[0m\n" >&2' ERR
+    printf "\033[0;34m=== Checking required tools ===\033[0m\n"
+    missing=0
+    for tool in rg git go uv node docker colima kind kubectl codespell semgrep; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            printf "  \033[0;32m✓\033[0m %s\n" "$tool"
+        else
+            printf "  \033[0;31m✗\033[0m %s (missing)\n" "$tool" >&2
+            missing=1
+        fi
+    done
+    if [ "$missing" -ne 0 ]; then
+        exit 1
+    fi
+    printf "\033[0;32m✓ Required tools available\033[0m\n"
+    echo ""
+
+# Initialize local configuration, KIND host mounts, and CI tools without overwriting credentials.
 init:
     #!/usr/bin/env bash
     set -euo pipefail
     echo ""
     trap 'printf "\033[0;31m✗ init failed\033[0m\n" >&2' ERR
     printf "\033[0;34m=== Initializing local configuration ===\033[0m\n"
-    if ! command -v rg >/dev/null 2>&1; then
-        printf 'Required tool is missing: rg (ripgrep)\n' >&2
-        exit 1
-    fi
+    just check || exit 1
     node scripts/init-llm-gateway.js
     node scripts/init-openobserve.js
     node scripts/init-orchestrator.js
     node scripts/init-jetstream.js
     node scripts/generate-kind-config.js
+    ./scripts/ci-go.sh init
+    uv sync --project config/ci/python --locked
     printf "\033[0;32m✓ Local configuration initialized\033[0m\n"
     echo ""
 
@@ -177,7 +198,8 @@ help:
     @printf "\033[0;34m=== opensoftwarefactory ===\033[0m\n"
     @echo ""
     @printf "\033[0;33mSetup & Lifecycle:\033[0m\n"
-    @printf "  %-38s %s\n" "just init" "Initialize local configuration without overwriting it"
+    @printf "  %-38s %s\n" "just check" "Check required workstation and CI tools"
+    @printf "  %-38s %s\n" "just init" "Initialize local configuration and CI tools without overwriting credentials"
     @printf "  %-38s %s\n" "just sync-seeds" "Publish optional local scratch/seeds to the cluster"
     @printf "  %-38s %s\n" "just cluster-create" "Create the empty KIND cluster"
     @printf "  %-38s %s\n" "just cluster-delete" "Delete the project cluster, keeping all data"
@@ -216,13 +238,10 @@ help:
     @printf "  %-38s %s\n" "just code-lint" "Run golangci-lint"
     @echo ""
     @printf "\033[0;33mCI & Testing:\033[0m\n"
-    @printf "  %-38s %s\n" "just check" "Check scripts, manifests, Go race tests, and Python tests"
-    @printf "  %-38s %s\n" "just ci-check" "Check guardrail tool prerequisites"
-    @printf "  %-38s %s\n" "just ci-init" "Prepare the Go and Python CI tools"
-    @printf "  %-38s %s\n" "just test" "Run the Go and Python test suites"
+    @printf "  %-38s %s\n" "just test" "Run JS/UI, manifest, Go, and Python test suites"
     @printf "  %-38s %s\n" "just e2e" "Run the end-to-end tests against the running factory"
     @printf "  %-38s %s\n" "just test-coverage" "Measure Go and Python test coverage"
-    @printf "  %-38s %s\n" "just ci" "Run the guardrails quietly (also ci-quiet)"
+    @printf "  %-38s %s\n" "just ci" "Run the guardrails quietly"
     @printf "  %-38s %s\n" "just ci-verbose" "Run the guardrails and stream their output"
     @echo ""
     @printf "\033[0;32m✓ Available commands shown\033[0m\n"
@@ -601,13 +620,78 @@ render:
     printf "\033[0;32m✓ Configuration rendered\033[0m\n"
     echo ""
 
-# Check scripts, manifests, formatting, static analysis, and race tests.
-check:
+# Auto-fix code style and formatting.
+code-format:
+    @./scripts/ci-go.sh format-fix
+    @./scripts/ci-python.sh format-fix
+
+# Check code style and formatting without rewriting files.
+code-style:
+    @./scripts/ci-go.sh format
+    @./scripts/ci-python.sh style
+    @./scripts/ci-python.sh format
+
+# Run go vet and mypy.
+code-typecheck:
+    @./scripts/ci-go.sh vet
+    @./scripts/ci-python.sh mypy
+
+# Run Staticcheck and Pyright.
+code-lspchecks:
+    @./scripts/ci-go.sh staticcheck
+    @./scripts/ci-python.sh pyright
+
+# Run gosec and Bandit.
+code-security:
+    @./scripts/ci-go.sh security
+    @./scripts/ci-python.sh security
+
+# Check Go module tidiness and Python imports.
+code-deptry:
+    @./scripts/ci-go.sh deps
+    @./scripts/ci-python.sh deps
+
+# Check spelling in code and documentation.
+code-spell:
+    @git ls-files --cached --others --exclude-standard -z -- \
+        '*.go' '*.py' '*.sh' '*.bash' '*.js' '*.mjs' '*.md' '*.toml' justfile \
+        ':(exclude,glob)**/vendor/**' | \
+        xargs -0 codespell --check-filenames --ignore-words config/ci/codespell.txt
+
+# Apply the Go and Python Semgrep policies.
+code-semgrep:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo ""
-    trap 'printf "\033[0;31m✗ check failed\033[0m\n" >&2' ERR
-    printf "\033[0;34m=== Checking project ===\033[0m\n"
+    semgrep_config_home=$(mktemp -d)
+    trap 'rm -rf "$semgrep_config_home"' EXIT
+    XDG_CONFIG_HOME="$semgrep_config_home" \
+        semgrep scan --config config/ci/semgrep --error --metrics off --disable-version-check .
+
+# Audit Go and Python dependencies.
+code-audit:
+    @./scripts/ci-go.sh audit
+    @./scripts/ci-python.sh audit
+
+# Run the template's Go meta-linter.
+code-lint:
+    @./scripts/ci-go.sh lint
+
+# Run Go and Python architecture checks.
+code-architecture:
+    @./scripts/ci-go.sh architecture
+    @./scripts/ci-python.sh architecture
+
+# Generate the Python template's source statistics report.
+code-stats:
+    @mkdir -p reports
+    @git ls-files -z -- '*.go' '*.py' '*.sh' '*.md' '*.toml' '*.yaml' '*.yml' \
+        ':(exclude,glob)**/vendor/**' | \
+        xargs -0 uv run --project config/ci/python --locked pygount --format=summary | tee reports/code-stats.txt
+
+# Run JS/UI, manifest, Go, and Python test suites.
+test:
+    #!/usr/bin/env bash
+    set -euo pipefail
     node --check scripts/init-llm-gateway.js
     node --check scripts/generate-kind-config.js
     node --check scripts/init-openobserve.js
@@ -628,104 +712,8 @@ check:
     for script in services/factory-ui/web/*.js; do node --check "$script"; done
     node --test scripts/auxiliary-targets.test.js scripts/scripts.test.js scripts/e2e-ui.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
     kubectl kustomize infra/kubernetes/overlays/local >/dev/null
-    for module in llm-gateway blobstore mcp-gateway connectors orchestrator registry evaluation agent factory-ui; do
-        test -z "$(gofmt -l "services/$module")"
-        go -C "services/$module" vet ./...
-        go -C "services/$module" test -race ./...
-    done
-    uv run --project services/tool-gateway --locked pytest -q services/tool-gateway
-    uv run --no-project python3 -m unittest discover -b -s services/devpod/tests
-    printf "\033[0;32m✓ All checks passed\033[0m\n"
-    echo ""
-
-# Check prerequisites for the guardrails independently of the local cluster.
-ci-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for tool in git go uv codespell semgrep; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            printf 'Required CI tool is missing: %s\n' "$tool" >&2
-            exit 1
-        fi
-    done
-
-# Prepare the pinned development tools used by the guardrails.
-ci-init:
-    @bash scripts/ci-go.sh init
-    @uv sync --project config/ci/python --locked
-
-# Auto-fix code style and formatting.
-code-format:
-    @bash scripts/ci-go.sh format-fix
-    @bash scripts/ci-python.sh format-fix
-
-# Check code style and formatting without rewriting files.
-code-style:
-    @bash scripts/ci-go.sh format
-    @bash scripts/ci-python.sh style
-    @bash scripts/ci-python.sh format
-
-# Run go vet and mypy.
-code-typecheck:
-    @bash scripts/ci-go.sh vet
-    @bash scripts/ci-python.sh mypy
-
-# Run Staticcheck and Pyright.
-code-lspchecks:
-    @bash scripts/ci-go.sh staticcheck
-    @bash scripts/ci-python.sh pyright
-
-# Run gosec and Bandit.
-code-security:
-    @bash scripts/ci-go.sh security
-    @bash scripts/ci-python.sh security
-
-# Check Go module tidiness and Python imports.
-code-deptry:
-    @bash scripts/ci-go.sh deps
-    @bash scripts/ci-python.sh deps
-
-# Check spelling in code and documentation.
-code-spell:
-    @git ls-files --cached --others --exclude-standard -z -- \
-        '*.go' '*.py' '*.sh' '*.bash' '*.js' '*.mjs' '*.md' '*.toml' justfile \
-        ':(exclude,glob)**/vendor/**' | \
-        xargs -0 codespell --check-filenames --ignore-words config/ci/codespell.txt
-
-# Apply the Go and Python Semgrep policies.
-code-semgrep:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    semgrep_config_home=$(mktemp -d)
-    trap 'rm -rf "$semgrep_config_home"' EXIT
-    XDG_CONFIG_HOME="$semgrep_config_home" \
-        semgrep scan --config config/ci/semgrep --error --metrics off --disable-version-check .
-
-# Audit Go and Python dependencies.
-code-audit:
-    @bash scripts/ci-go.sh audit
-    @bash scripts/ci-python.sh audit
-
-# Run the template's Go meta-linter.
-code-lint:
-    @bash scripts/ci-go.sh lint
-
-# Run Go and Python architecture checks.
-code-architecture:
-    @bash scripts/ci-go.sh architecture
-    @bash scripts/ci-python.sh architecture
-
-# Generate the Python template's source statistics report.
-code-stats:
-    @mkdir -p reports
-    @git ls-files -z -- '*.go' '*.py' '*.sh' '*.md' '*.toml' '*.yaml' '*.yml' \
-        ':(exclude,glob)**/vendor/**' | \
-        xargs -0 uv run --project config/ci/python --locked pygount --format=summary | tee reports/code-stats.txt
-
-# Run the Go and Python test suites.
-test:
-    @bash scripts/ci-go.sh test
-    @bash scripts/ci-python.sh test
+    ./scripts/ci-go.sh test
+    ./scripts/ci-python.sh test
 
 # Run the end-to-end tests against the running factory; they fail unless it is fully up.
 e2e:
@@ -733,12 +721,10 @@ e2e:
 
 # Run the tests and enforce the template coverage thresholds.
 test-coverage:
-    @bash scripts/ci-go.sh coverage
-    @bash scripts/ci-python.sh coverage
+    @./scripts/ci-go.sh coverage
+    @./scripts/ci-python.sh coverage
 
-ci-checks := "ci-check ci-init code-format code-style code-typecheck code-security code-deptry code-spell code-semgrep code-audit test code-architecture code-lint code-lspchecks test-coverage"
-
-alias ci-quiet := ci
+ci-checks := "check init code-format code-style code-typecheck code-security code-deptry code-spell code-semgrep code-audit test code-architecture code-lint code-lspchecks test-coverage"
 
 # Run the guardrail recipes quietly and show the first failure's output.
 ci:

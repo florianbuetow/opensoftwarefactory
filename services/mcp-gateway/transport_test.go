@@ -253,6 +253,92 @@ func TestStdioUpstreamRejectsWrongInitializationVersion(t *testing.T) {
 	}
 }
 
+func TestStdioUpstreamDeleteAndProcessHelpers(t *testing.T) {
+	u := &stdioUpstream{}
+	resp, err := u.Delete(context.Background(), http.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResponse(t, resp)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("Delete status = %d, want 405", resp.StatusCode)
+	}
+
+	// progressToken edge cases.
+	for _, raw := range []string{
+		`{}`,
+		`{"params":{"_meta":{"progressToken":null}}}`,
+		`{"params":{"_meta":{"progressToken":true}}}`,
+		`{"params":{"_meta":{"progressToken":{}}}}`,
+	} {
+		var msg map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &msg)
+		if tok := progressToken(msg); tok != nil {
+			t.Errorf("progressToken(%s) = %s, want nil", raw, tok)
+		}
+	}
+	var numMsg map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"params":{"_meta":{"progressToken":42}}}`), &numMsg)
+	if tok := progressToken(numMsg); string(tok) != "42" {
+		t.Fatalf("numeric progressToken = %q, want 42", tok)
+	}
+
+	// register duplicate progress token, remove, and closed process.
+	p := &stdioProcess{owner: u, pending: map[string]stdioPending{}, done: make(chan struct{}), exited: make(chan struct{})}
+	if err := p.register("id-1", stdioPending{progress: json.RawMessage(`"tok-1"`), finished: make(chan struct{})}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.register("id-2", stdioPending{progress: json.RawMessage(`"tok-1"`), finished: make(chan struct{})}); err == nil {
+		t.Fatal("expected duplicate progress token error")
+	}
+	if !p.remove("id-1") || p.remove("id-1") {
+		t.Fatal("remove did not toggle presence")
+	}
+	p.closed = true
+	if err := p.register("id-3", stdioPending{}); !errors.Is(err, errProcessClosed) {
+		t.Fatalf("register on closed = %v", err)
+	}
+
+	// read ignores invalid JSON, non-string IDs, unknown IDs, and non-progress notifications.
+	p2 := &stdioProcess{owner: u, pending: map[string]stdioPending{}, done: make(chan struct{}), exited: make(chan struct{})}
+	input := strings.Join([]string{
+		"not-json",
+		`{"jsonrpc":"2.0","method":"notifications/other"}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{}}`,
+		`{"jsonrpc":"2.0","id":123,"result":{}}`,
+		`{"jsonrpc":"2.0","id":"unknown","result":{}}`,
+	}, "\n") + "\n"
+	p2.read(strings.NewReader(input))
+
+	// stop returns non-ErrClosed stdin close error.
+	p3 := &stdioProcess{stdin: errWriteCloser{err: errors.New("close failed")}, exited: make(chan struct{})}
+	if err := p3.stop(); err == nil || !strings.Contains(err.Error(), "close failed") {
+		t.Fatalf("stop err = %v", err)
+	}
+}
+
+type errWriteCloser struct{ err error }
+
+func (errWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (e errWriteCloser) Close() error              { return e.err }
+
+func TestStdioUpstreamCancelsStreamingProgressOnContextDone(t *testing.T) {
+	u := helperUpstream(t, "wait")
+	defer closeUpstream(t, u)
+	ctx, cancel := context.WithCancel(context.Background())
+	body := []byte(`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"wait","_meta":{"progressToken":"stream-11"}}}`)
+	resp, err := u.RoundTrip(ctx, body, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeResponse(t, resp)
+	cancel()
+	_, readErr := io.ReadAll(resp.Body)
+	if !errors.Is(readErr, context.Canceled) {
+		t.Fatalf("stream read err = %v, want context.Canceled", readErr)
+	}
+}
+
 func helperUpstream(t *testing.T, mode string) *stdioUpstream {
 	t.Helper()
 	u, err := newUpstream(&Connection{Transport: "stdio", Command: os.Args[0], Args: []string{"-test.run=TestStdioHelperProcess", "--"}, Env: map[string]string{"GO_WANT_MCP_HELPER": "1", "MCP_HELPER_MODE": mode}})

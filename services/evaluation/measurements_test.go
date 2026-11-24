@@ -278,6 +278,243 @@ func TestExtractionLedgerDependencyFailureIs503(t *testing.T) {
 	}
 }
 
+func TestListGetAndValidateMeasurements(t *testing.T) {
+	f, blob, orch := newFixture(t)
+	srv := testEvaluation(t, blob.URL, orch.URL)
+
+	// validRecordID edge cases.
+	if validRecordID("") || validRecordID(strings.Repeat("a", 201)) || validRecordID(".leading") || validRecordID("bad/id") {
+		t.Fatal("invalid record ID accepted")
+	}
+
+	// validateMeasurement edge cases.
+	neg := int64(-1)
+	ten, five, four := int64(10), int64(5), int64(4)
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	invalidMeasurements := []Measurement{
+		{SchemaVersion: 2, ID: "m1", Kind: kindExecution, RunID: "r", ExecutionID: "e", OccurredAt: now, Status: statusDerived, Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: "other", RunID: "r", ExecutionID: "e", OccurredAt: now, Status: statusDerived, Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindExecution, RunID: "r", ExecutionID: "e", Status: statusDerived, Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindExecution, RunID: "r", ExecutionID: "e", OccurredAt: now, Status: statusDerived},
+		{SchemaVersion: 1, ID: "m1", Kind: kindUsage, OccurredAt: now, Status: statusMissing, Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindExecution, OccurredAt: now, Status: statusMissing, Missing: []string{"run_id/x", "execution_id/x"}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindExecution, RunID: "r", ExecutionID: "e", OccurredAt: now, Status: "bogus", Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindExecution, RunID: "r", ExecutionID: "e", OccurredAt: now, DurationMS: &neg, Status: statusDerived, Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindUsage, RunID: "r", ExecutionID: "e", OccurredAt: now, Vendor: "v", Model: "m", Effort: "e", Modes: &map[string]string{}, InputTokens: &five, CachedInputTokens: &ten, Status: statusReported, Missing: []string{}, RawUsage: json.RawMessage(`{}`)},
+		{SchemaVersion: 1, ID: "m1", Kind: kindUsage, RunID: "r", ExecutionID: "e", OccurredAt: now, Vendor: "v", Model: "m", Effort: "e", Modes: &map[string]string{}, InputTokens: &ten, CachedInputTokens: &five, UncachedInputTokens: &four, Status: statusReported, Missing: []string{}, RawUsage: json.RawMessage(`{}`)},
+		{SchemaVersion: 1, ID: "m1", Kind: kindUsage, RunID: "r", ExecutionID: "e", OccurredAt: now, Status: statusReported, Missing: []string{}},
+		{SchemaVersion: 1, ID: "m1", Kind: kindJudge, RunID: "r", ExecutionID: "e", OccurredAt: now, Status: statusDerived, Missing: []string{}},
+	}
+	for i := range invalidMeasurements {
+		if err := validateMeasurement(&invalidMeasurements[i], "m1"); err == nil {
+			t.Fatalf("invalid measurement %d accepted", i)
+		}
+	}
+
+	// putMeasurement error paths and requestCondition edge cases.
+	if code, _ := conditionalPut(t, srv.URL+"/api/measurements/m1", `{bad`, "If-None-Match", "*"); code != http.StatusBadRequest {
+		t.Fatalf("bad JSON put = %d", code)
+	}
+	if code, _ := conditionalPut(t, srv.URL+"/api/measurements/m1", `{"schema_version":1,"id":"wrong"}`, "If-None-Match", "*"); code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid measurement put = %d", code)
+	}
+	validExec := `{"schema_version":1,"id":"exec-1","kind":"execution","run_id":"` + runA + `","execution_id":"e1","occurred_at":"2026-11-01T12:00:00Z","status":"derived","missing":[]}`
+	if code, _ := request(t, http.MethodPut, srv.URL+"/api/measurements/exec-1", validExec); code != http.StatusBadRequest {
+		t.Fatalf("missing condition = %d", code)
+	}
+	if code, _ := conditionalPut(t, srv.URL+"/api/measurements/exec-1", validExec, "If-Match", "unquoted"); code != http.StatusBadRequest {
+		t.Fatalf("bad If-Match = %d", code)
+	}
+	if code, _ := conditionalPut(t, srv.URL+"/api/measurements/exec-1", validExec, "If-Match", `"missing-rev"`); code != http.StatusPreconditionFailed {
+		t.Fatalf("If-Match missing = %d", code)
+	}
+	// Combined headers error in requestCondition.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, srv.URL+"/api/measurements/exec-1", strings.NewReader(validExec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-Match", `"r1"`)
+	req.Header.Set("If-None-Match", "*")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("combined headers = %d", resp.StatusCode)
+	}
+
+	// Create measurements and test getMeasurement + listMeasurements.
+	if code, body := conditionalPut(t, srv.URL+"/api/measurements/exec-1", validExec, "If-None-Match", "*"); code != http.StatusOK {
+		t.Fatalf("create exec-1 = %d %s", code, body)
+	}
+	exec2 := `{"schema_version":1,"id":"exec-2","kind":"execution","run_id":"` + runB + `","execution_id":"e2","occurred_at":"2026-11-01T13:00:00Z","status":"derived","missing":[]}`
+	if code, body := conditionalPut(t, srv.URL+"/api/measurements/exec-2", exec2, "If-None-Match", "*"); code != http.StatusOK {
+		t.Fatalf("create exec-2 = %d %s", code, body)
+	}
+	exec3 := `{"schema_version":1,"id":"exec-3","kind":"execution","run_id":"` + runB + `","execution_id":"e3","occurred_at":"2026-11-01T13:00:00Z","status":"derived","missing":[]}`
+	if code, body := conditionalPut(t, srv.URL+"/api/measurements/exec-3", exec3, "If-None-Match", "*"); code != http.StatusOK {
+		t.Fatalf("create exec-3 = %d %s", code, body)
+	}
+
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/measurements/nonexistent", ""); code != http.StatusNotFound {
+		t.Fatalf("missing measurement = %d", code)
+	}
+	f.mu.Lock()
+	f.objects[measurementObject(kindExecution, "corrupt")] = []byte(`{bad`)
+	f.mu.Unlock()
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/measurements/corrupt", ""); code != http.StatusServiceUnavailable {
+		t.Fatalf("corrupt measurement = %d", code)
+	}
+
+	// listMeasurements validation errors.
+	for _, query := range []string{
+		"kind=invalid",
+		"from=not-a-time",
+		"to=not-a-time",
+		"limit=0",
+		"cursor=!!!",
+	} {
+		if code, _ := request(t, http.MethodGet, srv.URL+"/api/measurements?"+query, ""); code != http.StatusBadRequest {
+			t.Fatalf("listMeasurements(%s) = %d, want 400", query, code)
+		}
+	}
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/measurements?from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", ""); code != http.StatusUnprocessableEntity {
+		t.Fatalf("from>=to = %d", code)
+	}
+
+	// listMeasurements filtering and cursor pagination.
+	code, data := request(t, http.MethodGet, srv.URL+"/api/measurements?kind=execution&run_id="+runB+"&from=2026-11-01T12:30:00Z&to=2026-11-01T14:00:00Z&limit=1", "")
+	if code != http.StatusOK {
+		t.Fatalf("list page 1 = %d %s", code, data)
+	}
+	var page struct {
+		NextCursor   string        `json:"next_cursor"`
+		Measurements []Measurement `json:"measurements"`
+	}
+	if err = json.Unmarshal(data, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Measurements) != 1 || page.NextCursor == "" {
+		t.Fatalf("page 1 = %+v", page)
+	}
+	code, data = request(t, http.MethodGet, srv.URL+"/api/measurements?kind=execution&run_id="+runB+"&limit=10&cursor="+page.NextCursor, "")
+	if code != http.StatusOK {
+		t.Fatalf("list page 2 = %d %s", code, data)
+	}
+	page = struct {
+		NextCursor   string        `json:"next_cursor"`
+		Measurements []Measurement `json:"measurements"`
+	}{}
+	_ = json.Unmarshal(data, &page)
+	if len(page.Measurements) != 1 || page.NextCursor != "" {
+		t.Fatalf("page 2 = %+v", page)
+	}
+
+	// calculateCostWith currency conversion and missing conversion.
+	one, zero := int64(1), int64(0)
+	usage := Measurement{ID: "u", Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, OccurredAt: now, UncachedInputTokens: &one, CachedInputTokens: &zero, OutputTokens: &zero}
+	prices := []Price{{ID: "p", Revision: "r1", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: now.Add(-time.Hour), Currency: currencyUSD, UnitTokens: 1, InputUncached: "10", InputCached: "0", Output: "0"}}
+	costMissingConv, err := calculateCostWith(&usage, currencyEUR, 1, prices, nil)
+	if err != nil || costMissingConv.Status != costUnavailable || !hasMissingField(costMissingConv.Missing, "conversion") {
+		t.Fatalf("missing conversion cost = %+v %v", costMissingConv, err)
+	}
+	costConverted, err := calculateCostWith(&usage, currencyEUR, 1, prices, []Conversion{{ID: "c1", Revision: "r2", FromCurrency: currencyUSD, ToCurrency: currencyEUR, Rate: "0.9"}})
+	if err != nil || costConverted.Status != costAvailable || costConverted.ConvertedAmount != "9" {
+		t.Fatalf("converted cost = %+v %v", costConverted, err)
+	}
+}
+
+func TestExtractionPointersAndValidationPaths(t *testing.T) {
+	// parsePointer & pointerValue edge cases.
+	if parts, err := parsePointer(""); err != nil || parts != nil {
+		t.Fatalf("empty pointer = %v %v", parts, err)
+	}
+	if parts, err := parsePointer("/a~1b/c~0d"); err != nil || len(parts) != 2 || parts[0] != "a/b" || parts[1] != "c~d" {
+		t.Fatalf("escaped pointer = %v %v", parts, err)
+	}
+	for _, bad := range []string{"no-slash", "/bad~2escape", "/trailing~"} {
+		if _, err := parsePointer(bad); err == nil {
+			t.Fatalf("invalid pointer %q accepted", bad)
+		}
+	}
+	doc := map[string]any{"arr": []any{"first", "second"}, "num": 42}
+	if v, ok := pointerValue(doc, "/arr/1"); !ok || v != "second" {
+		t.Fatalf("array pointer = %v %v", v, ok)
+	}
+	for _, bad := range []string{"bad", "/arr/9", "/arr/abc", "/num/sub"} {
+		if _, ok := pointerValue(doc, bad); ok {
+			t.Fatalf("pointer %q unexpectedly matched", bad)
+		}
+	}
+	if !containsExecutionIdentity([]any{map[string]any{"run_id": "r1", "execution_id": "e1"}}, "r1", "e1") {
+		t.Fatal("array execution identity not found")
+	}
+
+	// extractMetrics validation and invalid artifact cases.
+	f, blob, orch := newFixture(t)
+	f.mu.Lock()
+	f.objects["runs/producer/result.json"] = []byte(`{"num":"not-a-number","huge":1e1000001,"str":123}`)
+	f.objects["runs/producer/bad.json"] = []byte(`{"a":1}{"b":2}`)
+	f.objects["runs/producer/run.json"] = []byte(`{"execution_id":"prod-exec","input_artifact":"runs/producer/input"}`)
+	f.objects["runs/producer/input"] = []byte(`{"items":[{"run_id":"target","execution_id":"target-exec"}]}`)
+	f.objects["workflow-executions/prod-exec.json"] = []byte(`{"schema_version":1,"execution_id":"prod-exec","run_id":"producer","workflow":"judge","workflow_version":1,"artifact_prefix":"runs/producer","started_at":"2026-11-01T12:00:00Z","status":"completed"}`)
+	f.objects["workflow-executions/target-exec.json"] = []byte(`{"schema_version":1,"execution_id":"target-exec","run_id":"target","workflow":"target","workflow_version":1,"artifact_prefix":"runs/target","started_at":"2026-11-01T11:00:00Z","status":"completed"}`)
+	f.mu.Unlock()
+	srv := testEvaluation(t, blob.URL, orch.URL)
+
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{bad`); code != http.StatusBadRequest {
+		t.Fatalf("bad JSON = %d", code)
+	}
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("empty request = %d", code)
+	}
+	// Artifact not in producer scope.
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"unknown","target_run_id":"target","target_execution_id":"target-exec","artifact_id":"runs/unknown/a","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"/a","name":"a","type":"number"}]}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("unscoped producer = %d", code)
+	}
+	// Target scope mismatch.
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"producer","target_run_id":"wrong","target_execution_id":"target-exec","artifact_id":"runs/producer/result.json","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"/a","name":"a","type":"number"}]}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("mismatched target = %d", code)
+	}
+	// Invalid mapping type and invalid pointer.
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"producer","target_run_id":"target","target_execution_id":"target-exec","artifact_id":"runs/producer/result.json","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"/a","name":"a","type":"bool"}]}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid mapping type = %d", code)
+	}
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"producer","target_run_id":"target","target_execution_id":"target-exec","artifact_id":"runs/producer/result.json","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"bad","name":"a","type":"number"}]}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid pointer = %d", code)
+	}
+	// Missing artifact -> 404.
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"producer","target_run_id":"target","target_execution_id":"target-exec","artifact_id":"runs/producer/missing.json","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"/a","name":"a","type":"number"}]}`); code != http.StatusNotFound {
+		t.Fatalf("missing artifact = %d", code)
+	}
+	// Invalid value types and non-exact number produce statusInvalid measurements.
+	code, data := request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"producer","target_run_id":"target","target_execution_id":"target-exec","artifact_id":"runs/producer/result.json","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"/num","name":"n1","type":"number"},{"path":"/huge","name":"n2","type":"number"},{"path":"/str","name":"s1","type":"string"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("invalid value extraction = %d %s", code, data)
+	}
+	var out struct {
+		Measurements []Measurement `json:"measurements"`
+	}
+	_ = json.Unmarshal(data, &out)
+	for _, m := range out.Measurements {
+		if m.Status != statusInvalid {
+			t.Fatalf("expected invalid status, got %+v", m)
+		}
+	}
+	// Artifact with multiple JSON values produces statusInvalid.
+	code, data = request(t, http.MethodPost, srv.URL+"/api/extractions", `{"producer_run_id":"producer","target_run_id":"target","target_execution_id":"target-exec","artifact_id":"runs/producer/bad.json","agent_ref":"a@v1","mapping_version":"v1","mappings":[{"path":"/a","name":"a","type":"number"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("multi-json extraction = %d %s", code, data)
+	}
+	_ = json.Unmarshal(data, &out)
+	if len(out.Measurements) != 1 || out.Measurements[0].Status != statusInvalid {
+		t.Fatalf("multi-json status = %+v", out.Measurements)
+	}
+}
+
 // conditionalPut sends a PUT with one conditional header and returns the
 // status and the JSON body of the answer.
 func conditionalPut(t *testing.T, url, body, header, value string) (status int, payload []byte) {

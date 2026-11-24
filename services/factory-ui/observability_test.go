@@ -180,3 +180,191 @@ func TestUnlimitedRetentionDoesNotUseSevenDayWindow(t *testing.T) {
 		t.Fatalf("explicit retention ignored: %v", got)
 	}
 }
+
+func TestValidateObservabilityURL(t *testing.T) {
+	for _, valid := range []string{"http://openobserve:5080", "https://obs.example.test/metrics"} {
+		if got := validateObservabilityURL(valid); got != valid {
+			t.Errorf("validateObservabilityURL(%q) = %q", valid, got)
+		}
+	}
+	for _, invalid := range []string{
+		"",
+		"ftp://openobserve:5080",
+		"http:///no-host",
+		"http://user:pass@openobserve:5080",
+		"http://openobserve:5080?q=1",
+		"http://openobserve:5080#frag",
+		"://bad-url",
+	} {
+		if got := validateObservabilityURL(invalid); got != "" {
+			t.Errorf("validateObservabilityURL(%q) = %q, want empty", invalid, got)
+		}
+	}
+}
+
+func TestObservabilityHelpersAndClientErrors(t *testing.T) {
+	if got := nestedString(map[string]any{"kubernetes": "not-a-map"}, "kubernetes", "pod_name"); got != "" {
+		t.Fatalf("nestedString non-map = %q", got)
+	}
+	if got := firstNonempty("", ""); got != "" {
+		t.Fatalf("firstNonempty empty = %q", got)
+	}
+	if _, ok := prometheusValue("only_one_field"); ok {
+		t.Fatal("accepted single-field prometheus line")
+	}
+	if _, ok := prometheusValue("metric notanumber"); ok {
+		t.Fatal("accepted non-numeric prometheus line")
+	}
+	if pending, over := storagePressure("not-json"); pending != 0 || over {
+		t.Fatalf("storagePressure invalid = %d/%v", pending, over)
+	}
+	if pending, over := storagePressure(`[{"fs_chunks":2},{"overlimit":true}]`); pending != 2 || !over {
+		t.Fatalf("storagePressure array = %d/%v", pending, over)
+	}
+
+	client := &observabilityClient{http: http.DefaultClient}
+	if _, err := client.getText(t.Context(), ""); err == nil {
+		t.Fatal("getText accepted empty endpoint")
+	}
+	if _, err := client.search(t.Context(), "SELECT 1", time.Now(), time.Now(), 1); err == nil {
+		t.Fatal("search accepted unconfigured client")
+	}
+
+	var mode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch mode {
+		case "500":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "bad-json":
+			_, _ = io.WriteString(w, "{bad")
+		case "func-error":
+			_, _ = io.WriteString(w, `{"function_error":"timeout"}`)
+		case "degraded-json":
+			_, _ = io.WriteString(w, `{"status":"degraded"}`)
+		case "healthy-json":
+			_, _ = io.WriteString(w, `{"status":"Server Available"}`)
+		}
+	}))
+	defer srv.Close()
+
+	client = &observabilityClient{base: srv.URL, user: "a", password: "b", http: srv.Client()}
+	for _, m := range []string{"500", "bad-json", "func-error"} {
+		mode = m
+		if _, err := client.search(t.Context(), "SELECT 1", time.Now(), time.Now(), 1); err == nil {
+			t.Errorf("search(%s): expected error", m)
+		}
+	}
+	mode = "500"
+	if _, err := client.getText(t.Context(), srv.URL); err == nil {
+		t.Fatal("getText accepted 500")
+	}
+	mode = "degraded-json"
+	if got := client.componentHealth(t.Context(), srv.URL); got["status"] != healthDegraded {
+		t.Fatalf("componentHealth degraded = %#v", got)
+	}
+	mode = "healthy-json"
+	if got := client.componentHealth(t.Context(), srv.URL); got["status"] != healthOK {
+		t.Fatalf("componentHealth healthy = %#v", got)
+	}
+	if got := client.componentHealth(t.Context(), ""); got["status"] != healthUnavailable {
+		t.Fatalf("componentHealth empty = %#v", got)
+	}
+}
+
+func TestObservabilityHandlerValidationAndHealthStates(t *testing.T) {
+	const validRun = "11111111-1111-1111-1111-111111111111"
+	const validTrace = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Validation errors on /logs and /spans, plus 502 when unconfigured.
+	ui := httptest.NewServer(observabilityHandler(&observabilityClient{http: http.DefaultClient}))
+	defer ui.Close()
+	for _, path := range []string{
+		"/api/observability/logs?run_id=" + validRun + "&trace_id=bad",
+		"/api/observability/logs?run_id=" + validRun + "&span_id=bad",
+		"/api/observability/logs?run_id=" + validRun + "&step=bad%20step",
+		"/api/observability/logs?run_id=" + validRun + "&attempt=0",
+		"/api/observability/logs?run_id=" + validRun + "&attempt=abc",
+		"/api/observability/logs?run_id=" + validRun + "&start=bad&end=2026-01-01T00:00:00Z",
+		"/api/observability/logs?run_id=" + validRun + "&start=2026-01-02T00:00:00Z&end=2026-01-01T00:00:00Z",
+		"/api/observability/spans?trace_id=short",
+	} {
+		if resp := get(t, ui.URL+path); resp.status != http.StatusBadRequest {
+			t.Errorf("GET %s: status %d, want 400", path, resp.status)
+		}
+	}
+	for _, path := range []string{
+		"/api/observability/logs?run_id=" + validRun,
+		"/api/observability/spans?trace_id=" + validTrace,
+	} {
+		if resp := get(t, ui.URL+path); resp.status != http.StatusBadGateway {
+			t.Errorf("GET %s (unconfigured): status %d, want 502", path, resp.status)
+		}
+	}
+	if resp := get(t, ui.URL+"/api/observability/health"); resp.status != http.StatusOK || !strings.Contains(resp.body, `"status":"unavailable"`) {
+		t.Fatalf("unconfigured health = %d %s", resp.status, resp.body)
+	}
+
+	// Health states: all ok, degraded queue + storage overlimit, and failing sub-endpoints.
+	const failAll = "fail-all"
+	var scenario string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/default/_search":
+			if scenario == failAll {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = io.WriteString(w, `{"hits":[]}`)
+		case "/api/v1/health", "/trace-health":
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case "/api/v1/metrics/prometheus":
+			if scenario == failAll {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = io.WriteString(w, "fluentbit_output_dropped_records_total 0\n")
+		case "/api/v1/storage":
+			if scenario == "degraded" {
+				_, _ = io.WriteString(w, `{"chunks":{"fs_chunks":9},"status":{"overlimit":true}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"chunks":{"fs_chunks":0},"status":{"overlimit":false}}`)
+		case "/trace-metrics":
+			if scenario == failAll {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if scenario == "degraded" {
+				_, _ = io.WriteString(w, "otelcol_exporter_queue_size{data_type=\"traces\"} 9\notelcol_exporter_queue_capacity{data_type=\"traces\"} 10\n")
+				return
+			}
+			_, _ = io.WriteString(w, "otelcol_exporter_queue_size{data_type=\"traces\"} 1\notelcol_exporter_queue_capacity{data_type=\"traces\"} 10\n")
+		}
+	}))
+	defer srv.Close()
+
+	client := &observabilityClient{
+		base: srv.URL, user: "a", password: "b", collectorBase: srv.URL,
+		tracingHealth: srv.URL + "/trace-health", tracingMetrics: srv.URL + "/trace-metrics", http: srv.Client(),
+	}
+	ui2 := httptest.NewServer(observabilityHandler(client))
+	defer ui2.Close()
+
+	for _, tc := range []struct {
+		name, want string
+	}{
+		{"ok", healthOK},
+		{"degraded", healthDegraded},
+		{"fail-all", healthUnavailable},
+	} {
+		scenario = tc.name
+		resp := get(t, ui2.URL+"/api/observability/health")
+		var result map[string]any
+		if err := json.Unmarshal([]byte(resp.body), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result["status"] != tc.want {
+			t.Errorf("scenario %s: status = %v, want %s", tc.name, result["status"], tc.want)
+		}
+	}
+}

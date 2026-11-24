@@ -265,3 +265,192 @@ func TestEvidenceArtifactIsExecutionScopedAndCapped(t *testing.T) {
 		t.Fatalf("sibling artifact status %d", resp.StatusCode)
 	}
 }
+
+func TestQueriesHelpersEvidenceAndSeriesEdgeCases(t *testing.T) {
+	// openObserveHTTPError.Error, stringValue, timeValue, spanExecutionID.
+	if got := (openObserveHTTPError{Status: 502}).Error(); !strings.Contains(got, "502") {
+		t.Fatalf("error string = %q", got)
+	}
+	if stringValue(123) != "123" || stringValue("abc") != "abc" {
+		t.Fatal("stringValue mismatch")
+	}
+	if _, ok := timeValue(float64(1700000000000000)); !ok {
+		t.Fatal("float64 timeValue failed")
+	}
+	if _, ok := timeValue(json.Number("1700000000000000")); !ok {
+		t.Fatal("json.Number timeValue failed")
+	}
+	if _, ok := timeValue(struct{}{}); ok {
+		t.Fatal("struct timeValue succeeded")
+	}
+	if spanExecutionID(map[string]any{"span_attributes": `{"factory.execution_id":"e1"}`}) != "e1" {
+		t.Fatal("string span_attributes failed")
+	}
+	if spanExecutionID(map[string]any{"span_attributes": map[string]any{"factory_execution_id": "e2"}}) != "e2" {
+		t.Fatal("map span_attributes failed")
+	}
+	if spanExecutionID(map[string]any{}) != "" {
+		t.Fatal("empty spanExecutionID non-empty")
+	}
+
+	// openObserveSearch error cases: unconfigured, non-200, function_error.
+	f, blob, orch := newFixture(t)
+	sUnconf := &service{blobs: blob.URL, orchestrator: orch.URL, http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
+	if _, err := sUnconf.openObserveSearch(t.Context(), "SELECT 1", time.Now().Add(-time.Hour), time.Now(), 0, 1, ""); err == nil {
+		t.Fatal("unconfigured openObserveSearch succeeded")
+	}
+
+	ooStatus := http.StatusOK
+	ooResp := map[string]any{"hits": []any{}, "total": 0, "is_partial": false}
+	openobserve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, ooStatus, ooResp)
+	}))
+	defer openobserve.Close()
+
+	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
+	srv := httptest.NewServer(s.routes())
+	defer srv.Close()
+
+	ooStatus = http.StatusBadGateway
+	if _, err := s.openObserveSearch(t.Context(), "SELECT 1", time.Now().Add(-time.Hour), time.Now(), 0, 1, ""); err == nil {
+		t.Fatal("502 openObserveSearch succeeded")
+	}
+	ooStatus = http.StatusOK
+	ooResp = map[string]any{"function_error": "boom"}
+	if _, err := s.openObserveSearch(t.Context(), "SELECT 1", time.Now().Add(-time.Hour), time.Now(), 0, 1, ""); err == nil {
+		t.Fatal("function_error openObserveSearch succeeded")
+	}
+
+	// getEvidenceArtifact validation & 404s.
+	for _, query := range []string{"", "run_id=r&execution_id=e"} {
+		if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence/artifact?"+query, ""); code != http.StatusBadRequest {
+			t.Fatalf("getEvidenceArtifact(%s) = %d", query, code)
+		}
+	}
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence/artifact?run_id=r&execution_id=missing&artifact_id=runs/r/a", ""); code != http.StatusNotFound {
+		t.Fatalf("missing scope artifact = %d", code)
+	}
+	f.mu.Lock()
+	closedAt := time.Date(2026, 11, 1, 14, 0, 0, 0, time.UTC)
+	f.objects["workflow-executions/exec-a.json"], _ = json.Marshal(executionScope{
+		SchemaVersion:  1,
+		ExecutionID:    "exec-a",
+		RunID:          runA,
+		Workflow:       "feature",
+		ArtifactPrefix: "runs/" + runA,
+		StartedAt:      time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC),
+		ClosedAt:       &closedAt,
+		Status:         "completed",
+	})
+	f.mu.Unlock()
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence/artifact?run_id="+runA+"&execution_id=exec-a&artifact_id=runs/"+runA+"/nope", ""); code != http.StatusNotFound {
+		t.Fatalf("missing artifact = %d", code)
+	}
+
+	// getEvidence validation & pagination.
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA, ""); code != http.StatusBadRequest {
+		t.Fatalf("missing execution_id = %d", code)
+	}
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA+"&execution_id=missing", ""); code != http.StatusOK {
+		t.Fatalf("missing scope evidence = %d", code)
+	}
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id=other&execution_id=exec-a", ""); code != http.StatusUnprocessableEntity {
+		t.Fatalf("mismatched run_id = %d", code)
+	}
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA+"&execution_id=exec-a&trace_id="+strings.Repeat("b", 32), ""); code != http.StatusUnprocessableEntity {
+		t.Fatalf("mismatched trace_id = %d", code)
+	}
+	for _, query := range []string{
+		"limit=0",
+		"cursor=!!!",
+		"cursor=YWJj",
+		"from=bad",
+		"to=bad",
+	} {
+		if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA+"&execution_id=exec-a&"+query, ""); code != http.StatusBadRequest {
+			t.Fatalf("getEvidence(%s) = %d", query, code)
+		}
+	}
+	if code, _ := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA+"&execution_id=exec-a&from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", ""); code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid evidence range = %d", code)
+	}
+
+	ooResp = map[string]any{
+		"hits": []map[string]any{
+			{"span_id": "s1", "factory.execution_id": "exec-a"},
+			{"span_id": "s2", "parent_span_id": "s1"},
+		},
+		"total":      2,
+		"is_partial": false,
+	}
+	code, data := request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA+"&execution_id=exec-a&limit=1", "")
+	if code != http.StatusOK {
+		t.Fatalf("evidence page 1 = %d %s", code, data)
+	}
+	var ev struct {
+		NextCursor   string           `json:"next_cursor"`
+		SourceStatus string           `json:"source_status"`
+		Spans        []map[string]any `json:"spans"`
+		Artifacts    []map[string]any `json:"artifacts"`
+	}
+	_ = json.Unmarshal(data, &ev)
+	if len(ev.Spans) != 1 || ev.NextCursor == "" || ev.SourceStatus != sourceAvailable || len(ev.Artifacts) == 0 {
+		t.Fatalf("evidence page 1 = %+v", ev)
+	}
+	code, _ = request(t, http.MethodGet, srv.URL+"/api/evidence?run_id="+runA+"&execution_id=exec-a&limit=1&cursor="+ev.NextCursor, "")
+	if code != http.StatusOK {
+		t.Fatalf("evidence page 2 = %d", code)
+	}
+
+	// getSeries validation errors.
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"group_by=model&from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z", http.StatusUnprocessableEntity},
+		{"metric=input_tokens&group_by=bad&from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z", http.StatusUnprocessableEntity},
+		{"metric=duration_ms&group_by=model&from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z", http.StatusUnprocessableEntity},
+		{"metric=quality&group_by=workflow&from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z", http.StatusUnprocessableEntity},
+		{"metric=input_tokens&group_by=model&from=bad&to=2026-11-02T00:00:00Z", http.StatusBadRequest},
+		{"metric=input_tokens&group_by=model&from=2026-11-01T00:00:00Z&to=bad", http.StatusBadRequest},
+		{"metric=input_tokens&group_by=model&from=2026-11-02T00:00:00Z&to=2026-11-01T00:00:00Z", http.StatusUnprocessableEntity},
+	} {
+		if got, _ := request(t, http.MethodGet, srv.URL+"/api/series?"+tc.query, ""); got != tc.want {
+			t.Fatalf("getSeries(%s) = %d, want %d", tc.query, got, tc.want)
+		}
+	}
+
+	// getCostSeries edge cases: missing group, unavailable cost, bad fraction, missing conversion, invalid timestamp.
+	hour := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	ooResp = map[string]any{
+		"hits": []map[string]any{
+			{"_timestamp": hour.Format(time.RFC3339), "group_key": "", "amount_numerator": "1", "amount_denominator": "1", "currency": "EUR", "cost_status": "available"},
+			{"_timestamp": hour.Format(time.RFC3339), "group_key": "m1", "amount_numerator": "1", "amount_denominator": "1", "currency": "EUR", "cost_status": "unavailable"},
+			{"_timestamp": hour.Format(time.RFC3339), "group_key": "m1", "amount_numerator": "bad", "amount_denominator": "0", "currency": "EUR", "cost_status": "available"},
+			{"_timestamp": hour.Format(time.RFC3339), "group_key": "m1", "amount_numerator": "1", "amount_denominator": "1", "currency": "USD", "cost_status": "available"},
+		},
+		"total":      4,
+		"is_partial": false,
+	}
+	code, data = request(t, http.MethodGet, srv.URL+"/api/series?metric=cost&group_by=model&currency=EUR&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z", "")
+	if code != http.StatusOK {
+		t.Fatalf("cost series edge cases = %d %s", code, data)
+	}
+	var costRes struct {
+		Coverage map[string]int `json:"coverage"`
+	}
+	_ = json.Unmarshal(data, &costRes)
+	if costRes.Coverage["missing"] != 4 {
+		t.Fatalf("expected 4 missing, got %+v", costRes.Coverage)
+	}
+
+	ooResp = map[string]any{
+		"hits":       []map[string]any{{"_timestamp": "bad-time", "group_key": "m1"}},
+		"total":      1,
+		"is_partial": false,
+	}
+	code, data = request(t, http.MethodGet, srv.URL+"/api/series?metric=cost&group_by=model&currency=EUR&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z", "")
+	if code != http.StatusOK || !strings.Contains(string(data), `"query_complete":false`) {
+		t.Fatalf("invalid timestamp cost series = %d %s", code, data)
+	}
+}

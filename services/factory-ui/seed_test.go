@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type seedStore struct {
@@ -105,5 +107,90 @@ func TestSeedDirectoryDoesNotOverwriteExistingObjects(t *testing.T) {
 	}
 	if got := store.puts["existing.md"]; got != 0 {
 		t.Fatalf("PUT count = %d, want 0", got)
+	}
+}
+
+func TestSeedDefaultsSucceedsAndCancelsOnRetry(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ok.md"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, server := newSeedStore(t, map[string]string{})
+	defer server.Close()
+
+	seedDefaults(context.Background(), server.URL, dir, slog.New(slog.DiscardHandler))
+	store.mu.Lock()
+	got := store.objects["ok.md"]
+	store.mu.Unlock()
+	if got != "hello" {
+		t.Fatalf("seedDefaults stored %q", got)
+	}
+
+	// Failing blobstore retries until context is cancelled.
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer badServer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	seedDefaults(ctx, badServer.URL, dir, slog.New(slog.DiscardHandler))
+}
+
+func TestEnsureObjectAndSeedDirectoryErrors(t *testing.T) {
+	// Non-404/non-200 meta response fails.
+	metaFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer metaFail.Close()
+	if err := ensureObject(context.Background(), metaFail.URL, "a.md", "body"); err == nil {
+		t.Fatal("expected error for 500 meta response")
+	}
+
+	// 404 meta followed by 500 PUT fails.
+	putFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer putFail.Close()
+	if err := ensureObject(context.Background(), putFail.URL, "a.md", "body"); err == nil {
+		t.Fatal("expected error for 500 PUT response")
+	}
+
+	// Invalid URL fails.
+	if err := ensureObject(context.Background(), "://bad-url", "a.md", "body"); err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+
+	// seedDirectory skips non-regular files (symlinks).
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside.md")
+	if err := os.WriteFile(target, []byte("skip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "link.md")); err != nil {
+		t.Fatal(err)
+	}
+	store, server := newSeedStore(t, map[string]string{})
+	defer server.Close()
+	if err := seedDirectory(context.Background(), server.URL, dir); err != nil {
+		t.Fatalf("seedDirectory with symlink: %v", err)
+	}
+	store.mu.Lock()
+	count := len(store.objects)
+	store.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("symlink was uploaded: %d objects", count)
+	}
+
+	// seedDirectory returns error when dir is a regular file.
+	fileAsDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(fileAsDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedDirectory(context.Background(), server.URL, fileAsDir); err == nil {
+		t.Fatal("expected error when dir is a file")
 	}
 }

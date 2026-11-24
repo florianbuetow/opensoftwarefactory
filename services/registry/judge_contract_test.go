@@ -21,10 +21,16 @@ func TestValidateOutputContract(t *testing.T) {
 		{`{"schema_version":1,"output_contract":{"format":"json","mappings":[{"path":"bad","name":"x","type":"number"}]}}`, "RFC 6901"},
 		{`{"schema_version":1,"output_contract":{"format":"json","mappings":[{"path":"/~2","name":"x","type":"number"}]}}`, "RFC 6901"},
 		{`{"schema_version":1,"output_contract":{"format":"json","mappings":[{"path":"/x","name":"x","type":"boolean"}]}}`, "number or string"},
+		{`not-json`, "must be a JSON object"},
+		{`{"schema_version":1,"output_contract":{"format":"json","mappings":[{"path":"","name":"   ","type":"number"}]}}`, "must be non-empty"},
+		{`{"schema_version":1,"output_contract":{"format":"json","mappings":[{"path":"/a","name":"dup","type":"number"},{"path":"/b","name":"dup","type":"string"}]}}`, "is duplicated"},
 	}
 	for _, test := range tests {
 		if err := validateOutputContract([]byte(test.body)); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("validate %s = %v, want %q", test.body, err, test.want)
 		}
+	}
+	if !validJSONPointer("") {
+		t.Error("empty JSON pointer should be valid")
 	}
 }
