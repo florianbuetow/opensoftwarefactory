@@ -115,7 +115,6 @@ type Measurement struct {
 // Price is what one vendor, model, effort and set of modes costs per
 // UnitTokens tokens, from From until To.
 type Price struct {
-	ID            string            `json:"id"`
 	Revision      string            `json:"revision,omitempty"`
 	Vendor        string            `json:"vendor"`
 	Model         string            `json:"model"`
@@ -132,7 +131,6 @@ type Price struct {
 
 // Conversion is the configured rate from one currency to another.
 type Conversion struct {
-	ID           string `json:"id"`
 	Revision     string `json:"revision,omitempty"`
 	FromCurrency string `json:"from_currency"`
 	ToCurrency   string `json:"to_currency"`
@@ -142,23 +140,23 @@ type Conversion struct {
 // CurrentCost is the cost of one usage measurement, calculated from the price
 // and conversion that applied at Generation. The usage record is not changed.
 type CurrentCost struct {
-	UsageID              string    `json:"usage_id"`
-	Amount               string    `json:"amount,omitempty"`
-	AmountNumerator      string    `json:"amount_numerator,omitempty"`
-	AmountDenominator    string    `json:"amount_denominator,omitempty"`
-	Currency             string    `json:"currency,omitempty"`
-	ConvertedAmount      string    `json:"converted_amount,omitempty"`
-	ConvertedNumerator   string    `json:"converted_numerator,omitempty"`
-	ConvertedDenominator string    `json:"converted_denominator,omitempty"`
-	DisplayCurrency      string    `json:"display_currency"`
-	PriceID              string    `json:"price_id,omitempty"`
-	PriceRevision        string    `json:"price_revision,omitempty"`
-	ConversionID         string    `json:"conversion_id,omitempty"`
-	ConversionRevision   string    `json:"conversion_revision,omitempty"`
-	Status               string    `json:"status"`
-	CalculatedAt         time.Time `json:"calculated_at"`
-	Missing              []string  `json:"missing"`
-	Generation           int64     `json:"generation"`
+	UsageID              string         `json:"usage_id"`
+	Amount               string         `json:"amount,omitempty"`
+	AmountNumerator      string         `json:"amount_numerator,omitempty"`
+	AmountDenominator    string         `json:"amount_denominator,omitempty"`
+	Currency             string         `json:"currency,omitempty"`
+	ConvertedAmount      string         `json:"converted_amount,omitempty"`
+	ConvertedNumerator   string         `json:"converted_numerator,omitempty"`
+	ConvertedDenominator string         `json:"converted_denominator,omitempty"`
+	DisplayCurrency      string         `json:"display_currency"`
+	Price                *PriceKey      `json:"price,omitempty"`
+	PriceRevision        string         `json:"price_revision,omitempty"`
+	Conversion           *ConversionKey `json:"conversion,omitempty"`
+	ConversionRevision   string         `json:"conversion_revision,omitempty"`
+	Status               string         `json:"status"`
+	CalculatedAt         time.Time      `json:"calculated_at"`
+	Missing              []string       `json:"missing"`
+	Generation           int64          `json:"generation"`
 }
 
 type mutationOperation struct {
@@ -182,11 +180,13 @@ func (s *service) measurementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/measurements/{id}", s.putMeasurement)
 	mux.HandleFunc("GET /api/measurements/{id}", s.getMeasurement)
 	mux.HandleFunc("GET /api/measurements", s.listMeasurements)
-	mux.HandleFunc("PUT /api/prices/{id}", s.putPrice)
-	mux.HandleFunc("GET /api/prices/{id}", s.getPrice)
+	mux.HandleFunc("POST /api/prices", s.postPrice)
+	mux.HandleFunc("PUT /api/prices", s.putPrice)
+	mux.HandleFunc("DELETE /api/prices", s.deletePrice)
 	mux.HandleFunc("GET /api/prices", s.listPrices)
-	mux.HandleFunc("PUT /api/conversions/{id}", s.putConversion)
-	mux.HandleFunc("GET /api/conversions/{id}", s.getConversion)
+	mux.HandleFunc("POST /api/conversions", s.postConversion)
+	mux.HandleFunc("PUT /api/conversions", s.putConversion)
+	mux.HandleFunc("DELETE /api/conversions", s.deleteConversion)
 	mux.HandleFunc("GET /api/conversions", s.listConversions)
 	mux.HandleFunc("POST /api/recalculations", s.startRecalculation)
 	mux.HandleFunc("GET /api/recalculations/{id}", s.getRecalculation)
@@ -607,7 +607,8 @@ func calculateCostWith(m *Measurement, display string, generation int64, prices 
 	amount := new(big.Rat).Add(new(big.Rat).Mul(new(big.Rat).SetInt64(*uncached), u), new(big.Rat).Mul(new(big.Rat).SetInt64(*m.CachedInputTokens), c))
 	amount.Add(amount, new(big.Rat).Mul(new(big.Rat).SetInt64(*m.OutputTokens), o))
 	amount.Quo(amount, new(big.Rat).SetInt64(p.UnitTokens))
-	cost.Amount, cost.AmountNumerator, cost.AmountDenominator, cost.Currency, cost.PriceID, cost.PriceRevision = decimalString(amount), amount.Num().String(), amount.Denom().String(), p.Currency, p.ID, p.Revision
+	cost.Amount, cost.AmountNumerator, cost.AmountDenominator, cost.Currency, cost.PriceRevision = decimalString(amount), amount.Num().String(), amount.Denom().String(), p.Currency, p.Revision
+	cost.Price = p.Key()
 	converted := new(big.Rat).Set(amount)
 	if display != p.Currency {
 		var found []Conversion
@@ -622,7 +623,8 @@ func calculateCostWith(m *Measurement, display string, generation int64, prices 
 		}
 		rate, _ := decimal(found[0].Rate, true)
 		converted.Mul(converted, rate)
-		cost.ConversionID, cost.ConversionRevision = found[0].ID, found[0].Revision
+		convKey := found[0].Key()
+		cost.Conversion, cost.ConversionRevision = &convKey, found[0].Revision
 	}
 	cost.ConvertedAmount = decimalString(converted)
 	cost.ConvertedNumerator, cost.ConvertedDenominator = converted.Num().String(), converted.Denom().String()

@@ -29,6 +29,7 @@ function setup(page, responder) {
   elements.get("evaluation-new-slot").parentElement = h("div");
   const context = { h, $: id => elements.get(id), tabs: {}, URLSearchParams, Date, Set, Map, JSON, Number, crypto: { randomUUID: () => "test-id" },
     localStorage: { getItem: () => null, setItem() {} },
+    titleCase: id => `Title(${id})`, midTruncate: (text, max) => text.length <= max ? text : `${text.slice(0, 4)}…`,
     document: { createElementNS: (_, tag) => h(tag) },
     iconButton: (_, label, onclick) => h("button", { title: label, onclick }, label),
     emptyPanel: text => h("empty", {}, text), errorPanel: text => h("error", {}, text), dataTable: (headers, rows) => h("table", { headers }, rows),
@@ -47,7 +48,13 @@ test("event viewer bounds retained rows and closes only its viewer session", asy
   f.context.tabs.events.show(); await settle();
   const feed = f.nodes.find(n => n.className === "event-feed");
   assert.equal(feed.children.length, 1000);
-  assert.equal(feed.children[0].children[1].children[0], "group/work");
+  const first = feed.children[0];
+  assert.equal(first.children[1].children[0], "Title(group/work)", "the workflow is named as the factory names it");
+  assert.equal(first.children[1].title, "group/work", "its stored name is the tooltip");
+  assert.equal(first.children[2].children[0], "Title(completed)");
+  assert.deepEqual(feed.parentElement.children[0].children.map(n => n.children[0]), ["Time", "Workflow", "Outcome"], "the feed has a heading row");
+  first.onclick();
+  assert.equal(first.attrs["aria-pressed"], "true", "the chosen event is marked");
   f.context.tabs.events.hide(); await settle();
   assert.ok(f.requests.some(([m, p]) => m === "DELETE" && p.endsWith("/viewer")));
   assert.ok(f.requests.every(([, p]) => !p.includes("intake")));
@@ -103,15 +110,103 @@ test("judge mapping fields and agent JSON stay synchronized", async () => {
   assert.equal(mappings.children[0].mappingValue().path, "/from-json");
 });
 
-test("currency conversion editing preserves decimal strings and explicit currency", async () => {
-  const f = setup("pricing", method => method === "GET" ? [] : {});
+test("currency conversion editing preserves decimal strings and saves by currency pair without an id", async () => {
+  const stored = { revision: "c1", from_currency: "USD", to_currency: "EUR", rate: "0.92" };
+  const f = setup("pricing", method => method === "GET" ? { conversions: [{ ...stored }] } : {});
+  f.context.crypto.randomUUID = () => assert.fail("a conversion must not get a generated id");
   f.context.tabs.pricing.show(); await settle();
   const kind = f.elements.get("pricing-kind"); kind.value = "conversions"; kind.onchange(); await settle();
+  const editor = () => f.nodes.find(n => n.className === "measurement-editor");
+  const submit = () => editor().onsubmit({ preventDefault() {} });
+
   f.nodes.find(n => n.title === "New conversion").onclick();
-  f.elements.get("price-from_currency").value = "USD"; f.elements.get("price-to_currency").value = "EUR"; f.elements.get("price-rate").value = "0.923456789";
-  await f.nodes.find(n => n.className === "measurement-editor").onsubmit({ preventDefault() {} });
+  f.elements.get("price-from_currency").value = "EUR"; f.elements.get("price-to_currency").value = "USD"; f.elements.get("price-rate").value = "1.087654321";
+  await submit(); await settle();
+  const post = f.requests.find(([m]) => m === "POST");
+  assert.equal(post[1], "/api/evaluations/conversions");
+  assert.equal("id" in post[2], false, "a new conversion carries no id");
+  assert.equal(post[2].rate, "1.087654321"); assert.equal(post[2].from_currency, "EUR"); assert.equal(post[2].to_currency, "USD");
+
+  f.requests.length = 0;
+  f.nodes.filter(n => n.tag === "table").pop().children[0].onclick();
+  f.elements.get("price-rate").value = "0.923456789";
+  await submit(); await settle();
   const put = f.requests.find(([m]) => m === "PUT");
-  assert.equal(put[2].rate, "0.923456789"); assert.equal(put[2].from_currency, "USD"); assert.equal(put[3]["If-None-Match"], "*");
+  const query = new URLSearchParams(put[1].split("?")[1]);
+  assert.equal(put[1].split("?")[0], "/api/evaluations/conversions");
+  assert.deepEqual(Object.fromEntries(query), { from_currency: "USD", to_currency: "EUR" });
+  assert.equal(put[3]["If-Match"], '"c1"');
+  assert.equal(put[2].rate, "0.923456789");
+  assert.equal("id" in put[2] || "revision" in put[2], false);
+
+  f.requests.length = 0;
+  f.nodes.filter(n => n.tag === "table").pop().children[0].onclick();
+  f.elements.get("price-from_currency").value = "EUR"; f.elements.get("price-to_currency").value = "USD"; f.elements.get("price-rate").value = "1.1";
+  await submit(); await settle();
+  const writes = f.requests.filter(([m]) => m !== "GET");
+  assert.deepEqual(writes.map(([m]) => m), ["DELETE", "POST"], "a changed currency pair deletes the old row and creates the new one");
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(writes[0][1].split("?")[1])), { from_currency: "USD", to_currency: "EUR" });
+  assert.equal(writes[0][3]["If-Match"], '"c1"');
+  assert.equal(writes[1][2].from_currency, "EUR"); assert.equal(writes[1][2].to_currency, "USD");
+});
+
+test("a price is saved by its key, never by a generated id", async () => {
+  const stored = { revision: "r1", vendor: "v", model: "m", effort: "none", modes: { tier: "batch" }, from: "2026-11-22T17:09:44.341018Z", to: null, currency: "USD", unit_tokens: 1000, input_uncached: "1", input_cached: "0", output: "2" };
+  const f = setup("pricing", method => method === "GET" ? { prices: [{ ...stored }] } : {});
+  f.context.crypto.randomUUID = () => assert.fail("a price must not get a generated id");
+  f.context.tabs.pricing.show(); await settle();
+  const editor = () => f.nodes.find(n => n.className === "measurement-editor");
+  const submit = () => editor().onsubmit({ preventDefault() {} });
+
+  f.nodes.find(n => n.title === "New price").onclick();
+  for (const [key, value] of Object.entries({ vendor: "v", model: "n", effort: "low", currency: "EUR", unit_tokens: "1000", input_uncached: "1", input_cached: "0", output: "2", from: "2026-01-01T00:00:00Z" })) f.elements.get(`price-${key}`).value = value;
+  f.elements.get("price-open").checked = true; f.elements.get("price-modes").value = "{}";
+  await submit(); await settle();
+  const post = f.requests.find(([m]) => m === "POST");
+  assert.equal(post[1], "/api/evaluations/prices", "a new price is created with POST on the collection");
+  assert.equal("id" in post[2], false, "a new price carries no id"); assert.equal(post[2].from, "2026-01-01T00:00:00.000Z");
+
+  f.requests.length = 0;
+  f.nodes.filter(n => n.tag === "table").pop().children[0].onclick();
+  f.elements.get("price-output").value = "3";
+  await submit(); await settle();
+  const put = f.requests.find(([m]) => m === "PUT");
+  const query = new URLSearchParams(put[1].split("?")[1]);
+  assert.equal(put[1].split("?")[0], "/api/evaluations/prices");
+  assert.deepEqual(Object.fromEntries(query), { vendor: "v", model: "m", effort: "none", modes: '{"tier":"batch"}', from: "2026-11-22T17:09:44.341018Z" }, "an existing price is addressed by its key");
+  assert.equal(put[3]["If-Match"], '"r1"');
+  assert.equal(put[2].output, "3"); assert.equal(put[2].from, stored.from, "an unchanged start date keeps its stored text");
+  assert.equal("id" in put[2] || "revision" in put[2], false);
+
+  f.requests.length = 0;
+  f.nodes.filter(n => n.tag === "table").pop().children[0].onclick();
+  f.elements.get("price-from").value = "2026-12-01T00:00:00Z";
+  await submit(); await settle();
+  const writes = f.requests.filter(([m]) => m !== "GET");
+  assert.deepEqual(writes.map(([m]) => m), ["DELETE", "POST"], "a new start date deletes the old row and creates the new one");
+  assert.equal(new URLSearchParams(writes[0][1].split("?")[1]).get("from"), stored.from);
+  assert.equal(writes[0][3]["If-Match"], '"r1"');
+  assert.equal(writes[1][2].from, "2026-12-01T00:00:00.000Z");
+});
+
+test("prices are one sorted table that the filter narrows by model or vendor", async () => {
+  const price = (vendor, model, effort, output) => ({ vendor, model, effort, currency: "USD", unit_tokens: 1000000, input_uncached: "3", input_cached: "0.30", output, from: "2026-11-22T17:09:44Z", to: null, modes: {} });
+  const f = setup("pricing", method => method === "GET" ? { prices: [price("lm-studio", "qwen3", "high", "0"), price("anthropic", "claude-sonnet", "low", "15"), price("anthropic", "claude-sonnet", "none", "15")] } : {});
+  f.context.tabs.pricing.show(); await settle();
+  const cells = () => { const table = f.nodes.filter(n => n.tag === "table").pop(); return table.children.map(tr => tr.children.map(td => td.children[0])); };
+  assert.deepEqual(Array.from(f.nodes.filter(n => n.tag === "table").pop().headers), ["Model", "Vendor", "Effort", "Input", "Cached input", "Output", "Per", "Currency", "Effective"]);
+  assert.deepEqual(cells().map(row => row.slice(0, 3).join("/")), ["claude-sonnet/anthropic/none", "claude-sonnet/anthropic/low", "qwen3/lm-studio/high"], "sorted by vendor, model, then effort");
+  assert.deepEqual(cells()[0].slice(3, 8), ["3", "0.30", "15", "1M tokens", "USD"], "rates stay the decimal strings that were stored");
+  const filter = f.elements.get("pricing-filter");
+  filter.value = "QWEN"; filter.oninput();
+  assert.deepEqual(cells().map(row => row[0]), ["qwen3"], "the filter ignores case");
+  filter.value = "anthropic"; filter.oninput();
+  assert.equal(cells().length, 2, "the vendor is filtered too");
+  filter.value = "nothing"; filter.oninput();
+  assert.ok(f.nodes.some(n => n.role === "status" && n.children.includes("No model or vendor contains “nothing”")));
+  filter.value = ""; filter.oninput();
+  f.nodes.filter(n => n.tag === "table").pop().children[2].onclick();
+  assert.equal(f.elements.get("price-model").value, "qwen3", "a click on a row edits that price");
 });
 
 test("graphs keep missing values as gaps and permit multiple series", async () => {
@@ -141,6 +236,17 @@ test("factory metrics and evaluations have separate navigation", () => {
   assert.equal(c.subpages.judges.menu, "evaluations");
 });
 
+test("metrics narrows every number to the runs of the chosen outcome", async () => {
+  const f = setup("metrics", (_, route) => route.includes("/series?") ? { series: [], coverage: { known: 0, missing: 0 } } : { items: [] });
+  f.context.tabs.metrics.show(); await settle();
+  assert.ok(f.requests.every(([, route]) => !route.includes("outcome=")), "all runs count until an outcome is chosen");
+  f.requests.length = 0;
+  const outcome = f.elements.get("metric-outcome"); outcome.value = "failed"; outcome.onchange(); await settle();
+  const series = f.requests.filter(([, route]) => route.includes("/series?"));
+  assert.ok(series.length >= 5, "the chart and the four totals ask again");
+  assert.ok(series.every(([, route]) => route.includes("outcome=failed")));
+});
+
 test("metrics loads actual runtime on entry without date entry and exposes custom dates only on request", async () => {
   const f = setup("metrics", (_, route) => route.includes("/series?") ? {series: [{key:"workflow",points:[{time:new Date().toISOString(),value:938}]}],coverage:{known:1,missing:0}} : {items:[]});
   f.context.tabs.metrics.show(); await settle();
@@ -148,11 +254,83 @@ test("metrics loads actual runtime on entry without date entry and exposes custo
   assert.equal(f.elements.get("metric-name").value, "duration_ms");
   assert.equal(f.elements.get("metric-from").parentElement.hidden, true);
   assert.ok(f.requests.some(([,route]) => route.includes("/series?") && route.includes("metric=duration_ms") && route.includes("group_by=workflow")));
-  assert.ok(f.nodes.find(n => n.className === "measurement-chart").children.some(n => n.tag === "svg"));
+  assert.equal(f.nodes.filter(n => n.className === "metric-bar-row").length, 1, "one measured workflow is one bar");
+  const apply = f.nodes.find(n => n.tag === "button" && n.children.includes("Apply"));
+  assert.equal(apply.hidden, true, "a preset reloads at once and needs no Apply");
   const range = f.elements.get("metric-range"); range.value="custom"; range.onchange();
   assert.equal(f.elements.get("metric-from").parentElement.hidden, false);
+  assert.equal(apply.hidden, false, "typed dates wait for Apply");
   range.value="24h"; range.onchange(); await settle();
   assert.equal(f.elements.get("metric-from").parentElement.hidden, true);
+  assert.equal(apply.hidden, true);
+});
+
+const textOf = node => typeof node === "string" ? node : [node.textContent, ...(node.children || []).map(textOf)].join(" ").replace(/\s+/g, " ").trim();
+const factoryWeek = (_, route) => {
+  if (!route.includes("/series?")) return { items: [] };
+  const at = "2026-11-23T21:00:00Z", point = value => ({ time: at, value, status: "known" });
+  if (route.includes("group_by=run")) return { series: [{ key: "run-a", points: [point(16952)] }, { key: "run-b", points: [point(4318)] }, { key: "run-c", points: [point(30621)] }], coverage: { known: 3, missing: 0 } };
+  if (route.includes("metric=cost")) return { series: [], coverage: { known: 0, missing: 15 } };
+  if (route.includes("metric=input_tokens")) return { series: [{ key: "<nil>", points: [point(567), point(11833)] }], coverage: { known: 2, missing: 9 } };
+  if (route.includes("metric=output_tokens")) return { series: [{ key: "<nil>", points: [point(100)] }], coverage: { known: 1, missing: 0 } };
+  return { series: [{ key: "default/workflow-1", points: [point(21270)] }, { key: "egm/full", points: [point(30621)] }], coverage: { known: 2, missing: 0 }, projection: { status: "refreshing" } };
+};
+
+test("metrics leads with the totals of the period, each with its unit, and says Unknown instead of zero", async () => {
+  const f = setup("metrics", factoryWeek);
+  f.context.tabs.metrics.show(); await settle();
+  const tiles = f.nodes.filter(n => n.className === "metric-tile").map(textOf);
+  assert.deepEqual(tiles.slice(-4), ["Unknown Cost 15 values missing", "3 Runs", "51.9 s Runtime", "12.5k Tokens 9 values missing"]);
+  assert.ok(f.requests.some(([, route]) => route.includes("metric=cost") && route.includes("currency=EUR")), "the cost total asks in the display currency");
+});
+
+test("metrics compares the groups as ranked bars and draws no trend from single points", async () => {
+  const f = setup("metrics", factoryWeek);
+  f.context.tabs.metrics.show(); await settle();
+  assert.deepEqual(f.nodes.filter(n => n.className === "metric-bar-row").map(textOf), ["Title(egm/full) 30.6 s", "Title(default/workflow-1) 21.3 s"]);
+  assert.ok(f.nodes.some(n => n.tag === "h2" && n.textContent === "Runtime by workflow"));
+  const bars = f.nodes.filter(n => n.className === "metric-bar").map(n => n.style);
+  assert.equal(bars[0], "width:100%"); assert.ok(parseFloat(bars[1].slice(6)) < 100);
+  assert.equal(f.nodes.find(n => n.className === "metric-trend").hidden, true, "one measured hour per workflow is no line");
+  assert.equal(f.nodes.find(n => n.className === "measurement-chart").children.length, 0);
+  assert.equal(f.nodes.filter(n => n.type === "checkbox").length, 0, "no legend of checkboxes");
+});
+
+test("the metrics status line names only what is still counting or missing", async () => {
+  const f = setup("metrics", factoryWeek);
+  f.context.tabs.metrics.show(); await settle();
+  const status = f.nodes.find(n => n.role === "status" && n.className.includes("metric-status"));
+  assert.equal(textOf(status), "Latest hours still counting");
+  assert.equal(f.nodes.filter(n => n.className === "metric-warning").length, 0);
+  const metric = f.elements.get("metric-name"); metric.value = "input_tokens"; metric.onchange();
+  f.elements.get("metric-group").value = "workflow"; f.elements.get("metric-group").onchange(); await settle();
+  assert.equal(textOf(status), "9 values missing");
+  assert.equal(f.nodes.filter(n => n.className === "metric-warning").map(textOf).pop(), "9 values missing");
+  assert.deepEqual(f.nodes.filter(n => n.className === "metric-bar-row").map(textOf).slice(-1), ["Unattributed 12.4k tokens"]);
+});
+
+test("the metrics trend has day ticks and values with units on the axis and in the hover text", async () => {
+  const points = [{ time: "2026-11-21T10:00:00Z", value: 30621 }, { time: "2026-11-24T10:00:00Z", value: 12000 }];
+  const f = setup("metrics", (_, route) => route.includes("/series?") ? { series: [{ key: "egm/full", points }], coverage: { known: 2, missing: 0 } } : { items: [] });
+  f.context.tabs.metrics.show(); await settle();
+  const range = f.elements.get("metric-range"); range.value = "custom"; range.onchange();
+  f.elements.get("metric-from").value = "2026-11-20T00:00"; f.elements.get("metric-to").value = "2026-11-27T00:00";
+  f.nodes.find(n => n.tag === "form").onsubmit({ preventDefault() {} }); await settle();
+  assert.equal(f.nodes.find(n => n.className === "metric-trend").hidden, false);
+  const labels = f.nodes.filter(n => n.attrs.class === "plot-label").map(n => n.textContent);
+  const day = iso => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  for (const iso of ["2026-11-20T00:00", "2026-11-23T00:00", "2026-11-27T00:00"]) assert.ok(labels.includes(day(iso)), `a tick for ${day(iso)}`);
+  assert.ok(labels.every(label => !/\d\d:\d\d:\d\d/.test(label)), "no seconds on the time axis");
+  assert.ok(labels.includes("0.0 s") && labels.includes("40.0 s"), "the value axis carries the unit");
+  const hover = f.nodes.filter(n => n.tag === "title").map(n => n.textContent);
+  assert.ok(hover.some(text => text.startsWith("Title(egm/full): 30.6 s · ")));
+});
+
+test("Graphs and Prices are named by their tab alone", () => {
+  for (const id of ["metrics", "pricing"]) {
+    const f = setup(id, () => ({}));
+    assert.ok(!f.nodes.some(n => n.className === "panel-head"), `${id} repeats no heading under its tab`);
+  }
 });
 
 test("Sets and Judges keep category navigation above headed panels", () => {

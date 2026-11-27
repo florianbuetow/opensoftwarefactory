@@ -45,6 +45,8 @@ spec:
               value: http://mcp-gateway:8080
             - name: EVALUATION_URL
               value: http://evaluation:8080
+            - name: SQLDB_URL
+              value: http://sqldb:8080
             - name: CONNECTORS_URL
               value: http://connectors:8080
             - name: GIT_HOST_URL

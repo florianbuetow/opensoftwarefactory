@@ -18,7 +18,7 @@ import (
 // version must hash to the same value forever. The order of the fields in the structs has
 // no effect on the hash. The key of a new field is added at the end of its list.
 var (
-	definitionHashKeys = []string{"name", "version", "description", "created", "created_by", "steps"}
+	definitionHashKeys = []string{"name", "version", "description", "created", "created_by", "steps", "groups"}
 	stepHashKeys       = []string{
 		"id", "service", "activity", "agent", "agents", "question", "workflow", "workflows", "channels", "max_turns",
 		"member_positions", "on_reject", "max_rejections", "repository", "source_branch", "work_branch", "name",

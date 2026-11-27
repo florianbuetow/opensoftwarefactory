@@ -10,7 +10,7 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Central deployment list, in rollout order. Images are built from every services/*/Dockerfile.
-services := "jetstream llm-gateway openobserve telemetry-collector temporal blobstore agent-registry policy-registry skill-registry tool-gateway mcp-gateway git-host connectors orchestrator evaluation agent factory-ui"
+services := "jetstream llm-gateway openobserve telemetry-collector temporal blobstore sqldb agent-registry policy-registry skill-registry tool-gateway mcp-gateway git-host connectors orchestrator evaluation agent factory-ui"
 cluster := "opensoftwarefactory"
 context := "kind-" + cluster
 namespace := "opensoftwarefactory"
@@ -326,7 +326,7 @@ _restart-shared-runtime approval:
 
 # Prepare durable event storage and install generated local credentials.
 _event-storage:
-    docker exec {{cluster}}-control-plane install -d -o 1000 -g 1000 /var/lib/opensoftwarefactory/jetstream /var/lib/opensoftwarefactory/evaluation
+    docker exec {{cluster}}-control-plane install -d -o 1000 -g 1000 /var/lib/opensoftwarefactory/jetstream /var/lib/opensoftwarefactory/evaluation /var/lib/opensoftwarefactory/sqldb
     kubectl --context {{context}} apply -f infra/kubernetes/overlays/local/factory/namespace.yaml
     kubectl --context {{context}} apply -f scratch/measurements/jetstream/secret.json
 
@@ -702,15 +702,15 @@ test:
     node --check scripts/verify-factory-measurements.js
     node --check scripts/verify-workflow-events.js
     node --test scripts/jetstream.test.js
-    node --test services/factory-ui/measurements_ui_test.mjs
-    node --test services/factory-ui/skills_ui_test.mjs
     node --test scripts/seeds.test.js
     node --check scripts/auxiliary-targets.test.js
     node --check scripts/lifecycle.test.js
     node --check scripts/migrate-unpack-inputs.js
     node --check scripts/migrate-unpack-inputs.test.js
     for script in services/factory-ui/web/*.js; do node --check "$script"; done
-    node --test scripts/auxiliary-targets.test.js scripts/scripts.test.js scripts/e2e-ui.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js services/factory-ui/agents_ui_test.mjs services/factory-ui/chat_ui_test.mjs services/factory-ui/evaluations_ui_test.mjs services/factory-ui/dom_ui_test.mjs services/factory-ui/markdown_ui_test.mjs services/factory-ui/mcp_gateway_ui_test.mjs services/factory-ui/policy_templates_ui_test.mjs services/factory-ui/registry_name_ui_test.mjs services/factory-ui/run_index_ui_test.mjs services/factory-ui/rerun_ui_test.mjs services/factory-ui/runs_timeline_ui_test.mjs services/factory-ui/teams_editor_test.mjs services/factory-ui/teams_ui_test.mjs services/factory-ui/inputs_ui_test.mjs services/factory-ui/workflows_page_test.mjs services/factory-ui/graph_ui_test.mjs services/factory-ui/overview_ui_test.mjs services/factory-ui/shortcuts_ui_test.mjs services/factory-ui/merge_batch_ui_test.mjs services/factory-ui/devpods_ui_test.mjs services/factory-ui/connectors_ui_test.mjs
+    node --test scripts/auxiliary-targets.test.js scripts/scripts.test.js scripts/e2e-ui.test.js scripts/lifecycle.test.js scripts/migrate-systemprompt.test.js scripts/migrate-unpack-inputs.test.js scripts/openobserve.test.js scripts/log-collector.test.js
+    # Every UI test file, found by name: a new *_test.mjs runs here without being listed.
+    node --test services/factory-ui/*_test.mjs
     kubectl kustomize infra/kubernetes/overlays/local >/dev/null
     ./scripts/ci-go.sh test
     ./scripts/ci-python.sh test

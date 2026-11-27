@@ -91,6 +91,9 @@ func (s *service) readObjectLimited(ctx context.Context, id string, limit int64)
 }
 
 func (s *service) writeObject(ctx context.Context, id string, value any, condition string) (revision string, err error) {
+	if strings.HasPrefix(id, operationPrefix+"/") {
+		s.pending.invalidate()
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return "", err
@@ -122,6 +125,22 @@ func (s *service) writeObject(ctx context.Context, id string, value any, conditi
 		return "", fmt.Errorf("writing blob %s: %s", id, resp.Status)
 	}
 	return trimETag(resp.Header.Get("ETag")), nil
+}
+
+func (s *service) deleteObject(ctx context.Context, id string) (err error) {
+	req, err := s.newRequest(ctx, s.blobs, http.MethodDelete, "/blobs/"+id, http.NoBody)
+	if err != nil {
+		return err
+	}
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { err = closeAfter(err, resp.Body) }()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("deleting blob %s: %s", id, resp.Status)
+	}
+	return nil
 }
 
 func trimETag(v string) string  { return strings.Trim(strings.TrimSpace(v), `"`) }

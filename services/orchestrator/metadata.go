@@ -31,7 +31,7 @@ type AgentSettings struct {
 	Temperature               *float64          `json:"temperature,omitempty"`
 	Skills                    map[string]string `json:"skills,omitempty"`
 	Tools                     []string          `json:"tools"`
-	MaxRetries                int               `json:"max_retries"`
+	MaxTurns                  int               `json:"max_turns"`
 	SkillScriptTimeoutSeconds int               `json:"skill_script_timeout_seconds,omitempty"`
 }
 
@@ -93,14 +93,16 @@ func (s *server) runMetadata(ctx context.Context, c Config, def *pipeline.Defini
 
 // agentDefinition is the part of an agent's agent.json the orchestrator reads.
 type agentDefinition struct {
-	Description               string   `json:"description"`
-	Models                    []string `json:"models"`
-	Effort                    string   `json:"effort"`
-	Temperature               *float64 `json:"temperature"`
-	Tools                     []string `json:"tools"`
-	Skills                    []string `json:"skills"`
-	MaxRetries                int      `json:"max_retries"`
-	SkillScriptTimeoutSeconds int      `json:"skill_script_timeout_seconds"`
+	Description string   `json:"description"`
+	Models      []string `json:"models"`
+	Effort      string   `json:"effort"`
+	Temperature *float64 `json:"temperature"`
+	Tools       []string `json:"tools"`
+	Skills      []string `json:"skills"`
+	MaxTurns    int      `json:"max_turns"`
+	// MaxRetries is the name the limit had before max_turns: the model calls after the first one.
+	MaxRetries                int `json:"max_retries"`
+	SkillScriptTimeoutSeconds int `json:"skill_script_timeout_seconds"`
 }
 
 // agentRegistry reads pinned agents from the agent registry.
@@ -170,8 +172,14 @@ func (r agentRegistry) settings(ctx context.Context, ref string) (AgentSettings,
 	if err != nil {
 		return AgentSettings{}, err
 	}
+	// The turns the agent service gives the agent: max_turns, or for a version stored before
+	// it, one more than max_retries.
+	turns := def.MaxTurns
+	if turns <= 0 {
+		turns = 1 + max(def.MaxRetries, 0)
+	}
 	out := AgentSettings{
-		Effort: def.Effort, Temperature: def.Temperature, Tools: def.Tools, MaxRetries: def.MaxRetries,
+		Effort: def.Effort, Temperature: def.Temperature, Tools: def.Tools, MaxTurns: turns,
 		SkillScriptTimeoutSeconds: def.SkillScriptTimeoutSeconds,
 	}
 	if len(def.Models) > 0 {

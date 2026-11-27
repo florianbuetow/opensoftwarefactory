@@ -82,7 +82,8 @@ test("the Runs detail draws the run's workflow version above its steps, in the s
   assert.ok(html.indexOf('src="graph.js"') < html.indexOf('src="workflows.js"') && html.indexOf('src="graph.js"') < html.indexOf('src="runs.js"'), "loaded before its users");
   // One source of truth: the graph's tiles take their state from the same stepState as the rows.
   assert.match(runs, /const graph = runGraph\(graphDef, stepState, \(id\) => \{/);
-  assert.match(runs, /WorkflowGraph\.drawGraph\(svg, w, \{\s+view, stateOf, selected, idPrefix: "run-",/);
+  assert.match(runs, /const wrap = WorkflowGraph\.viewer\(def, \{/, "drawn by the shared viewer");
+  assert.match(runs, /stateOf, selected, onTile, onEnlarge: opts\.onEnlarge,/);
   // A waiting gate opens its decision; any other tile picks out its row, which keeps the pick across redraws.
   assert.match(runs, /if \(gate\) \{ location\.hash = `#decisions\/\$\{encodeURIComponent\(`p:\$\{gate\.workflow_id\}\|\$\{gate\.step\}`\)\}`; return; \}/);
   assert.match(runs, /dataset: \{ step: id \} \}, statusChip\(stepState\(id\)\)/);
@@ -95,13 +96,56 @@ test("the Runs detail draws the run's workflow version above its steps, in the s
   assert.match(style.slice(style.lastIndexOf("@media (prefers-reduced-motion: reduce)")), /\.tile\.state-running \.state-dot/);
 });
 
+test("the run's graph pans, zooms, marks the steps the run is at, and opens nearly full screen", () => {
+  const runs = read("runs.js"), style = read("style.css"), app = read("app.js"), viewer = read("graph.js"), workflows = read("workflows.js");
+  // One component for both pages: the viewer and the enlarged dialog live in graph.js, and
+  // neither page has a pan, a zoom or an enlarged dialog of its own.
+  assert.match(viewer, /\n  function viewer\(def, opts = \{\}\) \{/);
+  assert.match(viewer, /\n  function openLarge\(\{ title, def, stateOf = null, onTile = \(\) => \{\}, viewKey = "", label = "", graph = \{\}, onOpen = null, openLabel = "", openTip = "" \}\) \{/);
+  // A run leads to its workflow three ways (bug report, 26 Nov: the jump was only inside the
+  // enlarged view): the workflow link in its status line, a double-click on a tile, and
+  // Open workflow beside Close in the enlarged view. All open the version the run used.
+  assert.match(runs, /const workflowHash = \(step = ""\) => WorkflowLogic\.formatHash\(\{ workflow: workflowName, step, version: version \|\| 0 \}\);/);
+  assert.match(runs, /h\("a", \{ className: "run-version", href: workflowHash\(\),/);
+  assert.match(runs, /onOpen: workflowName \? \(id\) => \{ location\.hash = workflowHash\(id\); \} : null \}\);/);
+  assert.match(viewer, /if \(onOpen\) g\.addEventListener\("dblclick", \(ev\) => \{ ev\.stopPropagation\(\); onOpen\(s\.id\); \}\);/);
+  assert.match(runs, /openLabel: "Open workflow", openTip: "Opens this version of the workflow on Workflows",/);
+  assert.match(viewer, /footer: \[onOpen \? h\("button", \{ type: "button", title: openTip, onclick: \(\) => onOpen\(\) \}, openLabel\) : null,/);
+  assert.match(runs, /WorkflowGraph\.openLarge\(\{/);
+  assert.match(workflows, /G\.openLarge\(\{/);
+  for (const page of [runs, workflows.slice(workflows.indexOf("G.openLarge({"))]) assert.doesNotMatch(page, /graph-dialog|run-graph-large/, "the dialog is the shared one");
+  assert.doesNotMatch(runs, /addEventListener\("wheel"/);
+  // Pan by a drag and zoom by the wheel, kept per run and size across the 3 s redraws.
+  assert.match(viewer, /const views = new Map\(\);/);
+  assert.match(viewer, /svg\.addEventListener\("wheel", \(ev\) => \{\s+ev\.preventDefault\(\);/);
+  assert.match(viewer, /if \(!moved && Math\.hypot\(dx, dy\) < 4\) return;/, "a click is not a pan");
+  assert.match(viewer, /if \(kept\) view = \{ \.\.\.view, \.\.\.kept \};/);
+  assert.match(runs, /if \(WorkflowGraph\.dragging\(\)\) return; \/\/ a pan is in progress/, "no redraw under the pointer");
+  // The steps the run is at now are active: red, with the state still a word on the tile.
+  assert.match(viewer, /const ACTIVE_STATES = \["running", "waiting"\];/);
+  assert.match(viewer, /if \(stateOf && ACTIVE_STATES\.includes\(stateOf\(s\.id\)\)\) g\.classList\.add\("active"\);/);
+  assert.match(style, /\.run-detail-graph \.tile\.active \.body \{ stroke: var\(--failed\); stroke-width: 3; \}/);
+  // A click on the empty graph, or its Enlarge button, opens it nearly full screen.
+  assert.match(viewer, /if \(onEnlarge && !ev\.target\.closest\?\.\("\.tile"\)\) onEnlarge\(\);/);
+  assert.match(viewer, /iconButton\("expand", "Enlarge graph"/);
+  assert.match(app, /\n  expand: '<path /);
+  assert.match(style, /\.dialog-backdrop\.graph-backdrop \{ align-items: stretch; padding: 24px; \}/);
+  // Enlarged from a run: a tile opens its step on the Workflows page in the run's version, and says what it is on hover.
+  assert.match(runs, /location\.hash = WorkflowLogic\.formatHash\(\{ workflow, step: id, version: version \|\| 0 \}\);/);
+  assert.match(viewer, /large: true, stateOf: states, describe: describeStep,/);
+  assert.match(viewer, /text = typeof config\?\.description === "string" \? config\.description : "";/);
+  // Enlarged from the Workflows page: a double-click on the empty canvas; a tile closes it and selects that node.
+  assert.match(workflows, /if \(!s && w\?\.steps\.length && !state\.teamOpen && !ev\.target\.closest\?\.\("\.tile, \.edge, \.edge-hit, \.back-edge, \.step-group-label"\)\) \{/);
+  assert.match(workflows, /onTile: \(id, close\) => \{ close\(\); state\.selected = id; render\(\); \},/);
+});
+
 test("the Runs detail says a run is loading instead of going blank, and announces when it is ready", () => {
   const runs = read("runs.js");
   assert.match(runs, /if \(detail\.dataset\.trace !== trace\) \{\s+detail\.dataset\.trace = trace;\s+detail\.setAttribute\("aria-busy", "true"\);/);
   assert.match(runs, /h\("p", \{ className: "muted loading-line", role: "status" \}, `Loading \$\{titleCase\(r\?\.workflow \|\| "the run"\)\}…`\)/);
   // The loading line comes before the first await, so nothing is blank while the status loads.
   assert.ok(runs.indexOf('className: "muted loading-line"') < runs.indexOf("const st = await runIndex.status(trace);"));
-  assert.match(runs, /detail\.setAttribute\("aria-busy", "false"\);\n    detail\.replaceChildren\(/);
+  assert.match(runs, /detail\.setAttribute\("aria-busy", "false"\);\n[^]*?\n    detail\.replaceChildren\(/, "announced as ready, then drawn");
 });
 
 test("a tile is read by the name it shows, and the keyboard sees a ring around it, apart from the selection", () => {
@@ -154,4 +198,13 @@ test("a run from before its workflow moved into a group still finds its graph un
   assert.equal(context.f(names, "gone"), "");
   assert.match(runs, /const graphDef = def\?\.steps\?\.length \? def : await runWorkflow\(r\?\.workflow \|\| st\.workflow \|\| "", version\);/);
   assert.match(read("overview.js"), /live\.map\(\(r\) => runWorkflow\(r\.workflow, Number\(r\.workflow_version\) \|\| 0\)\)/);
+});
+
+test("the run detail keeps its scroll position across the 3 s redraws", () => {
+  // Bug report, 26 Nov: every redraw built a new scrolling panel, so the detail jumped to the top.
+  const runs = read("runs.js");
+  const at = runs.indexOf('const scrolledTo = detail.querySelector(":scope > .panel-body")?.scrollTop || 0;');
+  assert.ok(at > 0, "reads the scroll position before the redraw");
+  assert.ok(at < runs.indexOf("detail.replaceChildren(\n      h(\"div\", { className: \"panel-head\" }),\n      h(\"div\", { className: \"panel-body\" },\n        h(\"div\", { className: \"section\" },\n          h(\"div\", { className: \"run-meta\" },"), "before the full redraw");
+  assert.match(runs, /if \(body && detail\.dataset\.trace === trace\) body\.scrollTop = scrolledTo;/, "puts it back for the same run only");
 });

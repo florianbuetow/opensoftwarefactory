@@ -279,6 +279,7 @@ func (s *service) routes() http.Handler {
 	mux.HandleFunc("GET /api/devpods/{id}/publish-requests", s.listPublishRequests)
 	mux.HandleFunc("POST /api/devpods/{id}/publish-requests/{n}/decision", s.decidePublishRequest)
 	mux.HandleFunc("GET /api/intake/bindings", s.listIntakeBindings)
+	mux.HandleFunc("POST /api/intake/bindings", s.postIntakeBinding)
 	mux.HandleFunc("GET /api/intake/bindings/{id}", s.getIntakeBinding)
 	mux.HandleFunc("PUT /api/intake/bindings/{id}", s.putIntakeBinding)
 	mux.HandleFunc("DELETE /api/intake/bindings/{id}", s.deleteIntakeBinding)

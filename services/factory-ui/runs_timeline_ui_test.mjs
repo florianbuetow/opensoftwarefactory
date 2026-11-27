@@ -62,6 +62,47 @@ test("execution timeline stays compact and shows attempts only when retries exis
   assert.ok(nodes(timeline, "error-line").some((node) => node.children[0] === "upstream closed"));
 });
 
+test("the trace of an event is searched in the time its attempt ran, or its run for a record without times", async () => {
+  const requested = [];
+  const { executionTimeline } = setup(undefined, async (_method, path) => { requested.push(path); return path.includes("/spans?") ? { spans: [], partial: true } : { logs: [] }; });
+  const spansOf = async (record, context) => {
+    requested.length = 0;
+    const timeline = executionTimeline([{ step: "research", attempts: [record] }], { trace: "11111111-1111-1111-1111-111111111111", artifacts: {}, ...context });
+    nodes(timeline, "timeline-select")[0].onclick(); await new Promise(setImmediate); await new Promise(setImmediate);
+    return { query: new URLSearchParams(requested.find((path) => path.includes("/spans?")).split("?")[1]), timeline };
+  };
+  const event = { kind: "model_call", status: "completed", trace_id: "a".repeat(32) };
+  const timed = await spansOf({ status: "completed", trace_id: "a".repeat(32), started: "2026-11-26T23:53:22Z", finished: "2026-11-26T23:53:42Z", events: [event] }, {});
+  assert.deepEqual([timed.query.get("trace_id"), timed.query.get("start"), timed.query.get("end")], ["a".repeat(32), "2026-11-26T23:53:22Z", "2026-11-26T23:53:42Z"]);
+  const old = await spansOf({ status: "completed", trace_id: "a".repeat(32), events: [event] }, { runStarted: "2026-11-20T10:00:00Z", runFinished: "2026-11-20T10:05:00Z" });
+  assert.deepEqual([old.query.get("start"), old.query.get("end")], ["2026-11-20T10:00:00Z", "2026-11-20T10:05:00Z"], "an old record uses the time of its run");
+  // A search that could not cover everything says so, instead of claiming there is no trace.
+  assert.ok(nodes(old.timeline, "evidence-warning").some((node) => /could be searched/.test(node.children[0])));
+});
+
+test("an opened event stays open when the run redraws itself", async () => {
+  const { executionTimeline } = setup();
+  const records = () => [{ step: "research", attempts: [
+    { attempt: 1, status: "failed", events: [{ kind: "tool_call", name: "lookup", status: "failed", error: "upstream closed" }] },
+    { attempt: 2, status: "failed", error: "gave up", events: [] },
+  ] }];
+  const context = { trace: "11111111-1111-1111-1111-111111111111", artifacts: {} };
+  const first = executionTimeline(records(), context);
+  nodes(first, "timeline-select")[1].onclick(); await new Promise(setImmediate);
+  const opened = nodes(first, "execution-evidence")[0];
+  // The poll rebuilds the timeline from freshly read records every few seconds.
+  const redrawn = executionTimeline(records(), context);
+  assert.equal(nodes(redrawn, "execution-evidence")[0], opened, "the same panel is shown again, with what it had loaded");
+  assert.equal(opened.hidden, false);
+  assert.ok(nodes(redrawn, "error-line").some((node) => node.children[0] === "gave up"));
+  assert.deepEqual(nodes(redrawn, "timeline-select").map((node) => node.props["aria-selected"]), ["false", "true"]);
+  // Another event can still be chosen afterwards, and it replaces the first one.
+  nodes(redrawn, "timeline-select")[0].onclick(); await new Promise(setImmediate);
+  assert.ok(nodes(redrawn, "error-line").some((node) => node.children[0] === "upstream closed"));
+  const other = executionTimeline(records(), { trace: "22222222-2222-2222-2222-222222222222", artifacts: {} });
+  assert.equal(nodes(other, "execution-evidence")[0].props.hidden, true, "another run opens with nothing selected");
+});
+
 test("token estimates and processing time appear once in selected evidence", async () => {
   const { executionTimeline } = setup();
   const timeline = executionTimeline([{ step: "write", attempts: [{ status: "completed", estimated_input_tokens: 120, estimated_output_tokens: 40, processing_time_ms: 2100,

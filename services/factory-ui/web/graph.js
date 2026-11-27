@@ -163,11 +163,34 @@ const WorkflowGraph = (() => {
     return { x: Math.round((minX + maxX) / 2 - TILE_W / 2), y: Math.min(...roots.map((s) => s.position.y)) - ROW_H };
   }
 
+  // stepGroupBoxes gives the frame of each step group of w (a labelled part of the graph, see
+  // Definition.Groups): the box around its nodes that have a position, 16 px outside them
+  // and with room for the label above the top row. A step group inside another one is drawn a
+  // little tighter, so the two frames never lie on each other. index is its place in w.groups.
+  const GROUP_PAD = 16, GROUP_LABEL = 22;
+  function stepGroupBoxes(w) {
+    const list = (w?.groups || []).map((b, index) => {
+      const at = (b.nodes || []).map((id) => stepIn(w, id)?.position).filter(Boolean);
+      if (!at.length) return null;
+      const minX = Math.min(...at.map((p) => p.x)), maxX = Math.max(...at.map((p) => p.x + TILE_W));
+      const minY = Math.min(...at.map((p) => p.y)), maxY = Math.max(...at.map((p) => p.y + TILE_H));
+      return { index, label: b.label || "", nodes: b.nodes || [], x: minX - GROUP_PAD, y: minY - GROUP_PAD - GROUP_LABEL, w: maxX - minX + 2 * GROUP_PAD, h: maxY - minY + 2 * GROUP_PAD + GROUP_LABEL };
+    }).filter(Boolean);
+    // A frame that holds all the nodes of another, larger one grows by 6 px per frame inside it.
+    for (const a of list) {
+      const inside = list.filter((b) => b !== a && b.nodes.length < a.nodes.length && b.nodes.every((id) => a.nodes.includes(id))).length;
+      // Its label then sits a line above the label of the frame inside it, never on it.
+      if (inside) { const d = 6 * inside, up = GROUP_LABEL * inside; a.x -= d; a.y -= d + up; a.w += 2 * d; a.h += 2 * d + up; }
+    }
+    return list;
+  }
+
   // bounds is the box around everything the graph draws: its tiles, the input node (with input),
-  // the lanes of arrows that skip rows, and the back edges that run around the tiles.
+  // the lanes of arrows that skip rows, the back edges that run around the tiles, and the
+  // frames of its step groups.
   function bounds(w, input = true) {
     const ip = input ? inputPos(w) : null;
-    const boxes = [...w.steps.map((s) => ({ ...s.position, w: TILE_W, h: TILE_H })), ...(ip ? [{ ...ip, w: TILE_W, h: TILE_H }] : [])];
+    const boxes = [...w.steps.map((s) => ({ ...s.position, w: TILE_W, h: TILE_H })), ...(ip ? [{ ...ip, w: TILE_W, h: TILE_H }] : []), ...stepGroupBoxes(w)];
     for (const s of w.steps) for (const d of s.depends_on || []) {
       const f = stepIn(w, d);
       const x = f ? laneX(outPort(f), inPort(s), bowsLeft(w, f, s)) : null;
@@ -201,6 +224,7 @@ const WorkflowGraph = (() => {
   //   input: draw the Input node; inputEdge(s): whether an arrow runs from it to the root step s
   //   edgeTitle(s, d): the tooltip of the arrow from d to s
   //   onTile(s, parts), onEdge(g, s, d), onBackEdge(g, s), onInput(g): hooks that add behaviour
+  //   onStepGroup(g, group, index, label): the same for the frame of a step group and its label
   function drawGraph(svg, w, opts = {}) {
     const { subtitle = WorkflowGraph.subtitle, missing = () => "", selected = null, stateOf = null, input = false, inputEdge = () => true } = opts;
     svg.replaceChildren();
@@ -213,6 +237,18 @@ const WorkflowGraph = (() => {
     if (!w || !w.steps.length) return { root: null, defs };
     const view = opts.view || fitView(w, svg.parentElement?.clientWidth || 600, { input });
     const root = el("g", { class: "graph", transform: `translate(${view.ox},${view.oy}) scale(${view.scale})` }, svg);
+
+    // Step groups first, behind everything: a dashed frame around their steps with the label
+    // at its top left. The largest frames are drawn first, so a frame inside another is on top.
+    for (const b of stepGroupBoxes(w).sort((x, y) => y.w * y.h - x.w * x.h)) {
+      const g = el("g", { class: "step-group", "data-step-group": b.index }, root);
+      el("rect", { class: "step-group-frame", x: b.x, y: b.y, width: b.w, height: b.h, rx: 12 }, g);
+      const shown = fit(b.label, b.w - 24, 7);
+      const text = el("text", { class: "step-group-label", x: b.x + 12, y: b.y + 17 }, g);
+      text.textContent = shown;
+      if (shown !== b.label) el("title", {}, text).textContent = b.label;
+      opts.onStepGroup?.(g, w.groups[b.index], b.index, text);
+    }
 
     for (const s of w.steps) {
       for (const d of s.depends_on || []) {
@@ -309,8 +345,166 @@ const WorkflowGraph = (() => {
     onTile?.(s, { g, body, inPort: inPortEl, out, rejected });
   }
 
+  // ---- The read-only viewer: one component for the Runs detail and the Workflows page ----
+
+  // A step's description for its tooltip in the enlarged graph: its name and what it runs or
+  // asks, then the description of its agent version (read once per version).
+  const agentDescriptions = new Map(); // "name@vN" -> description, "" when it has none or is gone
+  async function loadDescriptions(def) {
+    const refs = [...new Set((def?.steps || []).map((s) => s.agent).filter((ref) => ref && !agentDescriptions.has(ref)))];
+    await Promise.all(refs.map(async (ref) => {
+      const at = ref.lastIndexOf("@");
+      let text = "";
+      try {
+        if (at > 0) {
+          const stored = await api("GET", `/api/agents/agents/${encodeURIComponent(ref.slice(0, at))}/${encodeURIComponent(ref.slice(at + 1))}`);
+          let config = stored?.files?.["agent.json"];
+          if (typeof config === "string") config = JSON.parse(config);
+          text = typeof config?.description === "string" ? config.description : "";
+        }
+      } catch { /* an agent that is gone has no description to show */ }
+      agentDescriptions.set(ref, text);
+    }));
+  }
+  function describeStep(s) {
+    const sub = subtitle(s);
+    const text = (typeof s.description === "string" && s.description) || agentDescriptions.get(s.agent) || "";
+    return [`${titleCase(s.id)}${sub ? `: ${sub}` : ""}`, text].filter(Boolean).join("\n");
+  }
+
+  // viewer draws def read-only in a box that pans (a drag) and zooms (the wheel, around the
+  // pointer). It is fitted at first; with a viewKey the panned or zoomed view is kept across
+  // redraws. It returns the box, or null for a definition without steps.
+  //   width, height: the box (height is the most a fitted graph takes; large fills it)
+  //   stateOf(id): the steps' states in a run; the steps the run is at now (running, or
+  //     waiting for a person) are marked "active" and drawn in red
+  //   selected, onTile(id): the selected step, and what a click or Enter on a tile does
+  //   onEnlarge(): a click on the empty graph, and an Enlarge button at its top right
+  //   describe(s): each tile's tooltip; graph: further options of drawGraph (subtitle, missing)
+  const views = new Map(); // viewKey -> { ox, oy, scale }
+  let panning = false; // a pan in progress: the pages do not redraw the graph under the pointer
+  const ACTIVE_STATES = ["running", "waiting"];
+  const VIEW_MIN_SCALE = 0.15, VIEW_MAX_SCALE = 2.5;
+  function viewer(def, opts = {}) {
+    if (!def?.steps?.length) return null;
+    const { viewKey = "", large = false, stateOf = null, selected = null, onTile = () => {}, onEnlarge = null, onOpen = null, describe = null } = opts;
+    const w = { ...def, steps: def.steps.map((s) => ({ ...s, position: s.position ? { ...s.position } : undefined })) };
+    autoLayout(w);
+    const width = opts.width || 600, maxHeight = opts.height || 360;
+    const fitting = { input: false, minScale: large ? VIEW_MIN_SCALE : 0.35, maxScale: large ? 1 : 0.8, margin: 16 };
+    let view = fitView(w, width, fitting);
+    if (view.height > maxHeight) view = fitView(w, width, { ...fitting, height: maxHeight });
+    const height = large ? maxHeight : Math.min(maxHeight, Math.ceil(view.height));
+    const kept = viewKey ? views.get(viewKey) : null;
+    if (kept) view = { ...view, ...kept };
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", `run-graph run-detail-graph${large ? " large" : ""}`);
+    svg.setAttribute("role", "group");
+    svg.setAttribute("aria-label", opts.label || "Workflow graph");
+    svg.setAttribute("width", width);
+    svg.setAttribute("height", height);
+    let moved = false; // the pointer went far enough to pan: the click that ends it does nothing
+    const wrap = h("div", { className: "run-graph-wrap pannable" }, svg,
+      onEnlarge ? iconButton("expand", "Enlarge graph", () => onEnlarge(), { className: "icon-button graph-enlarge" }) : null);
+    const drawn = drawGraph(svg, w, {
+      ...(opts.graph || {}), view, stateOf, selected, idPrefix: opts.idPrefix || "view-",
+      onTile: (s, { g }) => {
+        if (stateOf && ACTIVE_STATES.includes(stateOf(s.id))) g.classList.add("active");
+        const tip = describe?.(s);
+        if (tip) {
+          g.querySelector("title")?.remove();
+          const title = document.createElementNS(SVG_NS, "title");
+          title.textContent = tip;
+          g.prepend(title);
+        }
+        g.addEventListener("click", () => onTile(s.id));
+        // A double-click opens the step where it is defined (the Runs detail: on the Workflows page).
+        if (onOpen) g.addEventListener("dblclick", (ev) => { ev.stopPropagation(); onOpen(s.id); });
+        g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onTile(s.id); } });
+      },
+    });
+    const root = drawn.root;
+    const apply = () => root?.setAttribute("transform", `translate(${view.ox},${view.oy}) scale(${view.scale})`);
+    const keep = () => { if (viewKey) views.set(viewKey, { ox: view.ox, oy: view.oy, scale: view.scale }); };
+    let drag = null;
+    svg.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      drag = { x: ev.clientX, y: ev.clientY, ox: view.ox, oy: view.oy, pointer: ev.pointerId };
+      moved = false;
+    });
+    svg.addEventListener("pointermove", (ev) => {
+      if (!drag) return;
+      const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+      if (!moved && Math.hypot(dx, dy) < 4) return; // a click is not a pan
+      if (!moved) { moved = true; panning = true; svg.classList.add("panning"); svg.setPointerCapture?.(drag.pointer); }
+      view.ox = drag.ox + dx;
+      view.oy = drag.oy + dy;
+      apply();
+    });
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      if (moved) { keep(); svg.classList.remove("panning"); panning = false; }
+    };
+    svg.addEventListener("pointerup", endDrag);
+    svg.addEventListener("pointercancel", endDrag);
+    // Before any tile hears it: the click that ends a pan does nothing, and a click on the
+    // empty graph enlarges it.
+    svg.addEventListener("click", (ev) => {
+      if (moved) { moved = false; ev.stopPropagation(); return; }
+      if (onEnlarge && !ev.target.closest?.(".tile")) onEnlarge();
+    }, true);
+    svg.addEventListener("wheel", (ev) => {
+      ev.preventDefault();
+      const r = svg.getBoundingClientRect();
+      const cx = ev.clientX - r.left, cy = ev.clientY - r.top;
+      const next = Math.min(VIEW_MAX_SCALE, Math.max(VIEW_MIN_SCALE, view.scale * Math.exp(-ev.deltaY * 0.0015)));
+      const k = next / view.scale;
+      view.ox = cx - (cx - view.ox) * k;
+      view.oy = cy - (cy - view.oy) * k;
+      view.scale = next;
+      apply();
+      keep();
+    }, { passive: false });
+    return wrap;
+  }
+
+  // openLarge opens a graph nearly full screen in a dialog, to pan and zoom and to read what
+  // each step is (its tooltip names it and gives its agent's description). onTile(id, close)
+  // answers a click or Enter on a tile. It returns { key, redraw(def, stateOf), close }; a
+  // page that shows live states calls redraw, which draws again only when something changed.
+  let largeView = null;
+  function openLarge({ title, def, stateOf = null, onTile = () => {}, viewKey = "", label = "", graph = {}, onOpen = null, openLabel = "", openTip = "" }) {
+    if (largeView || !def?.steps?.length) return largeView;
+    const holder = h("div", { className: "run-graph-large" });
+    const dlg = openDialog({
+      title, body: holder, width: 4000,
+      // onOpen adds a button beside Close that leaves for where the graph is defined.
+      footer: [onOpen ? h("button", { type: "button", title: openTip, onclick: () => onOpen() }, openLabel) : null, h("button", { type: "button", onclick: () => dlg.close() }, "Close")],
+      onClose: () => { largeView = null; },
+    });
+    dlg.box.classList.add("graph-dialog");
+    dlg.box.parentElement.classList.add("graph-backdrop");
+    let shown = "";
+    const redraw = (d, states = null) => {
+      const key = JSON.stringify([d.steps.map((s) => [s.id, states?.(s.id), describeStep(s)]), d.groups, holder.clientWidth, holder.clientHeight]);
+      if (key === shown || panning) return; // a redraw would drop the tooltip under the pointer
+      shown = key;
+      holder.replaceChildren(viewer(d, {
+        viewKey: viewKey ? `${viewKey}|large` : "", large: true, stateOf: states, describe: describeStep, label, graph, idPrefix: "large-",
+        onTile: (id) => onTile(id, () => dlg.close()),
+        width: Math.max(320, holder.clientWidth), height: Math.max(240, holder.clientHeight),
+      }));
+    };
+    largeView = { key: viewKey, redraw, close: () => dlg.close() };
+    requestAnimationFrame(() => redraw(def, stateOf)); // once the dialog has its size
+    loadDescriptions(def).then(() => { if (largeView?.key === viewKey) redraw(def, stateOf); });
+    return largeView;
+  }
+
   return {
+    viewer, openLarge, describeStep, loadDescriptions, dragging: () => panning, large: () => largeView,
     SVG_NS, TILE_W, TILE_H, BAND_W, TOP, ROW_H, COL_W, GRAPH_MARGIN, KIND_ICON, TYPE_ICON, STATE_WORD,
-    el, kind, subtitle, autoLayout, freeSlot, inPort, outPort, fit, edgePath, laneX, bowsLeft, dependencyPath, backEdge, inputPos, bounds, fitView, drawGraph,
+    el, kind, subtitle, autoLayout, freeSlot, inPort, outPort, fit, edgePath, laneX, bowsLeft, dependencyPath, backEdge, inputPos, stepGroupBoxes, bounds, fitView, drawGraph,
   };
 })();

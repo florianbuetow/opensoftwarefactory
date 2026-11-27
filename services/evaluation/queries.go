@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -261,7 +262,62 @@ func (s *service) getEvidence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"spans": spans, "artifacts": artifacts, "next_cursor": next, "query_complete": complete, "source_status": sourceStatus, "execution_status": executionStatus})
 }
 
-func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupField string, from, to time.Time, currency string) {
+// The run outcomes a series can be narrowed to: the run completed, or it ended
+// any other way.
+const (
+	outcomeCompleted = "completed"
+	outcomeFailed    = "failed"
+)
+
+// failedRunStatuses are the recorded run statuses that count as failed.
+var failedRunStatuses = map[string]bool{"failed": true, "cancelled": true, "terminated": true, "timed_out": true}
+
+// outcomeFilter returns the SQL condition that keeps only measurements of runs
+// that ended with outcome. A run's outcome is the status of its top-level
+// execution in the orchestrator's execution ledger, which outlives the run's
+// own folder, so removed runs and measurements stored before outcomes were
+// asked for are narrowed too. An empty outcome keeps every run; a run still
+// going has no outcome and is never kept.
+func (s *service) outcomeFilter(ctx context.Context, outcome, runField string, from, to time.Time) (string, error) {
+	if outcome == "" {
+		return "", nil
+	}
+	// The ledger, not the projection, says which execution is the top-level one: the
+	// projection has no parent_execution_id column until some measurement carries one.
+	sql := fmt.Sprintf("SELECT DISTINCT run_id AS run_key, execution_id AS execution_key FROM %q WHERE kind = 'execution'", s.projectionStreamName())
+	// A run measured in the period may end after it; its outcome is recorded when it ends.
+	until := time.Now()
+	if to.After(until) {
+		until = to
+	}
+	result, err := s.openObserveSearch(ctx, sql, from, until, 0, 10000, "")
+	if err != nil {
+		return "", err
+	}
+	if result.Partial || result.Total > len(result.Hits) {
+		return "", errors.New("too many runs in this period to narrow them by outcome")
+	}
+	keep := []string{}
+	for _, row := range result.Hits {
+		runID, executionID := stringValue(row["run_key"]), stringValue(row["execution_key"])
+		if runID == "" || executionID == "" {
+			continue
+		}
+		scope, err := s.executionScope(ctx, executionID)
+		if err != nil || scope.ParentExecutionID != "" {
+			continue
+		}
+		if (outcome == outcomeCompleted && scope.Status == "completed") || (outcome == outcomeFailed && failedRunStatuses[scope.Status]) {
+			keep = append(keep, sqlLiteral(runID))
+		}
+	}
+	if len(keep) == 0 {
+		return fmt.Sprintf(" AND %s = ''", runField), nil
+	}
+	return fmt.Sprintf(" AND %s IN (%s)", runField, strings.Join(keep, ", ")), nil
+}
+
+func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupField string, from, to time.Time, currency, narrow string) {
 	pending, err := s.pendingProjectionHours(r.Context(), from, to)
 	if err != nil {
 		s.dependencyFailure(w, err)
@@ -272,7 +328,7 @@ func (s *service) getCostSeries(w http.ResponseWriter, r *http.Request, groupFie
 		pendingSet[hour.UTC().Truncate(time.Hour)] = true
 	}
 	stream := s.projectionStreamName()
-	sql := fmt.Sprintf("SELECT _timestamp, %s AS group_key, amount_numerator, amount_denominator, currency, cost_status FROM %q WHERE kind = 'usage' ORDER BY _timestamp ASC", groupField, stream)
+	sql := fmt.Sprintf("SELECT _timestamp, %s AS group_key, amount_numerator, amount_denominator, currency, cost_status FROM %q WHERE kind = 'usage'%s ORDER BY _timestamp ASC", groupField, stream, narrow)
 	result, err := s.openObserveSearch(r.Context(), sql, from, to, 0, 10000, "")
 	if err != nil {
 		s.dependencyFailure(w, err)
@@ -526,8 +582,22 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, 422, errors.New("series range must be positive and at most 366 days"))
 		return
 	}
+	outcome := q.Get("outcome")
+	if outcome != "" && outcome != outcomeCompleted && outcome != outcomeFailed {
+		s.fail(w, 422, errors.New("outcome must be completed or failed"))
+		return
+	}
+	runField := "run_id"
+	if field == columnNumberValue {
+		runField = "target_run_id"
+	}
+	narrow, err := s.outcomeFilter(r.Context(), outcome, runField, from, to)
+	if err != nil {
+		s.dependencyFailure(w, err)
+		return
+	}
 	if metric == metricCost {
-		s.getCostSeries(w, r, groupField, from, to, currency)
+		s.getCostSeries(w, r, groupField, from, to, currency, narrow)
 		return
 	}
 	baseWhere := "kind = 'usage'"
@@ -537,7 +607,7 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 	if field == columnNumberValue {
 		baseWhere = "kind = 'judge' AND metric_name = " + sqlLiteral(metric)
 	}
-	where := field + " IS NOT NULL AND status IN ('reported','derived','estimated') AND " + baseWhere
+	where := field + " IS NOT NULL AND status IN ('reported','derived','estimated') AND " + baseWhere + narrow
 	if metric == metricCost {
 		baseWhere = "kind = 'usage' AND display_currency = " + sqlLiteral(currency)
 		where = "converted_amount IS NOT NULL AND cost_status = 'available' AND " + baseWhere
@@ -643,7 +713,7 @@ func (s *service) getSeries(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	missing := 0
-	missingSQL := fmt.Sprintf("SELECT histogram(_timestamp, '1 hour') AS bucket, COUNT(*) AS missing_count FROM %q WHERE (%s) AND (%s IS NULL OR status IN ('missing','invalid')) GROUP BY bucket", stream, baseWhere, field)
+	missingSQL := fmt.Sprintf("SELECT histogram(_timestamp, '1 hour') AS bucket, COUNT(*) AS missing_count FROM %q WHERE (%s) AND (%s IS NULL OR status IN ('missing','invalid'))%s GROUP BY bucket", stream, baseWhere, field, narrow)
 	hourLimit := int(to.Sub(from)/time.Hour) + 2
 	if hourLimit > 10000 {
 		hourLimit = 10000
@@ -697,12 +767,60 @@ func timeValue(v any) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (s *service) pendingProjectionHours(ctx context.Context, from, to time.Time) ([]time.Time, error) {
+// pendingSnapshotAge is how long the projector's last reading of the unfinished
+// hours answers a series request before the operations are read again.
+const pendingSnapshotAge = 30 * time.Second
+
+// pendingSnapshot holds the hours with unfinished measurement operations as the
+// projector last read them, so a series request need not read every operation
+// itself. Writing an operation makes it stale until the projector reads them all
+// again; a reading that began before such a write is never kept.
+type pendingSnapshot struct {
+	hours   map[time.Time]bool
+	readAt  time.Time
+	mu      sync.Mutex
+	version uint64
+}
+
+func (p *pendingSnapshot) invalidate() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.version++
+	p.readAt = time.Time{}
+}
+
+// begin returns the version a reading starting now must still find to be kept.
+func (p *pendingSnapshot) begin() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.version
+}
+
+func (p *pendingSnapshot) store(version uint64, hours map[time.Time]bool, readAt time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if version == p.version {
+		p.hours, p.readAt = hours, readAt
+	}
+}
+
+func (p *pendingSnapshot) fresh(now time.Time) (map[time.Time]bool, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.readAt.IsZero() || now.Sub(p.readAt) > pendingSnapshotAge {
+		return nil, false
+	}
+	return p.hours, true
+}
+
+// unfinishedHours reads every measurement operation and returns the hours of
+// those not yet complete or cancelled.
+func (s *service) unfinishedHours(ctx context.Context) (map[time.Time]bool, error) {
 	ids, err := s.listObjects(ctx, operationPrefix)
 	if err != nil {
 		return nil, err
 	}
-	seen := map[time.Time]bool{}
+	hours := map[time.Time]bool{}
 	for _, id := range ids {
 		o, e := s.readObject(ctx, id)
 		if e != nil {
@@ -712,13 +830,24 @@ func (s *service) pendingProjectionHours(ctx context.Context, from, to time.Time
 		if json.Unmarshal(o.Data, &op) != nil || op.Phase == opComplete || op.Phase == opCancelled {
 			continue
 		}
-		if !op.AffectedHour.Before(from.Truncate(time.Hour)) && !op.AffectedHour.After(to.Truncate(time.Hour)) {
-			seen[op.AffectedHour] = true
+		hours[op.AffectedHour] = true
+	}
+	return hours, nil
+}
+
+func (s *service) pendingProjectionHours(ctx context.Context, from, to time.Time) ([]time.Time, error) {
+	hours, ok := s.pending.fresh(time.Now())
+	if !ok {
+		var err error
+		if hours, err = s.unfinishedHours(ctx); err != nil {
+			return nil, err
 		}
 	}
-	out := make([]time.Time, 0, len(seen))
-	for hour := range seen {
-		out = append(out, hour)
+	out := []time.Time{}
+	for hour := range hours {
+		if !hour.Before(from.Truncate(time.Hour)) && !hour.After(to.Truncate(time.Hour)) {
+			out = append(out, hour)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Before(out[j]) })
 	return out, nil

@@ -198,7 +198,7 @@ func TestTeamTurnLaterTurnDeliversOnlyNewMessages(t *testing.T) {
 }
 
 func TestTeamTurnToolRoundCountsModelCalls(t *testing.T) {
-	f := teamFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`,
+	f := teamFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`,
 		respond(toolCallResponse), respond(finalResponse))
 	res, err := f.svc.TeamTurn(context.Background(), leadTurn())
 	if err != nil || res.ModelCalls != 2 {
@@ -215,7 +215,7 @@ func TestTeamTurnToolRoundCountsModelCalls(t *testing.T) {
 }
 
 func TestTeamTurnBudgetEndsTheTurnAndKeepsTheMarkers(t *testing.T) {
-	f := teamFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":0}`,
+	f := teamFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":1}`,
 		respond(toolCallResponse))
 	res, err := f.svc.TeamTurn(context.Background(), leadTurn())
 	if err != nil || res.ModelCalls != 1 {
@@ -281,7 +281,7 @@ func TestTeamTurnRefusesInvalidRequests(t *testing.T) {
 }
 
 const (
-	teamToolsJSON    = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message"],"max_retries":1}`
+	teamToolsJSON    = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message"],"max_turns":2}`
 	sendCallResponse = `{"choices":[{"message":{"role":"assistant","content":"I report now.","tool_calls":[{"id":"call_s","type":"function","function":{"name":"factory__send_message","arguments":"{\"team\":\"teams/t1/build\",\"member\":\"coder\",\"channel\":\"coder--lead\",\"text\":\"wrote parser.py\"}"}}]}}]}`
 )
 
@@ -400,7 +400,7 @@ func TestTeamTurnAutoReplyAfterAFailedSendMessage(t *testing.T) {
 }
 
 func TestTeamTurnAutoReplyAfterBudgetExhaustion(t *testing.T) {
-	f := teamFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message","factory/write_session_file"],"max_retries":0}`,
+	f := teamFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message","factory/write_session_file"],"max_turns":1}`,
 		respond(`{"choices":[{"message":{"role":"assistant","content":"I wrote parser.py.","tool_calls":[{"id":"c1","type":"function","function":{"name":"factory__write_session_file","arguments":"{}"}}]}}]}`))
 	sends := factoryMCP(t, f, true)
 	res, err := f.svc.TeamTurn(context.Background(), coderTurn())
@@ -445,7 +445,7 @@ func toolCalls(calls ...[2]string) llmHandler {
 	return respond(string(data))
 }
 
-const teamAllToolsJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message","factory/write_session_file","factory/finish_team","factory/other"],"max_retries":5}`
+const teamAllToolsJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["factory/send_message","factory/write_session_file","factory/finish_team","factory/other"],"max_turns":6}`
 
 // The model does not decide who it is: the harness sets team, member and session.
 func TestTeamTurnOverwritesIdentityArguments(t *testing.T) {

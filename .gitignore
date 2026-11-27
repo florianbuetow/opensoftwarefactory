@@ -32,6 +32,7 @@ scratch/
 # Plans and scratch work stay local.
 scratch/
 plans/
+demos/
 plan.md
 *.plan.md
 PLAN.md
@@ -42,3 +43,6 @@ PLAN.md
 # Examples are private, local-only material.
 /examples/
 .impeccable/
+
+# Claude Code local settings and session data
+.claude/

@@ -53,6 +53,98 @@ func TestJudgeSeriesUsesTargetRunCountsMissingAndHidesIncompleteHours(t *testing
 	}
 }
 
+func TestSeriesNarrowsToRunsWithTheChosenOutcome(t *testing.T) {
+	f, blob, orch := newFixture(t)
+	f.mu.Lock()
+	for run, status := range map[string]string{"run-ok": "completed", "run-bad": "failed", "run-going": "running"} {
+		f.objects["workflow-executions/exec-"+run+".json"] = []byte(`{"schema_version":1,"execution_id":"exec-` + run + `","run_id":"` + run + `","artifact_prefix":"runs/` + run + `","status":"` + status + `"}`)
+	}
+	// A nested workflow's own execution never decides its run's outcome.
+	f.objects["workflow-executions/exec-child.json"] = []byte(`{"schema_version":1,"execution_id":"exec-child","parent_execution_id":"exec-run-ok","run_id":"run-ok-child","artifact_prefix":"runs/run-ok","status":"failed"}`)
+	f.mu.Unlock()
+	queries := []string{}
+	openobserve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query struct {
+				SQL string `json:"sql"`
+			} `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		queries = append(queries, request.Query.SQL)
+		if strings.Contains(request.Query.SQL, "DISTINCT") {
+			writeJSON(w, 200, map[string]any{"hits": []map[string]any{{"run_key": "run-ok", "execution_key": "exec-run-ok"}, {"run_key": "run-bad", "execution_key": "exec-run-bad"}, {"run_key": "run-going", "execution_key": "exec-run-going"}, {"run_key": "run-removed", "execution_key": "exec-run-removed"}, {"run_key": "run-ok-child", "execution_key": "exec-child"}}, "total": 5, "is_partial": false})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"hits": []any{}, "total": 0, "is_partial": false})
+	}))
+	defer openobserve.Close()
+	s := &service{blobs: blob.URL, orchestrator: orch.URL, openobserve: openobserve.URL, openobserveUser: "u", openobservePassword: "p", http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
+	server := httptest.NewServer(s.routes())
+	defer server.Close()
+	series := server.URL + "/api/series?metric=duration_ms&group_by=workflow&from=2026-11-01T12:00:00Z&to=2026-11-01T14:00:00Z"
+	// statusOf asks for a series and returns the status of the answer, with its body closed.
+	statusOf := func(url string) int {
+		t.Helper()
+		resp := get(t, url)
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode
+	}
+	for outcome, want := range map[string]string{"failed": "run_id IN ('run-bad')", "completed": "run_id IN ('run-ok')"} {
+		queries = queries[:0]
+		if status := statusOf(series + "&outcome=" + outcome); status != 200 || len(queries) < 3 {
+			t.Fatalf("outcome %s: status %d, queries %v", outcome, status, queries)
+		}
+		for _, sql := range queries[1:] { // the values and the missing count alike
+			if !strings.Contains(sql, want) {
+				t.Fatalf("outcome %s: query not narrowed to %s: %s", outcome, want, sql)
+			}
+		}
+	}
+	queries = queries[:0]
+	if status := statusOf(series); status != 200 || len(queries) == 0 || strings.Contains(queries[0], "DISTINCT") || strings.Contains(queries[0], "run_id IN") {
+		t.Fatalf("without an outcome every run counts: status %d, queries %v", status, queries)
+	}
+	if status := statusOf(series + "&outcome=running"); status != 422 {
+		t.Fatalf("unknown outcome = %d", status)
+	}
+}
+
+func TestPendingHoursComeFromTheProjectorsLastReadingWhileItHolds(t *testing.T) {
+	hour := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	reads := 0
+	f, blob, orch := newFixture(t)
+	f.mu.Lock()
+	f.objects[operationPrefix+"/op.json"], _ = json.Marshal(mutationOperation{SchemaVersion: 1, ID: "op", AffectedHour: hour, Phase: opProjectionPending})
+	f.mu.Unlock()
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, operationPrefix) {
+			reads++
+		}
+		http.Redirect(w, r, blob.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer counting.Close()
+	s := &service{blobs: counting.URL, orchestrator: orch.URL, http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
+	from, to := hour.Add(-time.Hour), hour.Add(time.Hour)
+
+	version := s.pending.begin()
+	s.pending.store(version, map[time.Time]bool{hour: true}, time.Now())
+	if got, err := s.pendingProjectionHours(t.Context(), from, to); err != nil || len(got) != 1 || !got[0].Equal(hour) || reads != 0 {
+		t.Fatalf("a fresh reading answers without reading operations: %v %v, %d reads", got, err, reads)
+	}
+	s.pending.invalidate()
+	s.pending.store(version, map[time.Time]bool{}, time.Now())
+	if got, err := s.pendingProjectionHours(t.Context(), from, to); err != nil || len(got) != 1 || reads == 0 {
+		t.Fatalf("a reading begun before an operation was written is never kept: %v %v, %d reads", got, err, reads)
+	}
+	reads = 0
+	s.pending.store(s.pending.begin(), map[time.Time]bool{}, time.Now().Add(-2*pendingSnapshotAge))
+	if got, err := s.pendingProjectionHours(t.Context(), from, to); err != nil || len(got) != 1 || reads == 0 {
+		t.Fatalf("an old reading gives way to the operations themselves: %v %v, %d reads", got, err, reads)
+	}
+}
+
 func TestCurrencyIsOnlyRequiredForCostSeries(t *testing.T) {
 	_, blob, orch := newFixture(t)
 	openobserve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,9 +294,9 @@ func TestCostSeriesReturnsExactRationalTotalAndApproximateChart(t *testing.T) {
 
 func TestCostSeriesConvertsRequestedCurrencyWithoutRecalculation(t *testing.T) {
 	f, blob, orch := newFixture(t)
-	conversion := Conversion{ID: "usd-eur", FromCurrency: "USD", ToCurrency: "EUR", Rate: "0.9"}
+	conversion := Conversion{FromCurrency: "USD", ToCurrency: "EUR", Rate: "0.9"}
 	f.mu.Lock()
-	f.objects[conversionPrefix+"/usd-eur.json"], _ = json.Marshal(conversion)
+	f.objects[conversion.Key().objectID()], _ = json.Marshal(conversion)
 	f.mu.Unlock()
 	hour := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	openobserve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

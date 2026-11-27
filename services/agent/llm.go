@@ -72,12 +72,12 @@ func (u usage) MarshalJSON() ([]byte, error) {
 }
 
 type chatRequest struct {
-	Model           string            `json:"model"`
-	Messages        []any             `json:"messages"`
-	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
-	Temperature     *float64          `json:"temperature,omitempty"`
-	ResponseFormat  map[string]string `json:"response_format,omitempty"`
-	Tools           []any             `json:"tools,omitempty"`
+	Model           string         `json:"model"`
+	Messages        []any          `json:"messages"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	ResponseFormat  map[string]any `json:"response_format,omitempty"`
+	Tools           []any          `json:"tools,omitempty"`
 	// MaxTokens limits one answer, so a model that does not stop cannot hold a step for minutes.
 	MaxTokens int  `json:"max_tokens,omitempty"`
 	Stream    bool `json:"stream"`

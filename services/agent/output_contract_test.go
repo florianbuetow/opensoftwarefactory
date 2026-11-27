@@ -54,7 +54,10 @@ func TestJudgeOutputStoredThenExtractionSubmitted(t *testing.T) {
 	if _, err := f.svc.Process(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	if format, ok := f.llmReqs[0]["response_format"].(map[string]any); !ok || format["type"] != "json_object" {
+	// A JSON schema that accepts any object: LM Studio refuses the format json_object with 400.
+	format, ok := f.llmReqs[0]["response_format"].(map[string]any)
+	schema, _ := format["json_schema"].(map[string]any)
+	if inner, _ := schema["schema"].(map[string]any); !ok || format["type"] != "json_schema" || inner["type"] != jsonTypeObject {
 		t.Fatalf("response format %v", f.llmReqs[0]["response_format"])
 	}
 	if extraction.ProducerRunID != "producer" || extraction.TargetRunID != targetRun || extraction.TargetExecutionID != "target-exec" || extraction.ArtifactID != planArtifact || extraction.AgentRef != intakeRef || extraction.MappingVersion != intakeRef || len(extraction.Mappings) != 2 {

@@ -17,8 +17,8 @@ func TestPricingIsExactAndMissingIsNotZero(t *testing.T) {
 	}
 	f, blob, orch := newFixture(t)
 	srv := testEvaluation(t, blob.URL, orch.URL)
-	price := `{"id":"openai-gpt","vendor":"openai","model":"gpt-x","effort":"high","modes":{"reasoning":"on"},"from":"2026-01-01T00:00:00Z","to":null,"currency":"USD","unit_tokens":1000,"input_uncached":"2","input_cached":"1","output":"4"}`
-	code, data := conditionalPut(t, srv.URL+"/api/prices/openai-gpt", price, "If-None-Match", "*")
+	price := `{"vendor":"openai","model":"gpt-x","effort":"high","modes":{"reasoning":"on"},"from":"2026-01-01T00:00:00Z","to":null,"currency":"USD","unit_tokens":1000,"input_uncached":"2","input_cached":"1","output":"4"}`
+	code, data := request(t, http.MethodPost, srv.URL+"/api/prices", price)
 	if code != 200 {
 		t.Fatalf("price %d %s", code, data)
 	}
@@ -34,6 +34,10 @@ func TestPricingIsExactAndMissingIsNotZero(t *testing.T) {
 	f.mu.Unlock()
 	if cost.Amount != "2" || cost.ConvertedAmount != "2" || cost.Status != costAvailable {
 		t.Fatalf("cost %+v", cost)
+	}
+	want := PriceKey{Vendor: "openai", Model: "gpt-x", Effort: "high", Modes: map[string]string{"reasoning": "on"}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	if cost.Price == nil || !cost.Price.equal(&want) || cost.PriceRevision == "" {
+		t.Fatalf("cost does not reference the price key: %+v", cost)
 	}
 
 	missing := strings.Replace(usage, `"id":"attempt-1"`, `"id":"attempt-2"`, 1)
@@ -55,7 +59,7 @@ func TestPricingIsExactAndMissingIsNotZero(t *testing.T) {
 func TestRepeatingCostRetainsExactRationalComponents(t *testing.T) {
 	one, zero := int64(1), int64(0)
 	m := Measurement{ID: "u", Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, OccurredAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), UncachedInputTokens: &one, CachedInputTokens: &zero, OutputTokens: &zero}
-	cost, err := calculateCostWith(&m, "EUR", 1, []Price{{ID: "p", Revision: "r", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 3, InputUncached: "1", InputCached: "0", Output: "0"}}, nil)
+	cost, err := calculateCostWith(&m, "EUR", 1, []Price{{Revision: "r", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 3, InputUncached: "1", InputCached: "0", Output: "0"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +72,8 @@ func TestPricingRejectsFractionSyntax(t *testing.T) {
 	if _, err := decimal("1/3", false); err == nil {
 		t.Fatal("fraction accepted as decimal string")
 	}
-	price := Price{ID: "fraction", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Now().UTC(), Currency: "EUR", UnitTokens: 1, InputUncached: "1/3", InputCached: "0", Output: "0"}
-	if err := validatePrice(&price, price.ID); err == nil {
+	price := Price{Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Now().UTC(), Currency: "EUR", UnitTokens: 1, InputUncached: "1/3", InputCached: "0", Output: "0"}
+	if err := validatePrice(&price); err == nil {
 		t.Fatal("fraction price accepted")
 	}
 }
@@ -142,12 +146,12 @@ func TestMeasurementOccurredAtIsImmutable(t *testing.T) {
 func TestPriceOverlapAndMeasurementCreateRace(t *testing.T) {
 	_, blob, orch := newFixture(t)
 	srv := testEvaluation(t, blob.URL, orch.URL)
-	base := `{"id":"p1","vendor":"v","model":"m","effort":"not_applicable","modes":{},"from":"2026-01-01T00:00:00Z","to":"2027-01-01T00:00:00Z","currency":"EUR","unit_tokens":1000,"input_uncached":"0","input_cached":"0","output":"0"}`
-	if code, body := conditionalPut(t, srv.URL+"/api/prices/p1", base, "If-None-Match", "*"); code != 200 {
+	base := `{"vendor":"v","model":"m","effort":"not_applicable","modes":{},"from":"2026-01-01T00:00:00Z","to":"2027-01-01T00:00:00Z","currency":"EUR","unit_tokens":1000,"input_uncached":"0","input_cached":"0","output":"0"}`
+	if code, body := request(t, http.MethodPost, srv.URL+"/api/prices", base); code != 200 {
 		t.Fatalf("first %d %s", code, body)
 	}
-	overlap := strings.Replace(strings.Replace(base, `"id":"p1"`, `"id":"p2"`, 1), `"from":"2026-01-01T00:00:00Z"`, `"from":"2026-06-01T00:00:00Z"`, 1)
-	if code, _ := conditionalPut(t, srv.URL+"/api/prices/p2", overlap, "If-None-Match", "*"); code != 422 {
+	overlap := strings.Replace(base, `"from":"2026-01-01T00:00:00Z"`, `"from":"2026-06-01T00:00:00Z"`, 1)
+	if code, _ := request(t, http.MethodPost, srv.URL+"/api/prices", overlap); code != 422 {
 		t.Fatalf("overlap = %d", code)
 	}
 	usage := `{"schema_version":1,"id":"race","kind":"usage","run_id":"` + runA + `","execution_id":"e","occurred_at":"2026-11-01T12:00:00Z","vendor":"v","model":"m","effort":"not_applicable","modes":{},"input_tokens":0,"cached_input_tokens":0,"uncached_input_tokens":0,"output_tokens":0,"status":"reported","missing":[],"raw_usage":{}}`
@@ -416,13 +420,13 @@ func TestListGetAndValidateMeasurements(t *testing.T) {
 	// calculateCostWith currency conversion and missing conversion.
 	one, zero := int64(1), int64(0)
 	usage := Measurement{ID: "u", Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, OccurredAt: now, UncachedInputTokens: &one, CachedInputTokens: &zero, OutputTokens: &zero}
-	prices := []Price{{ID: "p", Revision: "r1", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: now.Add(-time.Hour), Currency: currencyUSD, UnitTokens: 1, InputUncached: "10", InputCached: "0", Output: "0"}}
+	prices := []Price{{Revision: "r1", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: now.Add(-time.Hour), Currency: currencyUSD, UnitTokens: 1, InputUncached: "10", InputCached: "0", Output: "0"}}
 	costMissingConv, err := calculateCostWith(&usage, currencyEUR, 1, prices, nil)
 	if err != nil || costMissingConv.Status != costUnavailable || !hasMissingField(costMissingConv.Missing, "conversion") {
 		t.Fatalf("missing conversion cost = %+v %v", costMissingConv, err)
 	}
-	costConverted, err := calculateCostWith(&usage, currencyEUR, 1, prices, []Conversion{{ID: "c1", Revision: "r2", FromCurrency: currencyUSD, ToCurrency: currencyEUR, Rate: "0.9"}})
-	if err != nil || costConverted.Status != costAvailable || costConverted.ConvertedAmount != "9" {
+	costConverted, err := calculateCostWith(&usage, currencyEUR, 1, prices, []Conversion{{Revision: "r2", FromCurrency: currencyUSD, ToCurrency: currencyEUR, Rate: "0.9"}})
+	if err != nil || costConverted.Status != costAvailable || costConverted.ConvertedAmount != "9" || costConverted.Conversion == nil || costConverted.Conversion.FromCurrency != currencyUSD || costConverted.Conversion.ToCurrency != currencyEUR {
 		t.Fatalf("converted cost = %+v %v", costConverted, err)
 	}
 }
@@ -519,7 +523,14 @@ func TestExtractionPointersAndValidationPaths(t *testing.T) {
 // status and the JSON body of the answer.
 func conditionalPut(t *testing.T, url, body, header, value string) (status int, payload []byte) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, url, strings.NewReader(body))
+	return conditionalRequest(t, http.MethodPut, url, body, header, value)
+}
+
+// conditionalRequest sends one request with one conditional header and
+// returns the status and the JSON body of the answer.
+func conditionalRequest(t *testing.T, method, url, body, header, value string) (status int, payload []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	chatAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":[],"max_retries":0}`
+	chatAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":[],"max_turns":1}`
 	chatLogID     = "user-sessions/t1/talk/chats/main.json"
 	chatStep      = "talk"
 	chatMessage   = "hello there"
@@ -139,7 +139,7 @@ func TestChatContinuedTabReusesStoredMessages(t *testing.T) {
 }
 
 func TestChatToolCallRound(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`,
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`,
 		respond(toolCallResponse), respond(finalResponse))
 	status, out := postChat(t, f, chatBody())
 	if status != http.StatusOK || out["reply"] != planAnswer || out["messages"] != float64(5) {
@@ -170,10 +170,10 @@ func TestChatToolCallRound(t *testing.T) {
 }
 
 func TestChatBudgetExhaustedKeepsMessages(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":0}`,
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":1}`,
 		respond(toolCallResponse))
 	status, out := postChat(t, f, chatBody())
-	if status != http.StatusBadGateway || !strings.Contains(jsonString(t, out["error"]), "no final answer within 1 model calls") {
+	if status != http.StatusBadGateway || !strings.Contains(jsonString(t, out["error"]), "no final answer within its turn limit (max_turns=1)") {
 		t.Fatalf("response = %d %v", status, out)
 	}
 	if _, messages := storedChat(t, f); len(messages) != 4 || messages[3]["role"] != roleTool {
@@ -274,7 +274,7 @@ func TestChatStoreFailureDoesNotStartNewLog(t *testing.T) {
 // Coverage: a tool call whose transport fails still gets a tool answer, so the next message
 // can send the stored history again.
 func TestChatFailedToolCallLeavesAResendableLog(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`,
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`,
 		respond(toolCallResponse), respond(finalResponse))
 	f.mcpFailMethod = mcpToolsCall
 	if status, out := postChat(t, f, chatBody()); status != http.StatusBadGateway {

@@ -40,9 +40,9 @@ function setup() {
   document.body = new Element("body");
   const context = { document, window: { innerWidth: 1200, addEventListener() {} }, activeTab: "metrics",
     h: (tag, props, ...children) => new Element(tag, props, children), icon: () => new Element("span"), $: () => rail,
-    Map, location: { hash: "#metrics" } };
+    Map, location: { hash: "#metrics" }, decisionsState: { pending: [{}, {}] }, sessionsState: { pending: [] } };
   vm.createContext(context);
-  vm.runInContext(`${definitions}\n${navigation}\nglobalThis.nav = { buildRail, openNavPopover, closeNavPopover, groups: NAV_GROUPS, pages: PAGES, getPopover: () => navPopover };`, context);
+  vm.runInContext(`${definitions}\n${navigation}\nglobalThis.nav = { buildRail, openNavPopover, closeNavPopover, updateNavCounts, groups: NAV_GROUPS, pages: PAGES, getPopover: () => navPopover };`, context);
   context.nav.buildRail();
   return { context, rail, listeners, document };
 }
@@ -62,6 +62,13 @@ test("each page has one navigation group and groups open by click", () => {
   assert.equal(popover.hidden, false);
   assert.equal(tasks.attrs["aria-expanded"], "true");
   assert.deepEqual(popover.children.map((link) => link.dataset.page), ["decisions", "sessions"]);
+  // Each Tasks page carries its own count of what waits, hidden at none, and follows the polls while the menu is open.
+  const counts = () => popover.children.map((link) => { const b = link.children.find((c) => c?.dataset?.count); return [b.dataset.count, b.textContent, b.hidden, b.title]; });
+  assert.deepEqual(counts(), [["decisions", "2", false, "2 gates waiting"], ["sessions", "", true, "0 sessions waiting"]]);
+  context.decisionsState.pending = [];
+  context.sessionsState.pending = [{}];
+  context.nav.updateNavCounts();
+  assert.deepEqual(counts(), [["decisions", "", true, "0 gates waiting"], ["sessions", "1", false, "1 session waiting"]]);
   listeners.focusin({ target: rail });
   assert.equal(popover.hidden, true);
   tasks.onclick();
@@ -79,15 +86,4 @@ test("each page has one navigation group and groups open by click", () => {
   assert.equal(planned.href, undefined);
 });
 
-test("System Diagram reads the stored Mermaid source and hands it to the renderer", async () => {
-  const source = fs.readFileSync(new URL("web/system-diagram.mmd", import.meta.url), "utf8");
-  const body = { children: [], replaceChildren(...children) { this.children = children; } };
-  const context = { $: () => body, tabs: {}, emptyPanel: (message) => ({ message }), errorPanel: (message) => ({ message }),
-    fetch: async (url) => { assert.equal(url, "system-diagram.mmd"); return { ok: true, text: async () => source }; },
-    InteractiveSession: { renderMarkdown: (markdown) => ({ markdown }) } };
-  vm.runInNewContext(fs.readFileSync(new URL("web/system-diagram.js", import.meta.url), "utf8"), context);
-  context.tabs["system-diagram"].show();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.match(body.children[0].markdown, /^```mermaid\nflowchart LR/);
-  assert.match(body.children[0].markdown, /Telemetry collector/);
-});
+// The System Diagram page has its own tests in system_diagram_ui_test.mjs.

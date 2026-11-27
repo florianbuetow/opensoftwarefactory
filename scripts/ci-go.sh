@@ -15,6 +15,7 @@ modules=(
     orchestrator
     registry
     evaluation
+    sqldb
     agent
     factory-ui
 )

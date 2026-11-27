@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	skillAgentJSON    = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_retries":3}`
+	skillAgentJSON    = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_turns":4}`
 	skillRootText     = "---\nname: git\ndescription: Read the release checklist.\n---\nRead release/SKILL.md."
 	skillScriptResult = `{"exit_code":0,"stdout":"tail","stderr":"","warning":"Standard output was longer than the limit."}`
 )

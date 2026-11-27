@@ -46,6 +46,7 @@ type backends struct {
 	cluster                                                      *clusterProxy
 	observability                                                *observabilityClient
 	orchestrator, agents, policies, blobs, llm, mcp, evaluations string
+	sqldb                                                        string
 	skills                                                       string
 	connectors                                                   string // the connector service: repositories and dev pods
 	gitHost                                                      string // the demo Git server
@@ -71,6 +72,7 @@ func run() error {
 		llm:          env("LLM_GATEWAY_URL", "http://llm-gateway:8080"),
 		mcp:          env("MCP_GATEWAY_URL", "http://mcp-gateway:8080"),
 		evaluations:  env("EVALUATION_URL", "http://evaluation:8080"),
+		sqldb:        env("SQLDB_URL", "http://sqldb:8080"),
 		connectors:   env("CONNECTORS_URL", "http://connectors:8080"),
 		gitHost:      env("GIT_HOST_URL", "http://git-host:8080"),
 		cluster:      &clusterProxy{apiBase: inClusterAPI(), dir: serviceAccountDir, logger: logger},
@@ -139,6 +141,13 @@ func newHandler(b *backends, logger *slog.Logger) (http.Handler, error) {
 			return nil, err
 		}
 		mux.Handle("/api/evaluations/", p)
+	}
+	if b.sqldb != "" {
+		p, err := newProxy("/api/sqldb", b.sqldb, "/api", logger)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/api/sqldb/", getOnly(p))
 	}
 	if b.skills != "" {
 		p, err := newProxy("/api/skills", b.skills, "", logger)

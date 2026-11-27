@@ -148,9 +148,12 @@ function skillFileTree(initial, { readOnly = false, onChange }, editor, resize) 
   const actions = readOnly ? null : h("div", { className: "row" },
     h("button", { type: "button", onclick: () => nameDialog(false) }, "Add file…"),
     h("button", { type: "button", onclick: () => nameDialog(true) }, "Add folder…"));
+  // Two columns that start on one line: the file tree under its heading, and the chosen file
+  // under its name, so both headings and both bodies line up.
   const element = h("section", { className: "section skill-files" },
-    h("div", { className: "file-head" }, h("h3", { className: "section-title" }, "Files"), actions),
-    h("div", { className: "skill-file-layout" }, list, pane));
+    h("div", { className: "skill-file-layout" },
+      h("div", { className: "skill-file-list" }, h("div", { className: "file-head" }, h("h3", { className: "section-title" }, "Files"), actions), list),
+      pane));
   render(skillRoot);
   return {
     element,

@@ -50,14 +50,15 @@ try{
   return eventually(async()=>{const result=await request(evaluation,'GET','/api/series?'+params);const line=result.data.series?.find(s=>s.key==='fixture-model');return result.data.projection?.status==='complete'&&line?.exact_total?.decimal===expected?result:null;},'actual projection '+currency+' '+expected,600,500);
  }
  const create={'If-None-Match':'*'};
- const price={id:'test-price',vendor:'fixture',model:'fixture-model',effort:'not_applicable',modes:{},from:'2020-01-01T00:00:00Z',to:null,currency:'USD',unit_tokens:1000,input_uncached:'2',input_cached:'1',output:'4'};
- const sp=await request(evaluation,'PUT','/api/prices/test-price',price,create);
- await request(evaluation,'PUT','/api/conversions/usd-eur',{id:'usd-eur',from_currency:'USD',to_currency:'EUR',rate:'0.9'},create);
+ const price={vendor:'fixture',model:'fixture-model',effort:'not_applicable',modes:{},from:'2020-01-01T00:00:00Z',to:null,currency:'USD',unit_tokens:1000,input_uncached:'2',input_cached:'1',output:'4'};
+ const priceKey='/api/prices?'+new URLSearchParams({vendor:price.vendor,model:price.model,effort:price.effort,modes:JSON.stringify(price.modes),from:price.from});
+ const sp=await request(evaluation,'POST','/api/prices',price);
+ await request(evaluation,'POST','/api/conversions',{from_currency:'USD',to_currency:'EUR',rate:'0.9'});
  const usage={schema_version:1,id:'usage-test',kind:'usage',run_id:'12345678-1234-1234-1234-123456789abc',execution_id:'execution-test',workflow:'group/workflow',agent:'group/agent',vendor:'fixture',model:'fixture-model',effort:'not_applicable',modes:{},occurred_at:'2026-11-20T10:00:00Z',input_tokens:100,output_tokens:10,cached_input_tokens:20,uncached_input_tokens:80,status:'reported',missing:[],raw_usage:{prompt_tokens:100,completion_tokens:10,prompt_tokens_details:{cached_tokens:20}}};
  const su=await request(evaluation,'PUT','/api/measurements/usage-test',usage,create);
- const cost=await eventually(async()=>{const value=await request(blobs,'GET','/blobs/measurement-costs/usage-test.json');return value.data.amount==='0.22'?value:null;},'initial cost');assert.equal(cost.data.amount,'0.22');if(realObserve){await graph('0.22');await graph('0.198','EUR');}
+ const cost=await eventually(async()=>{const value=await request(blobs,'GET','/blobs/measurement-costs/usage-test.json');return value.data.amount==='0.22'?value:null;},'initial cost');assert.equal(cost.data.amount,'0.22');assert.equal(cost.data.price?.model,price.model);if(realObserve){await graph('0.22');await graph('0.198','EUR');}
  await request(evaluation,'PUT','/api/measurements/usage-test',usage,create,412);
- await request(evaluation,'PUT','/api/prices/test-price',{...price,output:'8'},{'If-Match':sp.etag||`"${sp.data.revision}"`});
+ await request(evaluation,'PUT',priceKey,{...price,output:'8'},{'If-Match':sp.etag||`"${sp.data.revision}"`});
  await request(evaluation,'PUT','/api/measurements/usage-test',usage,{'If-Match':su.etag});
  const changed=await eventually(async()=>{const value=await request(blobs,'GET','/blobs/measurement-costs/usage-test.json');return value.data.amount==='0.26'?value:null;},'replacement cost');assert.equal(changed.data.amount,'0.26');if(realObserve){await graph('0.26');await graph('0.234','EUR');}
  const missing={...usage,id:'usage-missing',raw_usage:{prompt_tokens:100,completion_tokens:10}};delete missing.cached_input_tokens;delete missing.uncached_input_tokens;

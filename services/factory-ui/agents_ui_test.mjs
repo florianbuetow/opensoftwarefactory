@@ -243,7 +243,16 @@ test("Unpack inputs is a tickbox bound to the boolean unpack_inputs in agent.jso
   area.events.input();
   assert.equal(unpack.checked, false, "only the boolean true ticks it");
   // A new agent starts with true.
-  assert.match(source, /max_retries: 0,\n        unpack_inputs: true,\n      \}, null, 2\)/);
+  assert.match(source, /max_turns: 10,\n        unpack_inputs: true,\n      \}, null, 2\)/);
+});
+
+test("the agent's limit is Max turns, stored as max_turns", () => {
+  assert.match(source, /field\("Max turns", turns, /);
+  assert.doesNotMatch(source, /Max retries/);
+  // Typing a limit stores max_turns and drops the old max_retries.
+  assert.match(source, /delete d\.max_retries; if \(n >= 1\) d\.max_turns = n; else delete d\.max_turns;/);
+  // A version stored with max_retries shows the turns it gets: one more.
+  assert.match(source, /d\.max_turns \?\? \(Number\.isInteger\(d\.max_retries\) \? d\.max_retries \+ 1 : ""\)/);
 });
 
 test("Commands lists the command patterns of agent.json one per line and leaves an empty list out", async () => {

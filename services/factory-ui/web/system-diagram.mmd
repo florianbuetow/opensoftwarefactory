@@ -1,4 +1,36 @@
 flowchart LR
+  %% What each group and component is. The System Diagram page shows these lines in the card
+  %% under the pointer: one sentence each, without a period at the end.
+  %% describe operator: The person who runs the factory: starts workflows, answers gates and sessions, and reads the results
+  %% describe control: Where a person works with the factory
+  %% describe ui: The web pages of the factory; it shows runs, workflows, agents and metrics, and passes every request on to the service behind it
+  %% describe execution: What runs a workflow, step by step
+  %% describe orchestrator: Runs workflows: starts each step, waits at gates and sessions, and records the run
+  %% describe temporal: Keeps the state of every running workflow, so a run survives a restart
+  %% describe jetstream: The durable stream of workflow events that triggers and measurements read
+  %% describe runtime: What an agent step needs to think and to act
+  %% describe agent: Runs one agent step: builds the prompt, calls the model, and calls tools until the step has its answer
+  %% describe llm: The one door to language models: sends each model name to its provider and records the tokens used
+  %% describe mcp: Offers tools to agents over MCP: passes each call on to a registered MCP service, within its allow and deny lists
+  %% describe tools: Serves the factory's own tools (dev pod, factory, skills) as MCP services
+  %% describe providers: Where the language models run
+  %% describe lmstudio: The models loaded in LM Studio on this machine
+  %% describe llmapis: Any other provider with an OpenAI-compatible API, once it is configured in the LLM gateway
+  %% describe state: What the factory stores and versions
+  %% describe blobs: Stores every artifact: the inputs, outputs and records of runs, and the files of the registries
+  %% describe agents: The versioned agent definitions: agent.json and the system prompt
+  %% describe policies: The versioned policies that agents are given
+  %% describe skills: The versioned skills: SKILL.md and its files
+  %% describe evaluation: Evaluation sets, judges, prices, and the measurements shown on Metrics
+  %% describe development: The repositories and the pods in which agents change code
+  %% describe connectors: Knows the Git repositories, the intake triggers, and the dev pods agents work in
+  %% describe git: The Git server for repositories kept inside the factory
+  %% describe pods: One working copy of a repository per run, where an agent reads, edits and runs code
+  %% describe observability: The logs and traces of everything that runs
+  %% describe telemetry: Receives the traces of the services and passes them on
+  %% describe logs: Collects the logs of every pod
+  %% describe observe: OpenObserve: stores the logs and traces and answers searches over them
+
   operator[Operator]
 
   subgraph control[Control room]
@@ -18,10 +50,16 @@ flowchart LR
     tools[Tool gateway]
   end
 
+  subgraph providers[LLM providers]
+    lmstudio[LM Studio]
+    llmapis[OpenAI-compatible APIs]
+  end
+
   subgraph state[State and catalogs]
     blobs[(Blobstore)]
     agents[Agent registry]
     policies[Policy registry]
+    skills[Skill registry]
     evaluation[Evaluation]
   end
 
@@ -33,6 +71,7 @@ flowchart LR
 
   subgraph observability[Observability]
     telemetry[Telemetry collector]
+    logs[Log collector]
     observe[OpenObserve]
   end
 
@@ -40,6 +79,7 @@ flowchart LR
   ui --> orchestrator
   ui --> agents
   ui --> policies
+  ui --> skills
   ui --> evaluation
   ui --> connectors
 
@@ -50,14 +90,20 @@ flowchart LR
 
   agent --> agents
   agent --> policies
+  agent --> skills
   agent --> llm
   agent --> mcp
   agent --> blobs
   mcp --> tools
   tools --> connectors
 
+  llm --> lmstudio
+  llm -. when configured .-> llmapis
+  llm -. token usage .-> evaluation
+
   agents --> blobs
   policies --> blobs
+  skills --> blobs
   evaluation --> blobs
   evaluation --> observe
 
@@ -72,3 +118,4 @@ flowchart LR
   mcp -. traces .-> telemetry
   connectors -. traces .-> telemetry
   telemetry --> observe
+  logs --> observe

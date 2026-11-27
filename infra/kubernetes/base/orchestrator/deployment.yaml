@@ -35,6 +35,8 @@ spec:
           env:
             - name: EVALUATION_URL
               value: http://evaluation:8080
+            - name: SQLDB_URL
+              value: http://sqldb:8080
             - name: NATS_URL
               value: nats://jetstream:4222
             - name: TEMPORAL_ADDRESS

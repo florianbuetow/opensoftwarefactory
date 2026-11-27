@@ -1203,6 +1203,129 @@ test("Connect to… draws and removes a step's arrows from the keyboard, with th
   assert.ok(all(ui.dialog().body).some((n) => n.textContent === "That dependency would create a cycle"));
 });
 
+test("a group is drawn on the canvas: the nodes inside the frame become its nodes, and it is stored only when there is one", async () => {
+  const ui = page();
+  await ui.open();
+  const canvas = ui.byId("canvas");
+  const tile = (id) => find(canvas, (n) => n.attrs["data-step"] === id);
+  const frames = () => all(canvas).filter((n) => n.attrs.class === "step-group");
+  const labelOf = (g) => find(g, (n) => n.attrs.class === "step-group-label");
+  const at = (id) => /translate\(([-\d.]+),([-\d.]+)\)/.exec(tile(id).attrs.transform).slice(1).map(Number);
+  // press starts a drag at a point of the graph; ui.release ends it at another.
+  const press = async (x, y, ev = {}) => {
+    const [, ox, oy, scale] = /translate\(([-\d.]+),([-\d.]+)\) scale\(([-\d.]+)\)/.exec(find(canvas, (n) => n.attrs.class === "graph").attrs.transform).map(Number);
+    await fire(canvas, "pointerdown", { clientX: x * scale + ox, clientY: y * scale + oy, ...ev });
+  };
+  const stored = () => JSON.parse(JSON.stringify(ui.posts().at(-1).body.groups));
+  const [px, py] = at("plan"), [bx, by] = at("build");
+  assert.equal(frames().length, 0);
+  // Add group… makes the next drag draw a frame. A frame that holds no node adds nothing.
+  await ui.run("Add group…");
+  assert.equal(ui.notices.at(-1).text, "Drag a frame around the nodes of the group");
+  await press(px - 900, py - 900);
+  await ui.release(px - 800, py - 800);
+  assert.equal(ui.notices.at(-1).text, "Not added: no node is inside the frame");
+  assert.equal(ui.dialog(), undefined);
+  // A frame around both tiles: the dialog asks for the label only, never for nodes.
+  await ui.run("Add group…");
+  await press(Math.min(px, bx) - 10, Math.min(py, by) - 10);
+  await ui.release(Math.max(px, bx) + 230, Math.max(py, by) + 74);
+  let dialog = ui.dialog();
+  assert.equal(dialog.title, "Add group");
+  assert.equal(all(dialog.body).filter((n) => n.type === "checkbox").length, 0, "no list of nodes to tick");
+  const add = dialog.footer.find((b) => b.className === "primary");
+  await fire(add, "click");
+  assert.equal(dialog.open, true, "no label: the dialog stays");
+  assert.ok(all(dialog.body).some((n) => n.textContent === "Enter a label."));
+  ui.field("step-group-label").value = "  Input   triage ";
+  await fire(add, "click");
+  assert.equal(dialog.open, false);
+  assert.equal(ui.notices.at(-1).text, "Added");
+  assert.equal(frames().length, 1);
+  assert.equal(labelOf(frames()[0]).textContent, "Input triage");
+  // The stored frame holds both tiles, with room for the label above them.
+  const raw = find(frames()[0], (n) => n.attrs.class === "step-group-frame").attrs;
+  const frame = { x: Number(raw.x), y: Number(raw.y), width: Number(raw.width), height: Number(raw.height) };
+  for (const id of ["plan", "build"]) {
+    const [x, y] = at(id);
+    assert.ok(frame.x <= x - 16 && frame.y <= y - 38 && frame.x + frame.width >= x + 220 + 16 && frame.y + frame.height >= y + 64 + 16, `${id} is inside the frame`);
+  }
+  // Stored with the next version, as an addition beside the steps.
+  assert.equal(ui.save().disabled, false, "an edit like any other, kept until Save");
+  await ui.save().onclick();
+  await settle();
+  assert.deepEqual(stored(), [{ label: "Input triage", nodes: ["plan", "build"] }]);
+  // Its label renames it: a dialog with the label alone.
+  await fire(labelOf(frames()[0]), "click");
+  dialog = ui.dialog();
+  assert.equal(dialog.title, "Rename group");
+  assert.equal(ui.field("step-group-label").value, "Input triage");
+  assert.equal(all(dialog.body).filter((n) => n.type === "checkbox").length, 0);
+  ui.field("step-group-label").value = "Triage";
+  await fire(dialog.footer.find((b) => b.className === "primary"), "click");
+  assert.equal(ui.notices.at(-1).text, "Renamed");
+  assert.equal(labelOf(frames()[0]).textContent, "Triage");
+  // A node's menu renames the group it is in, and offers no way to pick nodes.
+  ui.menus.length = 0;
+  await fire(tile("plan"), "contextmenu");
+  const nodeItems = ui.menus.at(-1).filter(Array.isArray).map((item) => item[0]);
+  assert.ok(nodeItems.includes("Rename group Triage…"));
+  assert.ok(!nodeItems.includes("Add group…"));
+  // The group's own menu: rename, draw again, remove. Redraw takes the nodes of a new frame.
+  ui.menus.length = 0;
+  await fire(labelOf(frames()[0]), "contextmenu");
+  const groupItems = ui.menus.at(-1).filter(Array.isArray);
+  assert.deepEqual(Array.from(groupItems, (item) => item[0]), ["Rename group…", "Redraw group", "Remove group"]);
+  groupItems[1][1]();
+  assert.equal(ui.notices.at(-1).text, "Drag a frame around the nodes of Triage");
+  await press(px - 10, py - 10);
+  await ui.release(px + 230, py + 74);
+  assert.equal(ui.notices.at(-1).text, "Changed");
+  await ui.save().onclick();
+  await settle();
+  assert.deepEqual(stored(), [{ label: "Triage", nodes: ["plan"] }]);
+  // Alt+drag draws a frame at any time, without the menu.
+  await press(bx - 10, by - 10, { altKey: true });
+  await ui.release(bx + 230, by + 74);
+  assert.equal(ui.dialog().title, "Add group");
+  ui.dialog().close();
+  assert.equal(frames().length, 1, "cancelled: nothing is added");
+  // Deleting its last node removes the group, and a workflow without one stores none.
+  await ui.run("Delete step", tile("plan"));
+  assert.equal(frames().length, 0);
+  await ui.save().onclick();
+  await settle();
+  assert.equal("groups" in ui.posts().at(-1).body, false);
+});
+
+
+test("the filter beside the Workflows title keeps the workflows whose name contains the text, whatever its case", async () => {
+  const ui = page();
+  ui.server.store["ecc/ECC-plan"] = [{ name: "ecc/ECC-plan", version: 1, created: "2026-11-01T10:00:00Z", created_by: "ada", steps: [{ id: "plan", service: "agent", agent: "demo/coder@v1" }] }];
+  await ui.open();
+  const filter = ui.byId("wf-filter");
+  const type = async (text) => { filter.value = text; await fire(filter, "input"); };
+  const all3 = ui.names();
+  assert.ok(all3.includes("Demo") && all3.includes("Inner") && all3.includes("ECC"));
+  // A part of the name, in any case; the group of a match is opened to show it.
+  await type("INN");
+  assert.deepEqual(ui.names(), ["Inner"]);
+  await type("ecc pl");
+  assert.deepEqual(ui.names(), ["ECC", "ECC Plan"], "the name as it is shown matches too");
+  await type("ecc-plan");
+  assert.deepEqual(ui.names(), ["ECC", "ECC Plan"], "and the name as it is stored");
+  await type("e");
+  assert.deepEqual(ui.names(), ["ECC", "ECC Plan", "Demo", "Inner"]);
+  // Nothing matches: one muted line. Escape clears the filter and brings every workflow back.
+  await type("zzz");
+  assert.deepEqual(ui.names(), ["No workflow matches"]);
+  await fire(filter, "keydown", { key: "Escape" });
+  assert.equal(filter.value, "");
+  assert.ok(ui.names().includes("Demo") && ui.names().includes("Inner"));
+  const html = fs.readFileSync(new URL("web/index.html", import.meta.url), "utf8");
+  assert.match(html, /<h2>Workflows<\/h2><input id="wf-filter" class="list-filter" type="search" placeholder="Filter" aria-label="Filter workflows by name"/);
+});
+
 test("the canvas menu keeps its twelve kinds of step in one Add step submenu", async () => {
   const ui = page();
   await ui.open();
@@ -1211,7 +1334,8 @@ test("the canvas menu keeps its twelve kinds of step in one Add step submenu", a
   const top = ui.menus.at(-1).filter(Array.isArray);
   const labels = top.map((entry) => entry[0]);
   assert.ok(labels.includes("Add step"));
-  assert.ok(!labels.some((label) => label.startsWith("Add ") && label !== "Add step"), "no kind of step at the top level");
+  assert.ok(labels.indexOf("Add group…") === labels.indexOf("Add step") + 1, "Add group… follows Add step");
+  assert.ok(!labels.some((label) => label.startsWith("Add ") && label !== "Add step" && label !== "Add group…"), "no kind of step at the top level");
   const kinds = top.find((entry) => entry[0] === "Add step")[5].map((entry) => entry[0]);
   assert.deepEqual([...kinds], ["Add agent", "Add human gate", "Add interactive session", "Add workflow", "Add team", "Add router", "Add service", "Add merge", "Add batch", "Add dev pod", "Add command", "Add stop dev pod"]);
   assert.ok(top.length <= 9, `a short menu: ${top.length} items`);

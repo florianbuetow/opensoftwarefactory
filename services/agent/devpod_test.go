@@ -21,7 +21,7 @@ func TestDevPodNoteOnlyRequestsAllowedCommits(t *testing.T) {
 	}
 }
 
-const devPodAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_retries":5,
+const devPodAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"max_turns":6,
 	"tools":["devpod/read_file","devpod/push_branch","devpod/report_blocked","factory/send_message"],
 	"commands":["./verify.sh","git add *","git commit *"]}`
 

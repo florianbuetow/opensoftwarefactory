@@ -145,7 +145,7 @@ function agentFields(area, areas = {}) {
   const modelState = h("span", { className: "model-state", role: "status" });
   const refreshButton = iconButton("refresh", "Refresh models");
   const effort = h("select");
-  const retries = h("input", { type: "number", min: 0, max: 100, placeholder: "0", autocomplete: "off" });
+  const turns = h("input", { type: "number", min: 1, max: 100, placeholder: "1", autocomplete: "off" });
   // Temperature is an optional model setting: a plain digit field, empty when not set.
   const temperature = h("input", { inputMode: "decimal", placeholder: "Not set", autocomplete: "off", maxLength: 6 });
   const tools = h("button", { type: "button", className: "agent-tool-picker-trigger", "aria-haspopup": "dialog" }, "No tools");
@@ -209,11 +209,12 @@ function agentFields(area, areas = {}) {
   const box = h("div", { className: "file-fields" });
   function refresh() {
     const d = read();
-    for (const c of [model, effort, temperature, retries, tools, policies, skills, scriptTimeout, unpack, commands, ...texts]) { c.disabled = !d; c.title = d ? "" : "Needs valid JSON in agent.json"; }
+    for (const c of [model, effort, temperature, turns, tools, policies, skills, scriptTimeout, unpack, commands, ...texts]) { c.disabled = !d; c.title = d ? "" : "Needs valid JSON in agent.json"; }
     if (!d) return;
     renderModel(Array.isArray(d.models) ? d.models[0] || "" : "");
     renderEffort(typeof d.effort === "string" ? d.effort : "");
-    if (document.activeElement !== retries) retries.value = d.max_retries ?? "";
+    // A version stored before max_turns names the model calls after the first one max_retries.
+    if (document.activeElement !== turns) turns.value = d.max_turns ?? (Number.isInteger(d.max_retries) ? d.max_retries + 1 : "");
     if (document.activeElement !== temperature) temperature.value = d.temperature ?? "";
     const selectedTools = Array.isArray(d.tools) ? d.tools : [];
     tools.textContent = selectedTools.length ? `${selectedTools.length} tool${selectedTools.length === 1 ? "" : "s"} selected` : "No tools";
@@ -235,8 +236,8 @@ function agentFields(area, areas = {}) {
     fitWidth(model);
   });
   effort.addEventListener("change", () => { write((d) => { if (effort.value) d.effort = effort.value; else delete d.effort; }); fitWidth(effort); });
-  // max_retries replaced max_turns, which the agent no longer reads.
-  retries.addEventListener("input", () => write((d) => { const n = parseInt(retries.value, 10); delete d.max_turns; if (n >= 0) d.max_retries = n; else delete d.max_retries; }));
+  // max_turns replaces max_retries, which counted the model calls after the first one.
+  turns.addEventListener("input", () => write((d) => { const n = parseInt(turns.value, 10); delete d.max_retries; if (n >= 1) d.max_turns = n; else delete d.max_turns; }));
   // Stored as a number and left out when empty or not a number in range.
   temperature.addEventListener("input", () => write((d) => { const n = modelSetting(temperature.value); if (n === null) delete d.temperature; else d.temperature = n; }));
   scriptTimeout.addEventListener("input", () => write((d) => {
@@ -407,7 +408,7 @@ function agentFields(area, areas = {}) {
       modelField,
       field("Effort", effort, "How much the model thinks before it answers. None skips the thinking; the others are sent to the model as reasoning_effort", "effort"),
       field("Temperature", temperature, "Sent to the model as temperature, from 0 to 2; the model's default when empty", "temperature"),
-      field("Max retries", retries, "How many more model calls a run may make after the first, such as after a tool call", "retries")),
+      field("Max turns", turns, "How many model calls one attempt may make; each round of tool calls needs one, and the answer one more", "turns")),
     group("Tools and context",
       toolsField,
       policiesField,
@@ -449,7 +450,7 @@ registryTab({
         models: [(gatewayModels.find((m) => m.available) || gatewayModels[0])?.id].filter(Boolean),
         effort: "medium",
         tools: [],
-        max_retries: 0,
+        max_turns: 10,
         unpack_inputs: true,
       }, null, 2),
     },

@@ -128,9 +128,7 @@ class HttpServerTest(unittest.TestCase):
         self.repo = root / "demo.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(source), str(self.repo)], check=True)
 
-        self.old_data = server.DATA
-        server.DATA = str(root)
-        self.addCleanup(setattr, server, "DATA", self.old_data)
+        self.enterContext(mock.patch.object(server, "DATA", str(root)))
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.port = self.httpd.server_address[1]

@@ -216,7 +216,7 @@ Each MCP service has three files in the blobstore. A tool call is sent on only w
 
 ## One event and one binding start one run
 
-Intake hashes the event, the binding, and the pinned workflow version. That hash is the run id. A retry of the same pair returns the run already accepted. Save the binding against a newer workflow version and the hash changes, so the new version gets its own run. Turning the binding off stops new starts. Events already received stay queued.
+Every run gets a new id: a version 7 UUID, the time in milliseconds followed by random bits. No run id is derived from what started the run, and none is given to a second run. The first time an event arrives for a binding, the orchestrator claims a new run id for that pair and stores the claim before it starts the run. A retry of the same pair reads the claim and returns that run. It starts nothing, also when the run has ended or was removed. The claim holds a hash of the event, the binding, and the pinned workflow version: the same pair with another payload is refused. Turning the binding off stops new starts. Events already received stay queued.
 
 ```
 ┌────────────────┐
@@ -225,7 +225,7 @@ Intake hashes the event, the binding, and the pinned workflow version. That hash
         │
         ▼
 ┌────────────────┐
-│ one run id     │
+│ one claim      │
 └───────┬────────┘
         │
         ▼
@@ -234,7 +234,9 @@ Intake hashes the event, the binding, and the pinned workflow version. That hash
 └────────────────┘
 ```
 
-- `services/orchestrator/pipeline/intake.go` builds the hash.
+- `services/orchestrator/runid.go` creates every run id, for a start by hand, a re-run, and intake.
+- `services/orchestrator/intake.go` stores the claim as `intake-claims/<hash of binding and event>.json`.
+- `services/orchestrator/pipeline/intake.go` builds the hash of the payload.
 - `services/connectors/intake.go` stores the binding and submits the event.
 - `services/factory-ui/web/intake.js` and `events.js` are the screens.
 

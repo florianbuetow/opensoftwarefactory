@@ -84,10 +84,12 @@ type service struct {
 	http                 *http.Client
 	log                  *slog.Logger
 	blobs, orchestrator  string
+	sqldb                string
 	openobserve          string
 	openobserveUser      string
 	openobservePassword  string
 	projectionStream     string
+	pending              pendingSnapshot
 	setMu, measurementMu sync.Mutex
 }
 
@@ -127,10 +129,17 @@ func run() (err error) {
 	s := &service{
 		blobs:           strings.TrimRight(env("BLOBSTORE_URL", "http://blobstore:8080"), "/"),
 		orchestrator:    strings.TrimRight(env("ORCHESTRATOR_URL", "http://orchestrator:8080"), "/"),
+		sqldb:           strings.TrimRight(env("SQLDB_URL", ""), "/"),
 		openobserve:     strings.TrimRight(env("OPENOBSERVE_URL", "http://openobserve:5080"), "/"),
 		openobserveUser: openObserveUser, openobservePassword: openObservePassword,
 		projectionStream: projectionStreamName,
 		http:             client, log: log,
+	}
+	if migrateErr := s.migrateLegacyPrices(context.Background()); migrateErr != nil {
+		return migrateErr
+	}
+	if migrateErr := s.migrateLegacyConversions(context.Background()); migrateErr != nil {
+		return migrateErr
 	}
 	server := &http.Server{Addr: env("EVALUATION_ADDR", ":8080"), Handler: otelhttp.NewHandler(s.routes(), "evaluation"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

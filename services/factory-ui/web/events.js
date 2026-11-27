@@ -13,7 +13,19 @@
     measurementUI.field("Search", query), measurementUI.field("From time", start), measurementUI.field("From sequence", sequence),
     h("button", { type: "submit", className: "primary" }, "Rewind"), follow,
     h("button", { type: "button", onclick: () => { start.value = ""; sequence.value = ""; open(true); } }, "Live"));
-  body.append(form, status, list, detail);
+  // The feed is a table: a heading row, then one row per event with its time, workflow and outcome.
+  const table = h("div", { className: "event-table" },
+    h("div", { className: "event-feed-head", "aria-hidden": "true" }, h("span", {}, "Time"), h("span", {}, "Workflow"), h("span", {}, "Outcome")), list);
+  body.append(form, status, table, detail);
+  const when = (iso) => { const at = new Date(iso); return iso && Number.isFinite(+at) ? at.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "Unknown time"; };
+  const named = (id) => typeof titleCase === "function" ? titleCase(id) : id;
+  const OUTCOMES = { completed: "done", succeeded: "done", done: "done", failed: "failed", error: "failed", running: "running", started: "running", waiting: "waiting", canceled: "idle", cancelled: "idle" };
+  // outcome shows a known state as the factory's state chip (dot and word), anything else as its own word.
+  function outcome(event) {
+    const word = event.status || event.type || "Unknown outcome", state = OUTCOMES[String(word).toLowerCase()];
+    return state && typeof statusChip === "function" ? statusChip(state, named(word)) : named(word);
+  }
+  let chosen = "";
   list.onscroll = () => { if (list.scrollHeight - list.scrollTop - list.clientHeight > 60) { state.following = false; follow.textContent = "Follow"; } };
   async function close(id) { if (id) await api("DELETE", `/api/connectors/events/sessions/${encodeURIComponent(id)}`).catch(() => {}); }
   async function open(live) {
@@ -42,8 +54,15 @@
       const anchorID = anchor?.dataset?.eventId, anchorOffset = anchor ? list.scrollTop - anchor.offsetTop : 0;
       const seen = new Set(state.events.map(e => e.id));
       state.events = [...state.events, ...(data.events || []).filter(e => !seen.has(e.id))].slice(-1000);
-      list.replaceChildren(...state.events.map(event => h("button", { type: "button", className: "event-feed-row", dataset: { eventId: event.id }, onclick: () => { detail.hidden = false; detail.textContent = JSON.stringify(event, null, 2); } },
-        h("time", {}, event.occurred_at || "Unknown time"), h("span", {}, event.workflow || "Unknown workflow"), h("span", {}, event.status || event.type || "Unknown outcome"))));
+      list.replaceChildren(...state.events.map(event => {
+        const row = h("button", { type: "button", className: "event-feed-row", "aria-pressed": String(event.id === chosen), dataset: { eventId: event.id }, onclick: () => {
+          chosen = event.id;
+          for (const other of list.children) other.setAttribute?.("aria-pressed", String(other === row));
+          detail.hidden = false; detail.textContent = JSON.stringify(event, null, 2);
+        } },
+        h("time", { title: event.occurred_at || "" }, when(event.occurred_at)), h("span", { title: event.workflow || "" }, event.workflow ? named(event.workflow) : "Unknown workflow"), h("span", {}, outcome(event)));
+        return row;
+      }));
       if (!state.events.length) list.replaceChildren(emptyPanel("No events"));
       status.textContent = `${state.events.length} / 1,000 displayed · Stream ${data.stream_first_sequence ?? "unknown"}–${data.stream_last_sequence ?? "unknown"}${data.has_more ? " · More retained events" : ""}${data.next_sequence ? ` · Next ${data.next_sequence}` : ""}`;
       if (state.following) list.scrollTop = list.scrollHeight;

@@ -346,8 +346,8 @@ func (s *Service) saveChat(ctx context.Context, chatID string, history *chatLog,
 // chatTurn runs the model and tool loop of Process for one message and appends every
 // assistant and tool message to the history.
 func (s *Service) chatTurn(ctx context.Context, ref string, def *Definition, history *chatLog, log *slog.Logger) (string, error) {
-	// One model call, plus max_retries more (each tool round needs one).
-	maxCalls := 1 + max(def.MaxRetries, 0)
+	// Each tool round needs one model call, and the answer one more.
+	maxCalls := def.turns()
 	var tools []any
 	routes := map[string]toolRoute{}
 	if selected := skillTools(ctx, def.Tools); len(selected) > 0 {
@@ -430,5 +430,5 @@ func (s *Service) chatTurn(ctx context.Context, ref string, def *Definition, his
 			return "", err
 		}
 	}
-	return "", turnBudgetError{fmt.Sprintf("agent %s gave no final answer within %d model calls (max_retries=%d)", ref, maxCalls, def.MaxRetries)}
+	return "", turnBudgetError{fmt.Sprintf("agent %s gave no final answer within its turn limit (max_turns=%d)", ref, maxCalls)}
 }

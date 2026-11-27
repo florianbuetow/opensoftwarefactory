@@ -50,6 +50,9 @@ func Validate(d *Definition) error {
 	if len(d.Steps) == 0 {
 		return fmt.Errorf("workflow %q needs at least one step", d.Name)
 	}
+	if err := validateGroups(d); err != nil {
+		return err
+	}
 	steps := map[string]*Step{}
 	seen := map[string]bool{}
 	for i := range d.Steps {
@@ -301,6 +304,37 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$`)
 	branchPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
 )
+
+// validateGroups checks the labelled parts of a graph: each has a one-line label of at
+// most MaxGroupLabel characters and names at least one node, every one a node of the
+// workflow and named once. A node may be in several groups.
+func validateGroups(d *Definition) error {
+	ids := map[string]bool{}
+	for i := range d.Steps {
+		ids[d.Steps[i].ID] = true
+	}
+	for i := range d.Groups {
+		b := &d.Groups[i]
+		label := strings.TrimSpace(b.Label)
+		if label == "" || label != b.Label || strings.ContainsAny(label, "\r\n\t") || len([]rune(label)) > MaxGroupLabel {
+			return fmt.Errorf("workflow %q: group %d needs a label of one line and at most %d characters, without spaces around it", d.Name, i+1, MaxGroupLabel)
+		}
+		if len(b.Nodes) == 0 {
+			return fmt.Errorf("workflow %q: group %q needs at least one node", d.Name, b.Label)
+		}
+		seen := map[string]bool{}
+		for _, id := range b.Nodes {
+			if !ids[id] {
+				return fmt.Errorf("workflow %q: group %q names the unknown node %q", d.Name, b.Label, id)
+			}
+			if seen[id] {
+				return fmt.Errorf("workflow %q: group %q names the node %q twice", d.Name, b.Label, id)
+			}
+			seen[id] = true
+		}
+	}
+	return nil
+}
 
 // validateDevPod checks a devpod step: a repository, a source branch, a work branch that
 // differs from it, and well-formed protected paths and rules.

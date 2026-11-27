@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqldb
+  labels:
+    app.kubernetes.io/name: sqldb
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sqldb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sqldb
+    spec:
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sqldb
+          image: opensoftwarefactory-sqldb:local
+          imagePullPolicy: Never
+          env:
+            - name: SQLDB_PATH
+              value: /state/factory.db
+            - name: BLOBSTORE_URL
+              value: http://blobstore:8080
+          volumeMounts:
+            - name: state
+              mountPath: /state
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 300m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/lib/opensoftwarefactory/sqldb
+            type: Directory

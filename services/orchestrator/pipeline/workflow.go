@@ -126,8 +126,21 @@ type Definition struct {
 	Created   string `yaml:"created,omitempty" json:"created,omitempty"`
 	CreatedBy string `yaml:"created_by,omitempty" json:"created_by,omitempty"`
 	Steps     []Step `yaml:"steps" json:"steps"`
-	Version   int    `yaml:"version,omitempty" json:"version"`
+	// Groups are the labelled parts of the graph the editor draws a frame around, such
+	// as "Input triage". They are optional and have no effect on a run.
+	Groups  []Group `yaml:"groups,omitempty" json:"groups,omitempty"`
+	Version int     `yaml:"version,omitempty" json:"version"`
 }
+
+// Group marks some nodes of a workflow as one labelled part of it. The editor draws a
+// frame around those nodes with the label; a run ignores it.
+type Group struct {
+	Label string   `yaml:"label" json:"label"`
+	Nodes []string `yaml:"nodes" json:"nodes"`
+}
+
+// MaxGroupLabel is the longest label a group may have, in characters.
+const MaxGroupLabel = 80
 
 // Input starts a pipeline run. The definition is a snapshot so later
 // configuration edits never affect a running workflow. Inputs is what the

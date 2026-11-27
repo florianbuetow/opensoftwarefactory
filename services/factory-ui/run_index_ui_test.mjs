@@ -17,7 +17,7 @@ function setup({ api, loadBlob = async () => ({ text: "{}" }) }) {
 }
 
 test("refresh removes cached runs absent from a successful server listing", async () => {
-  const index = setup({ api: async () => ({ directories: [] }) });
+  const index = setup({ api: async () => ({ runs: [] }) });
   index.records.set("gone", { trace_id: "gone" });
   index.statuses.set("gone", { status: "Completed" });
   await index.refresh();
@@ -25,68 +25,43 @@ test("refresh removes cached runs absent from a successful server listing", asyn
   assert.equal(index.statuses.has("gone"), false);
 });
 
-test("a stale directory response overlapping removal is listed again", async () => {
-  const first = deferred();
-  let listings = 0, blobLoads = 0;
+test("refresh loads runs and terminal statuses from sqldb in a single request", async () => {
+  const asked = [];
   const index = setup({
     api: async (_method, path) => {
-      assert.equal(path, "/api/blobs/list/runs");
-      listings++;
-      return listings === 1 ? first.promise : { directories: [] };
+      asked.push(path);
+      return {
+        runs: [
+          { trace_id: "done-1", workflow: "default/w", started: "2026-11-27T01:00:00Z", status: "Completed" },
+          { trace_id: "live-1", workflow: "default/w", started: "2026-11-27T01:05:00Z", status: "Running" },
+        ],
+      };
     },
-    loadBlob: async () => { blobLoads++; return { text: "{}" }; },
+  });
+  await index.refresh();
+  assert.deepEqual(asked, ["/api/sqldb/runs"]);
+  assert.equal(index.records.get("done-1")?.workflow, "default/w");
+  assert.equal(index.statuses.get("done-1")?.status, "Completed");
+  assert.equal(index.statuses.has("live-1"), false, "running runs keep live status polling");
+});
+
+test("a stale runs response overlapping removal is listed again", async () => {
+  const first = deferred();
+  let listings = 0;
+  const index = setup({
+    api: async (_method, path) => {
+      assert.equal(path, "/api/sqldb/runs");
+      listings++;
+      return listings === 1 ? first.promise : { runs: [] };
+    },
   });
   index.records.set("gone", { trace_id: "gone" });
   const refreshing = index.refresh();
   index.forget("gone");
-  first.resolve({ directories: ["gone"] });
+  first.resolve({ runs: [{ trace_id: "gone", workflow: "default/w", status: "Completed" }] });
   await refreshing;
   assert.equal(listings, 2);
-  assert.equal(blobLoads, 0);
   assert.equal(index.records.has("gone"), false);
-});
-
-test("a delayed failed record load cannot restore a locally removed run", async () => {
-  const record = deferred(), loading = deferred();
-  let fallbackRequests = 0;
-  const index = setup({
-    api: async (_method, path) => {
-      if (path === "/api/blobs/list/runs") return { directories: ["gone"] };
-      fallbackRequests++;
-      throw new Error("gone");
-    },
-    loadBlob: async () => { loading.resolve(); return record.promise; },
-  });
-  const refreshing = index.refresh();
-  await loading.promise;
-  index.forget("gone");
-  record.reject(new Error("not found"));
-  await refreshing;
-  assert.equal(fallbackRequests, 0);
-  assert.equal(index.records.has("gone"), false);
-  assert.equal(index.statuses.has("gone"), false);
-});
-
-test("a queued record load uses the listing-time generation", async () => {
-  const traces = Array.from({ length: 9 }, (_, i) => `run-${i}`);
-  const release = deferred(), started = deferred();
-  const loads = [];
-  const index = setup({
-    api: async () => ({ directories: traces }),
-    loadBlob: async (id) => {
-      loads.push(id);
-      if (loads.length === 8) started.resolve();
-      await release.promise;
-      return { text: "{}" };
-    },
-  });
-  const refreshing = index.refresh();
-  await started.promise;
-  index.forget("run-8");
-  release.resolve();
-  await refreshing;
-  assert.equal(loads.some((id) => id.includes("run-8")), false);
-  assert.equal(index.records.has("run-8"), false);
 });
 
 test("a delayed status response cannot restore a locally removed status", async () => {

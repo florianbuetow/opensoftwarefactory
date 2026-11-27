@@ -46,7 +46,7 @@ func TestAggregatedUsageStaysUnknownWhenAnyCallOmitsCount(t *testing.T) {
 	}
 }
 
-const settingsAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"effort":"low","temperature":0.2,"tools":["docs/search"],"max_retries":1}`
+const settingsAgentJSON = `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"effort":"low","temperature":0.2,"tools":["docs/search"],"max_turns":2}`
 
 // checkSettingsSent fails unless every model request carries the temperature.
 func checkSettingsSent(t *testing.T, f *fakes, want int) {

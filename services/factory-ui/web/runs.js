@@ -595,28 +595,28 @@ const RunsLogic = (() => {
   // runGraph draws a run's workflow version read-only (see WorkflowGraph.drawGraph), each tile
   // in the state stateOf gives its step, fitted to the detail's width and at most 360 px high.
   // onTile(id) answers a click or Enter on a tile. null for a definition without steps.
-  function runGraph(def, stateOf, onTile, selected = null) {
-    if (!def?.steps?.length) return null;
-    const w = { ...def, steps: def.steps.map((s) => ({ ...s, position: s.position ? { ...s.position } : undefined })) };
-    WorkflowGraph.autoLayout(w);
-    const width = Math.max(320, (detail.clientWidth || 640) - 50);
-    let view = WorkflowGraph.fitView(w, width, { input: false, minScale: 0.35, maxScale: 0.8, margin: 16 });
-    if (view.height > 360) view = WorkflowGraph.fitView(w, width, { input: false, minScale: 0.35, maxScale: 0.8, margin: 16, height: 360 });
-    const svg = document.createElementNS(WorkflowGraph.SVG_NS, "svg");
-    svg.setAttribute("class", "run-graph");
-    svg.setAttribute("role", "group");
-    svg.setAttribute("aria-label", "Workflow graph of this run");
-    svg.setAttribute("width", Math.max(width, Math.ceil(view.width)));
-    svg.setAttribute("height", Math.min(360, Math.ceil(view.height)));
-    const wrap = h("div", { className: "run-graph-wrap" }, svg);
-    WorkflowGraph.drawGraph(svg, w, {
-      view, stateOf, selected, idPrefix: "run-",
-      onTile: (s, { g }) => {
-        g.addEventListener("click", () => onTile(s.id));
-        g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); onTile(s.id); } });
-      },
+  // The drawing, the pan and zoom, the red mark of the steps the run is at, and the enlarged
+  // view are the shared viewer of graph.js (WorkflowGraph.viewer and openLarge), which the
+  // Workflows page uses as well. opts.trace keeps the view per run; opts.onEnlarge answers a
+  // click on the empty graph and the Enlarge button.
+  function runGraph(def, stateOf, onTile, selected = null, opts = {}) {
+    const wrap = WorkflowGraph.viewer(def, {
+      viewKey: opts.trace ? `${opts.trace}|small` : "", stateOf, selected, onTile, onEnlarge: opts.onEnlarge, onOpen: opts.onOpen,
+      width: Math.max(320, (detail.clientWidth || 640) - 50), height: 360, idPrefix: "run-", label: "Workflow graph of this run",
     });
-    return h("div", { className: "section" }, wrap);
+    return wrap ? h("div", { className: "section" }, wrap) : null;
+  }
+
+  // enlargeGraph opens a run's graph nearly full screen, to pan and zoom: every tile says what
+  // its step is on hover, and a click or Enter on a tile opens that step on the Workflows page,
+  // in the version the run used. It follows the run's states while it is open.
+  function enlargeGraph(trace, def, stateOf, workflow, version) {
+    WorkflowGraph.openLarge({
+      title: `${titleCase(workflow)}${version ? ` v${version}` : ""}`, def, stateOf, viewKey: trace, label: "Workflow graph of this run",
+      onTile: (id) => { location.hash = WorkflowLogic.formatHash({ workflow, step: id, version: version || 0 }); },
+      onOpen: workflow ? () => { location.hash = WorkflowLogic.formatHash({ workflow, version: version || 0 }); } : null,
+      openLabel: "Open workflow", openTip: "Opens this version of the workflow on Workflows",
+    });
   }
 
   // existingAgents lists the agent references the registry still has, refreshed every 30 s.
@@ -736,6 +736,7 @@ const RunsLogic = (() => {
       : "Prompt snapshots were not recorded for this attempt.");
   }
 
+  let shownEvidence = null; // the execution event a person opened: { trace, key, panel }
   async function showExecutionEvidence(panel, button, record, event, step, context) {
     for (const selected of button.closest("ul").querySelectorAll(".timeline-select[aria-selected=true]")) selected.setAttribute("aria-selected", "false");
     button.setAttribute("aria-selected", "true");
@@ -790,9 +791,16 @@ const RunsLogic = (() => {
         spans.replaceChildren(h("p", { className: "evidence-warning" }, "This older record has no trace ID."));
         return;
       }
-      const result = await api("GET", `/api/observability/spans?trace_id=${encodeURIComponent(traceID)}`);
+      // The search is told when the attempt ran, so it reads that time alone and answers at once.
+      const spanQuery = new URLSearchParams({ trace_id: traceID });
+      // An old record without times of its own is searched in the time of its run.
+      const ranFrom = record.started || event.started || context.runStarted, ranTo = record.finished || event.finished || context.runFinished || new Date().toISOString();
+      if (ranFrom && Date.parse(ranFrom) <= Date.parse(ranTo)) { spanQuery.set("start", ranFrom); spanQuery.set("end", ranTo); }
+      const result = await api("GET", `/api/observability/spans?${spanQuery}`);
       if (!result.spans?.length) {
-        spans.replaceChildren(h("p", { className: "evidence-warning" }, "No spans were found for this trace."));
+        spans.replaceChildren(h("p", { className: "evidence-warning" }, result.partial
+          ? "No spans were found in the days that could be searched; the time of this record is not known."
+          : "No spans were found for this trace."));
         return;
       }
       const byID = new Map(result.spans.map((span) => [span.span_id, span]));
@@ -809,14 +817,21 @@ const RunsLogic = (() => {
   function executionTimeline(records, context = {}) {
     const entries = [];
     let ordinal = 0;
-    const evidence = h("div", { className: "execution-evidence", "aria-live": "polite", hidden: true });
+    let evidence = h("div", { className: "execution-evidence", "aria-live": "polite", hidden: true });
+    // The run redraws itself while it is open. The event a person opened stays open: its panel
+    // is carried over to the redrawn timeline as it is, unfolded parts, logs and trace included.
+    let reopened = null;
+    const select = (button, key, record, event, step) => {
+      if (shownEvidence && shownEvidence.trace === context.trace && shownEvidence.key === key) reopened = button;
+      button.onclick = () => { shownEvidence = { trace: context.trace, key, panel: evidence }; return showExecutionEvidence(evidence, button, record, event, step, context); };
+    };
     const displayStep = (step) => RunsLogic.stepLabel(step || "", titleCase); // names the pass of a step that runs in passes
     for (const { step, attempts } of records) {
       const attemptList = attempts || [];
       const showAttempts = attemptList.length > 1 || attemptList.some((record) => (record.attempt || 1) > 1);
       for (const record of attemptList) {
       const events = Array.isArray(record.events) ? [...record.events].sort((a, b) => String(a.started || "").localeCompare(String(b.started || ""))) : [];
-      for (const event of events) {
+      for (const [eventIndex, event] of events.entries()) {
         const interrupted = event.status === "running" && (record.status && record.status !== "running" || context.runStatus && context.runStatus !== "Running");
         const state = event.status === "completed" ? "done" : event.status === "running" && !interrupted ? "running" : event.status === "canceled" ? "idle" : "failed";
         const label = event.kind === "model_call" ? "Model call"
@@ -827,7 +842,7 @@ const RunsLogic = (() => {
           h("span", { className: "timeline-event-group" },
             showAttempts ? h("span", { className: "timeline-attempt" }, `Attempt ${record.attempt || 1}`) : null,
             h("span", { className: "timeline-event" }, interrupted ? `${label} · Interrupted` : label)));
-        button.onclick = () => showExecutionEvidence(evidence, button, record, event, step, context);
+        select(button, `${step}|${record.attempt || 1}|${eventIndex}|${event.kind || ""}|${event.started || ""}`, record, event, step);
         entries.push({ at: event.started || record.started || "", ordinal: ordinal++, node: h("li", {}, button) });
       }
       const recordInterrupted = record.status === "running" && context.runStatus && context.runStatus !== "Running";
@@ -846,13 +861,14 @@ const RunsLogic = (() => {
           h("span", { className: "timeline-step" }, displayStep(step)),
           h("span", { className: "timeline-event-group" }, showAttempts ? h("span", { className: "timeline-attempt" }, `Attempt ${record.attempt || 1}`) : null,
             h("span", { className: "timeline-event" }, terminal)));
-        button.onclick = () => showExecutionEvidence(evidence, button, record, terminalEvent, step, context);
+        select(button, `${step}|${record.attempt || 1}|end`, record, terminalEvent, step);
         entries.push({ at: terminalAt, ordinal: ordinal++, node: h("li", {}, button) });
       }
       }
     }
     entries.sort((a, b) => String(a.at).localeCompare(String(b.at)) || a.ordinal - b.ordinal);
     const rows = entries.map((entry) => entry.node);
+    if (reopened) { evidence = shownEvidence.panel; reopened.setAttribute("aria-selected", "true"); }
     return rows.length ? h("div", { className: "section run-timeline" },
       h("h3", { className: "section-title" }, "Execution"), h("ul", {}, ...rows), evidence) : null;
   }
@@ -1011,6 +1027,9 @@ const RunsLogic = (() => {
     // A run of a workflow that has since moved into a group finds its graph under the new name.
     const graphDef = def?.steps?.length ? def : await runWorkflow(r?.workflow || st.workflow || "", version);
     if (state.selected !== trace) return;
+    // The run leads to its workflow: the version it used, on the Workflows page, at a step when one is named.
+    const workflowName = graphDef?.name || r?.workflow || st.workflow || "";
+    const workflowHash = (step = "") => WorkflowLogic.formatHash({ workflow: workflowName, step, version: version || 0 });
     const graph = runGraph(graphDef, stepState, (id) => {
       const gate = waitingGateOf(id);
       if (gate) { location.hash = `#decisions/${encodeURIComponent(`p:${gate.workflow_id}|${gate.step}`)}`; return; }
@@ -1020,11 +1039,18 @@ const RunsLogic = (() => {
       row?.classList.add("step-focus");
       row?.scrollIntoView({ block: "nearest" });
       for (const t of detail.querySelectorAll(".run-graph .tile")) t.classList.toggle("selected", t.dataset.step === id);
-    }, focusedStep.trace === trace ? focusedStep.id : null);
+    }, focusedStep.trace === trace ? focusedStep.id : null,
+    { trace, onEnlarge: () => enlargeGraph(trace, graphDef, stepState, workflowName, version), onOpen: workflowName ? (id) => { location.hash = workflowHash(id); } : null });
+    if (WorkflowGraph.dragging()) return; // a pan is in progress: the next poll redraws
+    if (WorkflowGraph.large()?.key === trace && graphDef?.steps?.length) WorkflowGraph.large().redraw(graphDef, stepState);
     const runEnd = failedRun && !rows.some(({ id }) => stepState(id) === "failed")
       ? h("li", { className: "no-agent no-link step-end" }, statusChip("failed"), h("span", { className: "step-name" }, RunsLogic.runEndLine(st.status, lastDone ? titleCase(lastDone.id) : "")))
       : null;
     detail.setAttribute("aria-busy", "false");
+    // The redraw every 3 s builds the detail anew; it keeps where the reader scrolled to
+    // (bug report, 26 Nov: the detail jumped back to the top on every refresh).
+    const scrolledTo = detail.querySelector(":scope > .panel-body")?.scrollTop || 0;
+    queueMicrotask(() => { const body = detail.querySelector(":scope > .panel-body"); if (body && detail.dataset.trace === trace) body.scrollTop = scrolledTo; });
     detail.replaceChildren(
       h("div", { className: "panel-head" }),
       h("div", { className: "panel-body" },
@@ -1032,7 +1058,9 @@ const RunsLogic = (() => {
           h("div", { className: "run-meta" },
             runChip(trace, st),
             r ? [h("span", { className: "sep" }, "·"), timeEl(r.started)] : null,
-            version ? [h("span", { className: "sep" }, "·"), h("span", { className: "run-version" }, `Workflow v${version}`)] : null,
+            // The workflow the run used is a link to it: that version on the Workflows page.
+            workflowName ? [h("span", { className: "sep" }, "·"), h("a", { className: "run-version", href: workflowHash(), title: version ? `Opens v${version} of ${titleCase(workflowName)} on Workflows` : `Opens ${titleCase(workflowName)} on Workflows` }, version ? `Workflow v${version}` : "Workflow")]
+              : version ? [h("span", { className: "sep" }, "·"), h("span", { className: "run-version" }, `Workflow v${version}`)] : null,
             h("span", { className: "sep" }, "·"), h("span", { className: "meta-pair" }, h("a", { href: `#artifacts?trace=${encodeURIComponent(trace)}` }, "View trace"), copyButton(trace, "trace ID")))),
         // A blocked run says why in the agent's words, as text: nothing failed.
         st.status === "Blocked" ? (st.blocked ? h("div", { className: "section" }, h("p", { className: "blocked-line" }, st.blocked)) : null)
@@ -1043,7 +1071,7 @@ const RunsLogic = (() => {
         runSkillVersions(metadata),
         pullRequestSection(pullText ? RunsLogic.pullRequest(pullText) : null, st.pullRequest),
         telemetry,
-        executionTimeline(records, { trace, runStatus: st.status, runError: st.error, inputArtifact: r?.input_artifact, artifacts, passArtifacts, retentionDays: observabilityHealth?.retention_days || 0 }),
+        executionTimeline(records, { trace, runStatus: st.status, runError: st.error, runStarted: st.started || r?.started, runFinished: st.finished, inputArtifact: r?.input_artifact, artifacts, passArtifacts, retentionDays: observabilityHealth?.retention_days || 0 }),
         h("div", { className: "section" },
           h("h3", { className: "section-title" }, "Steps"),
           h("ul", { className: "step-list" }, ...rows.flatMap(({ id, depth }, i) => {

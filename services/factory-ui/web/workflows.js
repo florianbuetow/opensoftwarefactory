@@ -867,21 +867,41 @@ const WorkflowLogic = (() => {
   const tree = createTree($("wf-list"), {
     // A click on a workflow opens it; when unsaved edits are kept instead, the tree marks the one on the canvas again.
     onSelect(n) { if (n.id.startsWith("w:")) openTarget({ name: n.id.slice(2) }).then((shown) => { if (!shown) showSelection(); }); },
-    onContext(n, ev) { if (n.id.startsWith("g:")) groupMenu(n.id.slice(2), ev); else workflowMenu(n.id.slice(2), ev); },
+    onContext(n, ev) { if (n.id.startsWith("g:")) groupMenu(n.id.slice(2), ev); else if (n.id.startsWith("w:")) workflowMenu(n.id.slice(2), ev); },
   });
   let treeShows = null; // the workflow the tree last marked as the one on the canvas
 
   // treeOrder lists the workflow names in the order the tree shows them.
   const treeOrder = () => groupNodes(groupList(), state.workflows, (w) => w.name, (_g, children) => children, (w) => w.name).flat(Infinity);
 
+  // The filter beside the title keeps only the workflows whose name contains the typed text,
+  // whatever its case: the name as stored (ecc/ECC-plan) or as shown (ECC / ECC Plan). While
+  // it holds text, the tree shows only the groups of the matches, opened.
+  let listFilter = "";
+  const filterMatches = (name) => !listFilter
+    || [name, name.replace(/-/g, " "), name.split("/").map((part) => titleCase(part)).join(" / ")].some((text) => text.toLowerCase().includes(listFilter));
+
   function renderList() {
     if (state.loadError || !state.loaded) { tree.setRoots([]); treeShows = null; return; } // the canvas shows a load error once
     const label = (path) => titleCase(leafOf(path));
-    tree.setRoots(groupNodes(groupList(), state.workflows, (w) => w.name,
+    const shown = listFilter ? state.workflows.filter((w) => filterMatches(w.name)) : state.workflows;
+    const shownGroups = listFilter ? groupPaths(shown.map((w) => w.name), new Set()) : groupList();
+    if (listFilter && !shown.length) { tree.setRoots([{ id: "none", label: "No workflow matches", className: "muted" }]); return; }
+    tree.setRoots(groupNodes(shownGroups, shown, (w) => w.name,
       (g, children) => ({ id: `g:${g}`, label: label(g), full: label(g), children }),
       (w) => ({ id: `w:${w.name}`, label: label(w.name), full: label(w.name) })));
+    if (listFilter) { for (const w of shown) tree.reveal(groupIds(w.name, "g:")); tree.select(shown.some((w) => w.name === entry()?.name) ? `w:${entry().name}` : null); return; }
     showSelection(false);
   }
+  $("wf-filter").addEventListener("input", (ev) => { listFilter = ev.target.value.trim().toLowerCase(); treeShows = null; renderList(); });
+  $("wf-filter").addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape" || !ev.target.value) return;
+    ev.stopPropagation();
+    ev.target.value = "";
+    listFilter = "";
+    treeShows = null;
+    renderList();
+  });
 
   // showSelection marks the workflow on the canvas in the tree and opens the groups that hold it.
   // Unforced, it does so once per workflow shown, so a group picked since keeps the selection.
@@ -1394,7 +1414,128 @@ const WorkflowLogic = (() => {
         g.addEventListener("click", open);
         g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(ev); } });
       },
+      // A group's label opens it (rename, choose its nodes); its menu also removes it.
+      onStepGroup: (g, b, i, label) => {
+        label.setAttribute("tabindex", 0);
+        label.setAttribute("role", "button");
+        label.setAttribute("aria-label", `Group ${b.label}`);
+        const open = (ev) => { ev.stopPropagation(); stepGroupDialog(i); };
+        label.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        label.addEventListener("click", open);
+        label.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(ev); } });
+        label.addEventListener("contextmenu", (ev) => { ev.stopPropagation(); openMenu(ev, stepGroupActions(i)); });
+      },
       onTile: editTile,
+    });
+  }
+
+  // ---- Step groups: labelled frames around parts of the graph (Definition.Groups) ----
+  // A group names its nodes, and its frame follows them wherever they are moved. It is an
+  // optional addition to the workflow: a workflow without one stores no groups at all.
+
+  const stepGroupsOf = (w) => w?.groups || [];
+  function setStepGroups(w, list) {
+    if (list.length) w.groups = list;
+    else delete w.groups;
+  }
+  // A renamed step keeps its place in its groups; a deleted step leaves them, and a
+  // group without a step left is gone.
+  function renameInStepGroups(w, from, to) {
+    for (const b of stepGroupsOf(w)) b.nodes = b.nodes.map((id) => (id === from ? to : id));
+  }
+  function dropFromStepGroups(w, id) {
+    setStepGroups(w, stepGroupsOf(w).map((b) => ({ ...b, nodes: b.nodes.filter((x) => x !== id) })).filter((b) => b.nodes.length));
+  }
+  function stepGroupActions(i) {
+    const b = stepGroupsOf(workflow())[i];
+    return [
+      ["Rename group…", () => stepGroupDialog(i), "", `Changes the label of ${b.label}`],
+      ["Redraw group", () => startGroupDraw(i), "", `Chooses the nodes of ${b.label} again: a frame dragged on the canvas takes the nodes inside it`],
+      "-",
+      ["Remove group", () => removeStepGroup(i), "danger", `Removes the frame ${b.label}; its nodes stay`],
+    ];
+  }
+  function removeStepGroup(i) {
+    withUndo("Removed", () => {
+      const w = workflow();
+      setStepGroups(w, stepGroupsOf(w).filter((_, n) => n !== i));
+      markDirty();
+      render();
+    });
+  }
+  // A group's nodes are never picked from a list: they are the nodes inside a frame drawn on
+  // the canvas. Add group… (the canvas menu) and Redraw group (a group's menu) make the next
+  // drag on the canvas draw that frame, with a crosshair; Alt+drag draws one at any time.
+  // Escape leaves the mode. A frame that holds no node changes nothing.
+  let groupDraw = null; // { index }: the group the next frame is for; -1 is a new one
+  function startGroupDraw(index = -1) {
+    groupDraw = { index };
+    $("canvas").classList.add("drawing-group");
+    setStatus(index < 0 ? "Drag a frame around the nodes of the group" : `Drag a frame around the nodes of ${stepGroupsOf(workflow())[index].label}`);
+  }
+  function endGroupDraw() {
+    groupDraw = null;
+    $("canvas").classList.remove("drawing-group");
+  }
+  // startGroupFrame begins the frame at the pointer, in the graph's own coordinates.
+  function startGroupFrame(ev) {
+    ev.stopPropagation();
+    ev.preventDefault?.();
+    const p = point(ev);
+    const rect = G.el("rect", { class: "group-draw", x: p.x, y: p.y, width: 0, height: 0, rx: 12 }, $("canvas").querySelector("g.graph") || $("canvas"));
+    drag = { kind: "group", index: groupDraw ? groupDraw.index : -1, from: p, to: p, rect };
+  }
+  function moveGroupFrame(p) {
+    drag.to = p;
+    const { from, to, rect } = drag;
+    for (const [k, v] of Object.entries({ x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width: Math.abs(to.x - from.x), height: Math.abs(to.y - from.y) })) rect.setAttribute(k, v);
+  }
+  // endGroupFrame takes the nodes whose tiles the frame touches. For a new group it then asks
+  // for the label; for a group drawn again it replaces that group's nodes as one edit.
+  function endGroupFrame(d) {
+    d.rect.remove?.();
+    endGroupDraw();
+    const w = workflow();
+    const x0 = Math.min(d.from.x, d.to.x), x1 = Math.max(d.from.x, d.to.x), y0 = Math.min(d.from.y, d.to.y), y1 = Math.max(d.from.y, d.to.y);
+    if (x1 - x0 < 8 && y1 - y0 < 8) return; // a click, not a frame
+    const nodes = w.steps.filter((s) => s.position && s.position.x < x1 && s.position.x + G.TILE_W > x0 && s.position.y < y1 && s.position.y + G.TILE_H > y0).map((s) => s.id);
+    if (!nodes.length) { setStatus(`Not ${d.index < 0 ? "added" : "changed"}: no node is inside the frame`, "error"); return; }
+    if (d.index < 0) { stepGroupDialog(-1, nodes); return; }
+    const group = stepGroupsOf(w)[d.index];
+    if (!group || JSON.stringify(group.nodes) === JSON.stringify(nodes)) return;
+    withUndo("Changed", () => {
+      setStepGroups(w, stepGroupsOf(w).map((x, n) => (n === d.index ? { ...x, nodes } : { ...x, nodes: [...x.nodes] })));
+      markDirty();
+      render();
+    });
+  }
+  // stepGroupDialog asks for a group's label only: for a new group (index -1) around the
+  // nodes its frame took, or to rename one. It is one edit, which Cmd/Ctrl+Z undoes.
+  function stepGroupDialog(index = -1, nodes = []) {
+    const w = workflow();
+    const b = index >= 0 ? stepGroupsOf(w)[index] : null;
+    const label = h("input", { type: "text", id: "step-group-label", value: b?.label || "", maxLength: 80, autocomplete: "off" });
+    const problem = h("p", { className: "error-text", role: "alert" });
+    const apply = () => {
+      const text = label.value.replace(/\s+/g, " ").trim();
+      if (!text) { problem.textContent = "Enter a label."; label.focus(); return; }
+      dlg.close();
+      if (b && b.label === text) return;
+      withUndo(b ? "Renamed" : "Added", () => {
+        const list = stepGroupsOf(w).map((x) => ({ ...x, nodes: [...x.nodes] }));
+        if (b) list[index] = { ...list[index], label: text };
+        else list.push({ label: text, nodes });
+        setStepGroups(w, list);
+        markDirty();
+        render();
+      });
+    };
+    label.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); apply(); } });
+    const dlg = openDialog({
+      title: b ? "Rename group" : "Add group",
+      body: h("div", { className: "name-fields" },
+        h("div", { className: "field" }, h("label", { htmlFor: label.id, title: "Names this part of the workflow, such as Input triage" }, "Label"), label, problem)),
+      footer: [h("button", { type: "button", onclick: () => dlg.close() }, "Cancel"), h("button", { type: "button", className: "primary", onclick: apply }, b ? "Rename" : "Add")],
     });
   }
 
@@ -1458,6 +1599,7 @@ const WorkflowLogic = (() => {
       if (workflow().steps.some((o) => o !== s && sameName(o.id, v))) { setStatus(`There is already a node named ${titleCase(v)}`, "error"); return; }
       for (const o of workflow().steps) o.depends_on = (o.depends_on || []).map((d) => (d === s.id ? v : d));
       for (const o of workflow().steps) if (o.on_reject === s.id) o.on_reject = v;
+      renameInStepGroups(workflow(), s.id, v);
       if (state.selected === s.id) state.selected = v;
       s.id = v;
     },
@@ -2156,6 +2298,7 @@ const WorkflowLogic = (() => {
   function startMove(ev, s) {
     ev.stopPropagation();
     if (ev.button !== 0) return;
+    if (groupDraw || ev.altKey) { startGroupFrame(ev); return; } // a frame for a group is drawn from anywhere
     if (ev.shiftKey) { startPan(ev); return; }
     const p = point(ev);
     drag = { kind: "move", step: s, dx: p.x - s.position.x, dy: p.y - s.position.y, moved: false };
@@ -2166,6 +2309,7 @@ const WorkflowLogic = (() => {
   function startConnect(ev, s) {
     ev.stopPropagation();
     if (ev.button !== 0) return;
+    if (groupDraw || ev.altKey) { startGroupFrame(ev); return; } // a frame for a group is drawn from anywhere
     if (ev.shiftKey) { startPan(ev); return; }
     drag = { kind: "connect", from: s, line: null };
   }
@@ -2175,6 +2319,7 @@ const WorkflowLogic = (() => {
   function startReject(ev, s) {
     ev.stopPropagation();
     if (ev.button !== 0) return;
+    if (groupDraw || ev.altKey) { startGroupFrame(ev); return; } // a frame for a group is drawn from anywhere
     if (ev.shiftKey) { startPan(ev); return; }
     drag = { kind: "reject", from: s, line: null };
   }
@@ -2189,6 +2334,7 @@ const WorkflowLogic = (() => {
       return;
     }
     const p = point(ev);
+    if (drag.kind === "group") { moveGroupFrame(p); return; }
     if (drag.kind === "move") {
       const next = { x: Math.round(p.x - drag.dx), y: Math.round(p.y - drag.dy) };
       if (!drag.moved && Math.hypot(next.x - drag.step.position.x, next.y - drag.step.position.y) < 3) return;
@@ -2210,6 +2356,7 @@ const WorkflowLogic = (() => {
     if (!drag) return;
     const d = drag;
     drag = null;
+    if (d.kind === "group") { d.to = point(ev); endGroupFrame(d); return; }
     if (d.kind === "pan") { $("canvas").classList.remove("panning"); saveView(workflow().name); return; }
     if (d.kind === "move") {
       if (d.moved) { markDirty(); renderCanvas(); }
@@ -2299,6 +2446,7 @@ const WorkflowLogic = (() => {
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape" || activeTab !== "workflows") return;
     if (!menu.hidden) closeMenu();
+    if (groupDraw && !drag) endGroupDraw(); // leaves the mode in which the next drag draws a group
   });
 
   function stepActions(s) {
@@ -2308,6 +2456,9 @@ const WorkflowLogic = (() => {
     if (s.service === "workflow" && s.workflow && !missingWorkflow(s.workflow)) items.push(["Open workflow", () => openNested(s.workflow), "", `Opens ${refLabel(s.workflow)}, the workflow version this step runs`]);
     // The keyboard draws and removes arrows here, as a drag from the output port does.
     if (s.service !== "route") items.push(["Connect to…", () => connectDialog(s), "", `Chooses the steps that receive the output of ${titleCase(s.id)}`]);
+    // A node in a group can rename that group; a new group is drawn on the canvas.
+    const inside = stepGroupsOf(workflow()).map((b, i) => [b, i]).filter(([b]) => b.nodes.includes(s.id));
+    for (const [b, i] of inside) items.push([`Rename group ${b.label}…`, () => stepGroupDialog(i), "", `Changes the label of ${b.label}`]);
     if ((s.depends_on || []).length || workflow().steps.some((o) => (o.depends_on || []).includes(s.id))) {
       items.push("-", ["Remove all dependencies", () => removeAllDependencies(s), "danger", `Removes every arrow into and out of ${titleCase(s.id)}`]);
     }
@@ -2338,6 +2489,7 @@ const WorkflowLogic = (() => {
           ["Add command", () => addStep("command"), "", "Adds a command node: it runs one command in the dev pod, without a model"],
           ["Add stop dev pod", () => addStep("devpod-stop"), "", "Adds a node that deletes the dev pod"],
         ]],
+        ["Add group…", () => startGroupDraw(-1), "", w.steps.length ? "Marks a part of the workflow: the next drag on the canvas draws a frame, and the nodes inside it become the group" : "Needs a node", !w.steps.length],
         ["Auto-arrange", autoArrange, "", "Discards the saved positions and lays the steps out top to bottom"],
         "-",
       );
@@ -2360,11 +2512,13 @@ const WorkflowLogic = (() => {
   function withUndo(message, edit) {
     const of = workflow();
     const before = structuredClone(of.steps);
+    const stepGroups = structuredClone(of.groups || []); // an edit may change the groups too
     const selected = state.selected;
     edit();
     setStatus(message, "", { label: "Undo", run: () => {
       if (workflow() !== of) return; // another workflow or version is on the canvas
       of.steps = before;
+      setStepGroups(of, stepGroups);
       state.selected = selected;
       markDirty();
       render();
@@ -2415,6 +2569,7 @@ const WorkflowLogic = (() => {
       const w = workflow();
       w.steps = w.steps.filter((s) => s.id !== id);
       for (const s of w.steps) s.depends_on = (s.depends_on || []).filter((d) => d !== id);
+      dropFromStepGroups(w, id);
       if (state.selected === id) state.selected = null;
       markDirty();
       render();
@@ -2592,6 +2747,7 @@ const WorkflowLogic = (() => {
 
   // A drag on the empty canvas pans it; nodes and arrows keep their own drag and click.
   $("canvas").addEventListener("pointerdown", (ev) => {
+    if (ev.button === 0 && (groupDraw || ev.altKey)) { startGroupFrame(ev); return; }
     if (ev.button !== 0 || ev.target.closest?.(".edge, .edge-hit, .back-edge")) return;
     startPan(ev);
   });
@@ -2602,6 +2758,18 @@ const WorkflowLogic = (() => {
     if (s?.service === "workflow" && s.workflow) openNested(s.workflow); // the pinned version
     // A double-click on a team node opens the team on the canvas: its members and channels.
     if (s?.service === "team") { state.teamOpen = { workflow: workflow().name, step: s.id }; state.selected = s.id; render(); }
+    // A double-click on the empty canvas opens the workflow nearly full screen, in the viewer
+    // the Runs page uses (WorkflowGraph.openLarge): to pan, zoom and read what each node is.
+    // A click on a tile there closes it and selects that node here.
+    const w = workflow();
+    if (!s && w?.steps.length && !state.teamOpen && !ev.target.closest?.(".tile, .edge, .edge-hit, .back-edge, .step-group-label")) {
+      const version = shownVersion();
+      G.openLarge({
+        title: `${titleCase(w.name)}${version ? ` v${version}` : ""}`, def: w, viewKey: `workflow:${w.name}`, label: "Workflow graph",
+        graph: { subtitle, missing: missingRef },
+        onTile: (id, close) => { close(); state.selected = id; render(); },
+      });
+    }
   });
   // The Service field suggests the kinds this page adds to the list in the page.
   for (const value of ["workflow", "team", ...L.NODE_KINDS, ...L.POD_KINDS]) {

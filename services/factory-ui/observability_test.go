@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,6 +90,158 @@ func TestObservabilitySpansAreRestrictedAndNormalized(t *testing.T) {
 	}
 }
 
+// A trace is searched in the time its attempt ran, widened by the margin, when the caller says
+// when that was; an unordered or unreadable time is refused.
+func TestObservabilitySpansSearchTheTimeOfTheAttempt(t *testing.T) {
+	var from, to int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query struct {
+				Start int64 `json:"start_time"`
+				End   int64 `json:"end_time"`
+			} `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		from, to = request.Query.Start, request.Query.End
+		_, _ = io.WriteString(w, `{"total":0,"hits":[]}`)
+	}))
+	defer upstream.Close()
+	client := &observabilityClient{base: upstream.URL, user: "a", password: "b", http: upstream.Client(), retentionKnown: true}
+	ui := httptest.NewServer(observabilityHandler(client))
+	defer ui.Close()
+	trace := "/api/observability/spans?trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	started := time.Date(2026, 11, 26, 23, 53, 22, 0, time.UTC)
+	finished := started.Add(20 * time.Second)
+	resp := get(t, ui.URL+trace+"&start="+started.Format(time.RFC3339Nano)+"&end="+finished.Format(time.RFC3339Nano))
+	if resp.status != http.StatusOK || from != started.Add(-traceSearchMargin).UnixMicro() || to != finished.Add(traceSearchMargin).UnixMicro() {
+		t.Fatalf("status %d, searched %d to %d", resp.status, from, to)
+	}
+	// Without a time, the search goes back an hour at a time and never starts at Unix time 0 or
+	// before the bound for a store where nothing expires: the store refuses those.
+	if resp := get(t, ui.URL+trace); resp.status != http.StatusOK || from <= 0 || time.Since(time.UnixMicro(from)) > (unlimitedSearchDays+1)*24*time.Hour || to-from > searchSlice.Microseconds() {
+		t.Fatalf("status %d, an untimed search covered %d to %d", resp.status, from, to)
+	}
+	if resp := get(t, ui.URL+trace+"&start="+finished.Format(time.RFC3339Nano)+"&end="+started.Format(time.RFC3339Nano)); resp.status != http.StatusBadRequest {
+		t.Fatalf("an unordered interval answered %d", resp.status)
+	}
+}
+
+// A long attempt is read an hour at a time, from its beginning, and all its hours are joined in
+// order; when the store gives up on an hour, what was read is returned and marked as part.
+func TestObservabilitySpansOfALongAttemptAreReadByTheHour(t *testing.T) {
+	var windows [][2]int64
+	giveUpAt := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query struct {
+				Start int64 `json:"start_time"`
+				End   int64 `json:"end_time"`
+			} `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		windows = append(windows, [2]int64{request.Query.Start, request.Query.End})
+		if giveUpAt > 0 && len(windows) == giveUpAt {
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"total":1,"hits":[{"span_id":"bbbbbbbbbbbbbbb%d","operation_name":"hour-%d"}]}`, len(windows), len(windows))
+	}))
+	defer upstream.Close()
+	client := &observabilityClient{base: upstream.URL, user: "a", password: "b", http: upstream.Client(), retentionKnown: true}
+	ui := httptest.NewServer(observabilityHandler(client))
+	defer ui.Close()
+	started := time.Date(2026, 11, 26, 20, 0, 0, 0, time.UTC)
+	finished := started.Add(3 * time.Hour)
+	url := ui.URL + "/api/observability/spans?trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&start=" + started.Format(time.RFC3339Nano) + "&end=" + finished.Format(time.RFC3339Nano)
+	var answer struct {
+		Spans   []observabilitySpan `json:"spans"`
+		Partial bool                `json:"partial"`
+	}
+	read := func() {
+		t.Helper()
+		windows, answer.Spans, answer.Partial = nil, nil, false
+		resp := get(t, url)
+		if resp.status != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.status, resp.body)
+		}
+		if err := json.Unmarshal([]byte(resp.body), &answer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read()
+	// Three hours and the margin at both ends are four windows of at most an hour, in order.
+	if len(windows) != 4 || windows[0][0] != started.Add(-traceSearchMargin).UnixMicro() || windows[3][1] != finished.Add(traceSearchMargin).UnixMicro() {
+		t.Fatalf("windows = %v", windows)
+	}
+	for i, window := range windows {
+		if window[1]-window[0] > searchSlice.Microseconds() || i > 0 && window[0] != windows[i-1][1] {
+			t.Fatalf("window %d = %v after %v", i, window, windows[:i])
+		}
+	}
+	if len(answer.Spans) != 4 || answer.Partial || answer.Spans[0].Operation != "hour-1" || answer.Spans[3].Operation != "hour-4" {
+		t.Fatalf("spans = %+v, partial %v", answer.Spans, answer.Partial)
+	}
+	giveUpAt = 3
+	read()
+	if len(answer.Spans) != 2 || !answer.Partial || len(windows) != 3 {
+		t.Fatalf("the store gave up on the third hour: %d spans, partial %v, %d windows", len(answer.Spans), answer.Partial, len(windows))
+	}
+}
+
+// A trace whose time is not known is looked for in the newest hours first. It is found in the
+// hour that holds it; and when the store gives up on an hour, the answer says that not all
+// was searched instead of failing.
+func TestObservabilitySpansWithoutATimeSearchBackwards(t *testing.T) {
+	var searches int
+	hitSlice, giveUpAt := 3, 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		searches++
+		switch {
+		case giveUpAt > 0 && searches == giveUpAt:
+			w.WriteHeader(http.StatusRequestTimeout)
+		case searches == hitSlice:
+			_, _ = io.WriteString(w, `{"total":1,"hits":[{"span_id":"bbbbbbbbbbbbbbbb","operation_name":"agent.process"}]}`)
+		default:
+			_, _ = io.WriteString(w, `{"total":0,"hits":[]}`)
+		}
+	}))
+	defer upstream.Close()
+	client := &observabilityClient{base: upstream.URL, user: "a", password: "b", http: upstream.Client(), retentionKnown: true}
+	ui := httptest.NewServer(observabilityHandler(client))
+	defer ui.Close()
+	var answer struct {
+		Spans   []observabilitySpan `json:"spans"`
+		Partial bool                `json:"partial"`
+	}
+	ask := func() {
+		t.Helper()
+		searches = 0
+		answer.Spans, answer.Partial = nil, false
+		resp := get(t, ui.URL+"/api/observability/spans?trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		if resp.status != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.status, resp.body)
+		}
+		if err := json.Unmarshal([]byte(resp.body), &answer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ask()
+	if len(answer.Spans) != 1 || answer.Partial || searches != 4 {
+		t.Fatalf("found in the third hour, with the hour before it taken along: %d spans, partial %v, %d searches", len(answer.Spans), answer.Partial, searches)
+	}
+	giveUpAt = 2
+	ask()
+	if len(answer.Spans) != 0 || !answer.Partial || searches != 2 {
+		t.Fatalf("the store gave up: %d spans, partial %v, %d searches", len(answer.Spans), answer.Partial, searches)
+	}
+	giveUpAt, hitSlice = 0, -1
+	ask()
+	// Every hour back to the bound is searched once.
+	if hours := unlimitedSearchDays * 24; len(answer.Spans) != 0 || answer.Partial || searches != hours {
+		t.Fatalf("no such trace: %d spans, partial %v, %d searches for %d hours", len(answer.Spans), answer.Partial, searches, hours)
+	}
+}
+
 func TestObservabilityHealthReportsDeliveryLoss(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -172,7 +325,9 @@ func TestLoadObservabilityRefusesLinkOutOfConfigDirectory(t *testing.T) {
 func TestUnlimitedRetentionDoesNotUseSevenDayWindow(t *testing.T) {
 	client := &observabilityClient{retentionKnown: true}
 	now := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
-	if got := client.searchStart(now); !got.Equal(time.Unix(0, 0)) {
+	// Wider than seven days, and never Unix time 0 or decades back: OpenObserve answers those
+	// with 400 "invalid time range" and 408 Request Timeout.
+	if got := client.searchStart(now); !got.Equal(now.AddDate(0, 0, -unlimitedSearchDays)) || unlimitedSearchDays <= 7 {
 		t.Fatalf("unlimited search starts at %v", got)
 	}
 	client.retentionDays = 7

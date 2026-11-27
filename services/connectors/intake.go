@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -176,17 +177,39 @@ func (s *service) getIntakeBinding(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, b)
 }
 
+func (s *service) postIntakeBinding(w http.ResponseWriter, r *http.Request) {
+	var b IntakeBinding
+	if err := readJSON(w, r, &b); err != nil {
+		s.fail(w, 400, err)
+		return
+	}
+	if strings.TrimSpace(b.ID) != "" {
+		s.fail(w, 400, errors.New("id must not be set when creating a binding"))
+		return
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		s.fail(w, 500, fmt.Errorf("generating binding id: %w", err))
+		return
+	}
+	s.saveIntakeBinding(w, r, id.String(), &b, http.StatusCreated)
+}
+
 func (s *service) putIntakeBinding(w http.ResponseWriter, r *http.Request) {
-	s.bindingMu.Lock()
-	defer s.bindingMu.Unlock()
 	id := r.PathValue("id")
 	var b IntakeBinding
 	if err := readJSON(w, r, &b); err != nil {
 		s.fail(w, 400, err)
 		return
 	}
+	s.saveIntakeBinding(w, r, id, &b, http.StatusOK)
+}
+
+func (s *service) saveIntakeBinding(w http.ResponseWriter, r *http.Request, id string, b *IntakeBinding, statusCode int) {
+	s.bindingMu.Lock()
+	defer s.bindingMu.Unlock()
 	b.ID = id
-	if err := validateBinding(&b); err != nil {
+	if err := validateBinding(b); err != nil {
 		s.fail(w, 422, err)
 		return
 	}
@@ -204,7 +227,7 @@ func (s *service) putIntakeBinding(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, all[i])
 		}
 	}
-	if createsCycle(filtered, &b) {
+	if createsCycle(filtered, b) {
 		s.fail(w, 422, errors.New("binding creates an automatic workflow trigger cycle"))
 		return
 	}
@@ -239,7 +262,7 @@ func (s *service) putIntakeBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.Revision = revision
-	writeJSON(w, 200, b)
+	writeJSON(w, statusCode, b)
 }
 
 func (s *service) deleteIntakeBinding(w http.ResponseWriter, r *http.Request) {

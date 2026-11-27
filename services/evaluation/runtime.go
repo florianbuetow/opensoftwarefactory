@@ -90,11 +90,13 @@ func (s *service) projectorLoop(ctx context.Context) {
 }
 
 func (s *service) projectPending(ctx context.Context) error {
+	version, readAt := s.pending.begin(), time.Now()
 	ids, err := s.listObjects(ctx, operationPrefix)
 	if err != nil {
 		return err
 	}
 	generations := map[time.Time]int64{}
+	unfinished := map[time.Time]bool{}
 	for _, id := range ids {
 		object, err := s.readObject(ctx, id)
 		if err != nil {
@@ -104,6 +106,7 @@ func (s *service) projectPending(ctx context.Context) error {
 		if json.Unmarshal(object.Data, &operation) != nil || operation.Phase == opComplete || operation.Phase == opCancelled {
 			continue
 		}
+		unfinished[operation.AffectedHour] = true
 		// A failed recovery is kept in the operation's error field and tried
 		// again on the next pass.
 		if recoverErr := s.recoverOperation(ctx, id, object.Revision, &operation); recoverErr != nil {
@@ -117,6 +120,8 @@ func (s *service) projectPending(ctx context.Context) error {
 			generations[hour] = operation.Generation
 		}
 	}
+	// Series requests answer from this reading instead of reading every operation again.
+	s.pending.store(version, unfinished, readAt)
 	hours := make([]time.Time, 0, len(generations))
 	for hour := range generations {
 		hours = append(hours, hour)
@@ -161,6 +166,14 @@ func (s *service) recoverOperation(ctx context.Context, id, revision string, op 
 	if op.Phase == opIntent {
 		current, err := s.readObject(ctx, op.ObjectID)
 		if err == nil && jsonEquivalent(current.Data, op.Replacement) {
+			if strings.HasPrefix(op.ObjectID, "measurements/") {
+				s.syncMeasurementToSQLDB(ctx, op.Replacement)
+			} else if strings.HasPrefix(op.ObjectID, costPrefix+"/") {
+				var cost CurrentCost
+				if json.Unmarshal(op.Replacement, &cost) == nil {
+					s.syncCostToSQLDB(ctx, &cost)
+				}
+			}
 			op.Phase = nextPhase()
 			op.Error = ""
 			err = persist()
@@ -183,6 +196,14 @@ func (s *service) recoverOperation(ctx context.Context, id, revision string, op 
 				op.Error = writeErr.Error()
 				_ = persist()
 				return writeErr
+			}
+			if strings.HasPrefix(op.ObjectID, "measurements/") {
+				s.syncMeasurementToSQLDB(ctx, op.Replacement)
+			} else if strings.HasPrefix(op.ObjectID, costPrefix+"/") {
+				var cost CurrentCost
+				if json.Unmarshal(op.Replacement, &cost) == nil {
+					s.syncCostToSQLDB(ctx, &cost)
+				}
 			}
 			op.Phase = nextPhase()
 			op.Error = ""
@@ -248,6 +269,7 @@ func (s *service) recoverOperation(ctx context.Context, id, revision string, op 
 			_ = persist()
 			return err
 		}
+		s.syncCostToSQLDB(ctx, op.CostReplacement)
 		op.Phase = opProjectionPending
 		op.Error = ""
 		err = persist()

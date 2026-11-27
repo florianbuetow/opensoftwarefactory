@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -72,6 +73,8 @@ type Activities struct {
 	Connectors Connectors
 	// EvaluationURL is the base URL of the evaluation service.
 	EvaluationURL string
+	// SQLDBURL is the base URL of the sqldb read-model service.
+	SQLDBURL string
 }
 
 // FinishRunRequest names the metadata of a run and how the run ended.
@@ -100,7 +103,8 @@ func (a *Activities) FinishRun(ctx context.Context, req FinishRunRequest) error 
 	if _, done := fields["finished"]; done {
 		return nil
 	}
-	fields["finished"], _ = json.Marshal(time.Now().UTC().Format(time.RFC3339))
+	finishedAt := time.Now().UTC().Format(time.RFC3339)
+	fields["finished"], _ = json.Marshal(finishedAt)
 	fields["status"], _ = json.Marshal(req.Status)
 	delete(fields, "error")
 	if req.Error != "" {
@@ -111,6 +115,25 @@ func (a *Activities) FinishRun(ctx context.Context, req FinishRunRequest) error 
 	}
 	if err = a.Store.Put(ctx, req.Metadata, data, Meta{Creator: sessionCreator, TraceID: req.TraceID}); err != nil {
 		return fmt.Errorf("writing %q: %w", req.Metadata, err)
+	}
+	if a.SQLDBURL != "" && a.HTTPClient != nil {
+		if baseURL, parseErr := url.Parse(a.SQLDBURL); parseErr == nil {
+			payload, _ := json.Marshal(map[string]any{
+				"trace_id": req.TraceID,
+				"status":   req.Status,
+				"finished": finishedAt,
+				"error":    req.Error,
+			})
+			reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if httpReq, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPut, baseURL.String(), bytes.NewReader(payload)); reqErr == nil {
+				httpReq.URL.Path = strings.TrimRight(baseURL.Path, "/") + "/api/runs/" + url.PathEscape(req.TraceID)
+				httpReq.Header.Set("Content-Type", "application/json")
+				if resp, doErr := a.HTTPClient.Do(httpReq); doErr == nil {
+					_ = resp.Body.Close()
+				}
+			}
+		}
 	}
 	return nil
 }

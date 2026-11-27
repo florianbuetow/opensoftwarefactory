@@ -106,7 +106,7 @@ const IntakeLogic = (() => {
     if (state.error) { rows.replaceChildren(); fill(empty, errorPanel(state.error)); fill(main); return; }
     fill(empty, state.loaded && !listed.length ? emptyPanel("No event triggers yet") : null);
     rows.replaceChildren(...listed.map((t) => {
-      const li = h("li", { role: "option", tabIndex: 0, "aria-selected": String(t.id === state.current?.id) }, h("div", { className: "row-title" }, nameOf(t)));
+      const li = h("li", { role: "option", tabIndex: 0, "aria-selected": String(t === state.current || (!!t.id && t.id === state.current?.id)) }, h("div", { className: "row-title" }, nameOf(t)));
       li.onclick = () => select(t);
       li.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); select(t); } };
       li.oncontextmenu = (ev) => openMenu(ev, [
@@ -263,7 +263,7 @@ const IntakeLogic = (() => {
   }
 
   async function select(t) {
-    if (t.id === state.current?.id || !(await leave())) return;
+    if (t === state.current || (t.id && t.id === state.current?.id) || !(await leave())) return;
     open(t);
   }
 
@@ -295,7 +295,7 @@ const IntakeLogic = (() => {
     if (!(await leave())) return;
     const source = await chooseSource();
     if (!source) return;
-    open({ id: crypto.randomUUID(), source, enabled: false });
+    open({ source, enabled: false });
     $("intake-name")?.focus();
   }
 
@@ -311,11 +311,14 @@ const IntakeLogic = (() => {
     const value = L.body(state.current, state.form);
     state.saving = true; sync();
     try {
-      await measurementUI.write(`${API}/${enc(value.id)}`, value, value.revision);
-      state.stored = L.draft(value); // nothing is unsaved while the list is read again
-      remember(value.id);
+      const saved = state.current.revision
+        ? await measurementUI.write(`${API}/${enc(value.id)}`, value, value.revision)
+        : await api("POST", API, value);
+      const id = saved?.id || value.id;
+      state.stored = L.draft(saved || value); // nothing is unsaved while the list is read again
+      if (id) remember(id);
       notify("Saved");
-      await load(value.id);
+      await load(id);
     } catch (error) { notify(`Not saved: ${error.message}`, "error"); }
     finally { state.saving = false; sync(); }
   }

@@ -19,6 +19,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -86,7 +87,8 @@ func run() error {
 	w.RegisterWorkflowWithOptions(pipeline.Team, workflow.RegisterOptions{Name: pipeline.TeamWorkflowName})
 	w.RegisterWorkflowWithOptions(pipeline.Recalculation, workflow.RegisterOptions{Name: pipeline.RecalculationWorkflowName})
 	agents := newAgentRegistry(blobs.Client)
-	w.RegisterActivity(&pipeline.Activities{Store: blobs, Conditional: blobs, EvaluationURL: envString("EVALUATION_URL", "http://evaluation:8080"), HTTPClient: blobs.Client, LoadDefinitions: func() ([]pipeline.Definition, error) {
+	sqldbURL := strings.TrimRight(envString("SQLDB_URL", ""), "/")
+	w.RegisterActivity(&pipeline.Activities{Store: blobs, Conditional: blobs, EvaluationURL: envString("EVALUATION_URL", "http://evaluation:8080"), SQLDBURL: sqldbURL, HTTPClient: blobs.Client, LoadDefinitions: func() ([]pipeline.Definition, error) {
 		cfg, snapshotErr := workflows.snapshot()
 		return cfg.Workflows, snapshotErr
 	}, DescribeAgent: agentDescriber(agents, logger), LoadAgentSettings: func(ctx context.Context, ref string) (pipeline.AgentExecutionSettings, error) {
@@ -108,7 +110,7 @@ func run() error {
 
 	s := &server{
 		workflows: workflows, blobs: blobs, runner: temporalRunner{c}, agents: agents.settings, logger: logger,
-		agentURL: strings.TrimRight(envString("AGENT_URL", "http://agent:8080"), "/"), httpClient: blobs.Client,
+		agentURL: strings.TrimRight(envString("AGENT_URL", "http://agent:8080"), "/"), sqldbURL: sqldbURL, httpClient: blobs.Client,
 	}
 	httpServer := &http.Server{Addr: *addr, Handler: otelhttp.NewHandler(s.routes(), "orchestrator.http"), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -151,11 +153,19 @@ func (r temporalRunner) StartExecution(ctx context.Context, in *pipeline.Input) 
 	run, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        in.TraceID,
 		TaskQueue: pipeline.TaskQueue,
-		Memo:      map[string]any{"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(&in.Definition), "trace_id": in.TraceID, "artifact_prefix": in.Prefix},
+		// A run ID is new for every run: one that Temporal already knows is refused, so a
+		// start never continues or repeats an earlier run.
+		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
+		Memo:                                     map[string]any{"workflow": in.Definition.Name, "workflow_version": pipeline.DefinitionVersion(&in.Definition), "trace_id": in.TraceID, "artifact_prefix": in.Prefix},
 	}, pipeline.WorkflowName, in)
 	if err != nil {
-		// A deadline or transport error can be ambiguous: Temporal may have accepted the
-		// deterministic workflow ID even though this client missed the response.
+		var already *serviceerror.WorkflowExecutionAlreadyStarted
+		if errors.As(err, &already) {
+			return "", fmt.Errorf("run id %s is already in use: %w", in.TraceID, err)
+		}
+		// A deadline or transport error can be ambiguous: Temporal may have accepted this
+		// start even though this client missed the response.
 		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if desc, describeErr := r.c.DescribeWorkflowExecution(checkCtx, in.TraceID, ""); describeErr == nil && desc.GetWorkflowExecutionInfo().GetExecution().GetRunId() != "" {

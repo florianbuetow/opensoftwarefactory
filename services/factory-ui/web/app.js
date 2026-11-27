@@ -15,6 +15,7 @@ const PAGES = [
   { name: "intake", title: "Intake", icon: "connector", tip: "Triggers that start workflows from connector events" },
   { name: "workflows", title: "Workflows", icon: "workflow", tip: "Workflow graphs" },
   { name: "runs", title: "Runs", icon: "run", tip: "Every run, newest first" },
+  { name: "devpods", title: "Dev Pods", icon: "cluster", tip: "The dev pods of runs: their files, commit log, and diff" },
   { name: "events", title: "Events", icon: "history", tip: "Workflow event history" },
   { name: "decisions", title: "Decisions", icon: "gate", tip: "Gates waiting for a person" },
   { name: "sessions", title: "Sessions", icon: "chat", tip: "Interactive sessions waiting for a person" },
@@ -22,6 +23,7 @@ const PAGES = [
   { name: "policies", title: "Policies", icon: "policy", tip: "Versioned policies" },
   { name: "skills", title: "Skills", icon: "skill", tip: "Versioned skills" },
   { name: "mcp-gateway", title: "MCP Gateway", icon: "gateway", tip: "MCP passthrough services" },
+  { name: "tools", title: "Tools", icon: "gateway", tip: "Every tool the MCP services offer" },
   { name: "artifacts", title: "Blobstore", icon: "memory", tip: "Runs, tasks, templates, and artifacts" },
   { name: "overview", title: "Overview", icon: "metrics", tip: "The factory now: what waits for you, what runs, and the last 24 hours" },
   { name: "metrics", title: "Metrics", icon: "metrics", tip: "Factory costs, tokens, runtime, and quality metrics over a period" },
@@ -31,15 +33,15 @@ const PAGES = [
   { name: "system-diagram", title: "System Diagram", icon: "diagram", tip: "Factory components and connections" },
 ];
 // Pages without a menu item: opened from another page, whose menu item stays the active one.
-const SUBPAGES = { teams: { name: "teams", title: "Team", menu: "runs" }, devpods: { name: "devpods", title: "Dev pod", menu: "connectors" } };
+const SUBPAGES = { teams: { name: "teams", title: "Team", menu: "runs" } };
 Object.assign(SUBPAGES, { judges: { name: "judges", title: "Judges", menu: "evaluations" }, pricing: { name: "pricing", title: "Prices", menu: "metrics" } });
 
 // Top-level navigation groups and their destination pages.
 const NAV_GROUPS = [
   { name: "Main", icon: "metrics", pages: ["overview", "metrics", "cluster", "system-diagram"] },
-  { name: "Factory", icon: "workflow", pages: ["intake", "workflows", "agents", "runs", "evaluations", "events"] },
+  { name: "Factory", icon: "workflow", pages: ["intake", "workflows", "agents", "runs", "devpods", "evaluations", "events"] },
   { name: "Tasks", icon: "gate", pages: ["decisions", "sessions"] },
-  { name: "Connectors", icon: "connector", pages: ["connectors", "mcp-gateway"] },
+  { name: "Connectors", icon: "connector", pages: ["connectors", "mcp-gateway", "tools"] },
   { name: "Context", icon: "memory", pages: ["policies", "skills", "artifacts"], planned: [{ before: "artifacts", title: "Memory", note: "Planned feature", icon: "memory" }] },
 ];
 
@@ -76,6 +78,7 @@ const ICONS = {
   up: '<path d="M4 10l4-4 4 4"/>',
   down: '<path d="M4 6l4 4 4-4"/>',
   close: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
+  expand: '<path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9"/>',
 };
 
 // icon returns an inline SVG element for a name in ICONS.
@@ -1030,40 +1033,41 @@ const runIndex = {
     traceListings.forget(trace);
   },
 
-  // refresh lists runs/, removes cached runs no longer present, and loads new records. A listing
+  // refresh loads the run index from sqldb in a single query, removes cached runs no longer
+  // present, and seeds terminal statuses so Overview and Runs do not fan out per run. A listing
   // that overlaps a local removal is asked again, so its older snapshot cannot restore that run.
   refresh() {
     this.loading ??= (async () => {
-      let traces;
-      while (traces === undefined) {
+      let runs;
+      while (runs === undefined) {
         const revision = this.revision;
-        try { traces = (await api("GET", "/api/blobs/list/runs")).directories; }
-        catch (e) { if (/not found/i.test(e.message)) traces = []; else throw e; }
-        if (revision !== this.revision) traces = undefined;
+        const answer = await api("GET", "/api/sqldb/runs");
+        runs = Array.isArray(answer?.runs) ? answer.runs : [];
+        if (revision !== this.revision) runs = undefined;
       }
-      const present = new Set(traces);
+      const present = new Set(runs.map((r) => r.trace_id));
       for (const trace of new Set([...this.records.keys(), ...this.statuses.keys()])) {
         if (!present.has(trace)) this.forget(trace);
       }
-      const missing = traces.filter((t) => !this.records.has(t));
-      const generations = new Map(missing.map((t) => [t, this.generations.get(t) || 0]));
-      await pool(missing, 8, async (t) => {
-        const generation = generations.get(t);
-        const current = () => generation === (this.generations.get(t) || 0);
-        if (!current()) return;
-        try {
-          const record = { trace_id: t, ...JSON.parse((await loadBlob(`runs/${t}/run.json`)).text) };
-          if (current()) this.records.set(t, record);
-        } catch {
-          if (!current()) return;
-          // Runs from before run.json: name them by the time of their input.
-          try {
-            const meta = await api("GET", `/api/blobs/meta/runs/${t}/input`);
-            const st = await this.status(t, 60000, "");
-            if (current()) this.records.set(t, { trace_id: t, workflow: st.workflow || "", started: st.started || meta.created, started_by: meta.creator || "", input_artifact: `runs/${t}/input` });
-          } catch { /* not a run folder */ }
+      const now = Date.now();
+      for (const r of runs) {
+        this.records.set(r.trace_id, r);
+        if (r.status && r.status !== "Running") {
+          const prev = this.statuses.get(r.trace_id);
+          if (!prev || prev.status === "Running") {
+            this.statuses.set(r.trace_id, {
+              ...(prev || {}),
+              status: r.status,
+              workflow: r.workflow || prev?.workflow || "",
+              started: r.started || prev?.started || "",
+              artifacts: prev?.artifacts || {},
+              error: r.error || "",
+              blocked: r.status === "Blocked" ? String(r.error || "") : "",
+              at: now,
+            });
+          }
         }
-      });
+      }
     })().finally(() => { this.loading = null; });
     return this.loading;
   },
@@ -1225,6 +1229,7 @@ async function refreshDecisions() {
 
 // showDecisionsBadge shows how many gates wait on the menu item, and tells the Runs page.
 function showDecisionsBadge() {
+  updateNavCounts();
   const badge = $("decisions-badge");
   badge.textContent = decisionsState.pending.length || "";
   badge.hidden = !decisionsState.pending.length;
@@ -1247,6 +1252,7 @@ async function refreshSessions() {
 
 // showSessionsBadge shows how many sessions wait on the menu item, and tells the pages.
 function showSessionsBadge() {
+  updateNavCounts();
   const badge = $("sessions-badge");
   badge.textContent = sessionsState.pending.length || "";
   badge.hidden = !sessionsState.pending.length;
@@ -1363,7 +1369,8 @@ const PANELS = {
   ],
   runs: [
     { column: ".list-panel", prop: "--col-list", min: 200, max: 480 },
-    { column: ".run-detail", prop: "--col-detail", min: 320, max: 720, edge: "left" },
+    // A run's detail may take all the room the workflow column can spare, to read long evidence.
+    { column: ".run-detail", prop: "--col-detail", min: 320, max: Infinity, edge: "left" },
   ],
   evaluations: [
     { column: ".list-panel", prop: "--col-list", min: 200, max: 480 },
@@ -1382,6 +1389,7 @@ const PANELS = {
     { column: ".teamview-files", prop: "--col-detail", min: 320, max: 720, edge: "left" },
   ],
   judges: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
+  tools: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   agents: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   policies: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
   skills: [{ column: ".list-panel", prop: "--col-list", min: 200, max: 480 }],
@@ -1649,6 +1657,26 @@ function setPageActions(...nodes) {
 const pageHrefs = new Map();
 let navPopover = null, navTrigger = null;
 
+// The pages of the Tasks menu that count what waits for a person. The menu item carries the
+// counts, and so does each page's row in the open menu, so it is clear where the tasks wait.
+const NAV_COUNTS = {
+  decisions: { count: () => decisionsState.pending.length, noun: "gate" },
+  sessions: { count: () => sessionsState.pending.length, noun: "session" },
+};
+function setNavCount(badge, name) {
+  const n = NAV_COUNTS[name].count();
+  badge.textContent = n ? String(n) : "";
+  badge.hidden = !n;
+  badge.title = `${n} ${NAV_COUNTS[name].noun}${n === 1 ? "" : "s"} waiting`;
+  return badge;
+}
+// navCountBadge is the count on a page's row in the open menu, or null for a page that counts nothing.
+const navCountBadge = (name) => (NAV_COUNTS[name] ? setNavCount(h("span", { className: "badge", dataset: { count: name } }), name) : null);
+// updateNavCounts keeps the counts of an open menu in step with the menu item's.
+function updateNavCounts() {
+  for (const link of navPopover?.children || []) for (const badge of link.children || []) if (badge.dataset?.count) setNavCount(badge, badge.dataset.count);
+}
+
 function closeNavPopover(returnFocus = false) {
   if (!navPopover || navPopover.hidden) return;
   navPopover.hidden = true;
@@ -1669,7 +1697,7 @@ function openNavPopover(trigger, group) {
     }
     const page = PAGES.find((item) => item.name === name);
     const label = name === "connectors" ? "Git" : page.title;
-    const link = h("a", { href: pageHrefs.get(name) || `#${name}`, role: "menuitem", dataset: { page: name }, title: page.tip }, icon(page.icon), h("span", {}, label));
+    const link = h("a", { href: pageHrefs.get(name) || `#${name}`, role: "menuitem", dataset: { page: name }, title: page.tip }, icon(page.icon), h("span", {}, label), navCountBadge(name));
     if (name === activeTab || SUBPAGES[activeTab]?.menu === name) link.setAttribute("aria-current", "page");
     link.onclick = () => closeNavPopover(true);
     entries.push(link);

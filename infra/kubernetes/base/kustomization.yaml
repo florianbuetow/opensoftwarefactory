@@ -8,6 +8,7 @@ resources:
   - telemetry-collector
   - temporal
   - blobstore
+  - sqldb
   - agent-registry
   - policy-registry
   - skill-registry

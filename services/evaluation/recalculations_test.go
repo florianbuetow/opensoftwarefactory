@@ -22,10 +22,10 @@ func TestRecalculationReportsProjectionPendingThenComplete(t *testing.T) {
 	occurred := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	zero := int64(0)
 	usage := Measurement{SchemaVersion: 1, ID: "recalc-u", Kind: "usage", RunID: runA, ExecutionID: "exec", OccurredAt: occurred, Vendor: "v", Model: "m", Effort: "none", Modes: &map[string]string{}, InputTokens: &zero, CachedInputTokens: &zero, UncachedInputTokens: &zero, OutputTokens: &zero, Status: "reported", Missing: []string{}, RawUsage: json.RawMessage(`{}`)}
-	price := Price{ID: "p", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 1000, InputUncached: "1", InputCached: "1", Output: "1"}
+	price := Price{Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 1000, InputUncached: "1", InputCached: "1", Output: "1"}
 	f.mu.Lock()
 	f.objects[measurementObject("usage", usage.ID)], _ = json.Marshal(usage)
-	f.objects[pricePrefix+"/p.json"], _ = json.Marshal(price)
+	f.objects[price.Key().objectID()], _ = json.Marshal(price)
 	f.mu.Unlock()
 	s := &service{blobs: blob.URL, orchestrator: orchestrator.URL, http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
 	server := httptest.NewServer(s.routes())

@@ -147,6 +147,19 @@ const ConnectorsLogic = (() => {
     return { id, path, view: path ? "file" : params.get("view") === "log" ? "log" : "diff" };
   }
 
+  // agentFiles picks, from the entries of a pod's top folder, the files that instruct agents
+  // working in the repository (AGENTS.md and its counterparts for other tools), in listed order.
+  const AGENT_FILES = /^(agents|claude|gemini|copilot-instructions)\.md$|^\.(cursorrules|windsurfrules|clinerules)$/i;
+  const agentFiles = (entries) => (entries || []).filter((e) => !e.dir && AGENT_FILES.test(e.name));
+
+  // destroyQuestion asks before a dev pod is shut down. A pod that a run still uses says so
+  // first, with the word Warning and the run's name: that run loses its working copy.
+  function destroyQuestion(pod, runLabel = (trace) => trace) {
+    const held = (pod.runs || []).length;
+    const warning = held === 1 ? ` Warning: a run still uses it (${runLabel(pod.runs[0])}).` : held ? ` Warning: ${held} runs still use it.` : "";
+    return `Destroy the dev pod on ${pod.workBranch || pod.repository}?${warning} Work that was not pushed is lost.`;
+  }
+
   // childPath joins a folder of the pod and a name in it; the root is "" or ".".
   const childPath = (dir, name) => (!dir || dir === "." ? name : `${String(dir).replace(/\/+$/, "")}/${name}`);
 
@@ -162,7 +175,7 @@ const ConnectorsLogic = (() => {
 
   return {
     KINDS, CREDENTIALS, kindWord, accessWord, repositories, repositoryLink, devPods, fileList, fileContent, gitOutput,
-    repositoryBody, formProblems, timeLeft, phaseState, podHash, parsePodHash, childPath, diffLines,
+    repositoryBody, formProblems, timeLeft, phaseState, podHash, parsePodHash, childPath, agentFiles, destroyQuestion, diffLines,
   };
 })();
 
@@ -305,7 +318,7 @@ const ConnectorsLogic = (() => {
   // ---- Dev pods ----
 
   async function destroyPod(pod) {
-    if (!(await confirmAction(`Destroy the dev pod on ${pod.workBranch || pod.repository}? Work that was not pushed is lost.`, "Destroy"))) return;
+    if (!(await confirmAction(L.destroyQuestion(pod, runLabel), "Destroy"))) return;
     try {
       await api("DELETE", `${API}/devpods/${enc(pod.id)}`);
       setSaveState("Destroyed");
@@ -319,13 +332,14 @@ const ConnectorsLogic = (() => {
     if (!state.podsLoaded) return null;
     if (!state.pods.length) return emptyPanel("No dev pods");
     const now = Date.now();
-    return dataTable(["State", "Repository", "Work branch", "Runs", "Expires", ""], state.pods.map((pod) => {
+    return dataTable(["State", "Name", "Repository", "Work branch", "Runs", "Expires", ""], state.pods.map((pod) => {
       const left = L.timeLeft(pod, now);
       const runs = pod.runs.flatMap((trace, i) => [i ? ", " : null, h("a", { href: `#runs/${enc(trace)}`, title: "Opens the run in Runs" }, runLabel(trace))]);
       const destroy = () => destroyPod(pod);
       const tr = h("tr", {},
         h("td", {}, statusChip(L.phaseState(pod.phase), pod.phase)),
-        h("td", {}, pod.name ? `${pod.repository} (${pod.name})` : pod.repository),
+        h("td", {}, pod.name || h("span", { className: "muted", title: "The workflow gave this dev pod no name" }, "Unnamed")),
+        h("td", {}, pod.repository),
         h("td", { className: "name-cell", dataset: { full: pod.workBranch } }, pod.workBranch),
         h("td", { className: "opt" }, runs.length ? runs : h("span", { className: "muted" }, "No runs")),
         h("td", { title: pod.expires && !pod.runs.length ? fullTime(pod.expires) : pod.runs.length ? "Kept while a run that uses it is open" : undefined }, left),
@@ -338,7 +352,7 @@ const ConnectorsLogic = (() => {
         ["Destroy", destroy, "danger", "Deletes the dev pod now; work that was not pushed is lost"],
       ]));
       return tr;
-    }), { name: 2, optional: [3] });
+    }), { name: 3, optional: [4] });
   }
 
   // render draws the page; without force it redraws only when something changed, and never
@@ -380,11 +394,15 @@ const ConnectorsLogic = (() => {
   const L = ConnectorsLogic;
   const enc = encodeURIComponent;
   const LOG = "@log", DIFF = "@diff";
-  const state = { id: "", pod: null, gone: false, want: { view: "diff", path: "" }, shown: "", seq: 0, timer: null, treeFor: "" };
+  const state = { id: "", pod: null, pods: [], gone: false, want: { view: "diff", path: "" }, shown: "", seq: 0, timer: null, treeFor: "" };
   const detail = $("devpod-detail");
   const tree = createTree($("devpod-tree"), {
     onSelect(n) {
       if (n.kind === "dir") return; // a folder only opens
+      if (n.kind === "pod") { if (n.pod !== state.id) location.hash = L.podHash(n.pod); return; } // a pod row opens its pod; the one on show only folds
+      // A file picked under Agent stays marked there, though it is also listed under Filesystem.
+      state.agentPick = n.agent ? n.path : "";
+      if (n.agent) { location.hash = L.podHash(state.id, { path: n.path }); return; }
       location.hash = L.podHash(state.id, n.id === LOG ? { view: "log" } : n.id === DIFF ? { view: "diff" } : { path: n.id });
     },
   });
@@ -401,7 +419,22 @@ const ConnectorsLogic = (() => {
     const p = state.pod;
     const sep = () => h("span", { className: "sep" }, "·");
     return h("div", { className: "run-meta" },
-      p ? [statusChip(L.phaseState(p.phase), p.phase), sep(), h("span", {}, p.repository), sep(), h("span", { title: `Work branch, created from ${p.sourceBranch}` }, p.workBranch)] : statusChip("idle", "Unknown"));
+      p ? [statusChip(L.phaseState(p.phase), p.phase), sep(), h("span", {}, h("span", { className: "muted" }, "Repository "), p.repository),
+        sep(), h("span", { title: `Created from ${p.sourceBranch}` }, h("span", { className: "muted" }, "Work branch "), p.workBranch),
+        h("button", { type: "button", className: "danger pod-destroy", title: DESTROY_TIP, onclick: () => destroyPod(p) }, "Destroy")] : statusChip("idle", "Unknown"));
+  }
+
+  // destroyPod shuts a dev pod down after asking (see ConnectorsLogic.destroyQuestion).
+  const DESTROY_TIP = "Shuts the dev pod down now; work that was not pushed is lost";
+  async function destroyPod(pod) {
+    if (!(await confirmAction(L.destroyQuestion(pod, runLabel), "Destroy"))) return;
+    try {
+      await api("DELETE", `${API}/${enc(pod.id)}`);
+      setSaveState("Destroyed");
+    } catch (e) { setStatus(`Not destroyed: ${e.message}`, "error"); return; }
+    // From the pod's own view the list opens; the list itself is read again.
+    if (state.id) location.hash = "#devpods";
+    else { state.shown = ""; showList(state.seq); }
   }
 
   function showGone() {
@@ -410,29 +443,49 @@ const ConnectorsLogic = (() => {
     fill(detail, emptyPanel("This dev pod no longer exists"));
   }
 
-  // loadTree lists the pod's top folder under the two views of its history.
+  // loadTree lists what the pod view shows in three groups, all open, so it is clear what is
+  // what: Git holds the two views read from the pod's history (they are not files), Agent the
+  // files in the top folder that instruct agents (AGENTS.md and the like, which are also files
+  // of the pod), and Filesystem every folder and file of the pod.
+  const GIT = "@git", AGENT = "@agent", FILES = "@files", POD = (id) => `pod:${id}`;
   async function loadTree(seq) {
     const p = state.pod;
-    const roots = [
-      { id: DIFF, label: p?.sourceBranch ? `Diff against ${p.sourceBranch}` : "Diff", kind: "view" },
-      { id: LOG, label: "Commit log", kind: "view" },
+    const views = [
+      { id: DIFF, label: p?.sourceBranch ? `Diff against ${p.sourceBranch}` : "Diff", kind: "view", title: "The pod's changes compared with its source branch, as git shows them; not a file" },
+      { id: LOG, label: "Commit log", kind: "view", title: "The commits on the work branch, as git lists them; not a file" },
     ];
-    let files = [], problem = "";
-    try { files = fileNodes("", L.fileList(await api("GET", `${API}/${enc(state.id)}/files?path=.`))); }
+    let files = [], agents = [], problem = "";
+    try {
+      const list = L.fileList(await api("GET", `${API}/${enc(state.id)}/files?path=.`));
+      files = fileNodes("", list);
+      agents = L.agentFiles(list.entries).map((e) => ({ id: `${AGENT}/${e.name}`, path: e.name, agent: true, label: e.name, kind: "file", full: e.name, title: formatSize(e.size) }));
+    }
     catch (e) { if (seq !== state.seq) return; if (gone(e)) { showGone(); return; } problem = e.message; }
     if (seq !== state.seq) return;
     tree.invalidate();
-    tree.setRoots([...roots, ...files]);
+    // The sidebar lists every live dev pod, so another one is a click away; the pod on show is
+    // open and holds the three groups. A pod that is not on show is a plain row that opens it.
+    const groups = [
+      { id: GIT, label: "Git", kind: "dir", title: "Views of the pod's git history", children: views },
+      { id: AGENT, label: "Agent", kind: "dir", title: "The files in the top folder that instruct agents working in this repository", children: agents },
+      { id: FILES, label: "Filesystem", kind: "dir", title: "Every folder and file in the pod's working copy", children: files },
+    ];
+    const pods = state.pods.some((q) => q.id === state.id) ? state.pods : [...state.pods, ...(p ? [p] : [])];
+    tree.setRoots(pods.map((q) => (q.id === state.id
+      ? { id: POD(q.id), pod: q.id, label: podLabel(q), kind: "pod", full: podLabel(q), title: podTip(q, "The dev pod on show"), children: groups }
+      : { id: POD(q.id), pod: q.id, label: podLabel(q), kind: "pod", full: podLabel(q), title: podTip(q, "Opens this dev pod") })));
     if (problem) setStatus(`Cannot list the files: ${problem}`, "error");
+    for (const group of [GIT, AGENT, FILES]) await tree.reveal([POD(state.id), group]);
     await revealSelection();
   }
 
   // revealSelection opens the folders above the shown file and marks its row.
   async function revealSelection() {
     const { view, path } = state.want;
-    if (view !== "file") { tree.select(view === "log" ? LOG : DIFF); return; }
+    if (view !== "file") { await tree.reveal([POD(state.id), GIT]); tree.select(view === "log" ? LOG : DIFF); return; }
+    if (state.agentPick === path) { await tree.reveal([POD(state.id), AGENT]); tree.select(`${AGENT}/${path}`); return; }
     const parts = path.split("/");
-    await tree.reveal(parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/")));
+    await tree.reveal([POD(state.id), FILES, ...parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"))]);
     tree.select(path);
   }
 
@@ -484,6 +537,7 @@ const ConnectorsLogic = (() => {
     try {
       const pods = L.devPods(await api("GET", API));
       if (seq !== state.seq) return;
+      state.pods = pods;
       state.pod = pods.find((p) => p.id === state.id) || null;
       if (!state.pod) { showGone(); return; }
     } catch (e) {
@@ -492,19 +546,82 @@ const ConnectorsLogic = (() => {
       return;
     }
     state.gone = false;
-    if (state.treeFor !== state.id) { state.treeFor = state.id; await loadTree(seq); } else await revealSelection();
+    // The tree is built once per pod, and again when the set of live pods changes.
+    const treeKey = `${state.id}|${state.pods.map((q) => q.id).join(",")}`;
+    if (state.treeFor !== treeKey) { state.treeFor = treeKey; await loadTree(seq); } else await revealSelection();
     if (seq !== state.seq || state.gone) return;
     await loadView(seq);
+  }
+
+  // The page without a pod (#devpods, the Factory menu item) lists the live dev pods: one row
+  // each in the sidebar and in the table, and a row opens its pod.
+  const runLabel = (trace) => (runIndex.records.has(trace) ? runIndex.label(trace) : midTruncate(trace, 13));
+  // A dev pod is called by its own name; one a workflow did not name is called by its work
+  // branch. The repository it works on is never part of that name: it has its own column and
+  // its own labelled place in the pod's status line.
+  const podLabel = (p) => p.name || p.workBranch || p.id;
+  const podTip = (p, lead) => `${lead} · Repository ${p.repository}`;
+  const VIEW_TIP = "Opens the pod's files, its commit log and its diff against the source branch";
+  function podList(pods) {
+    const now = Date.now();
+    return dataTable(["State", "Name", "Repository", "Work branch", "Runs", "Expires", ""], pods.map((pod) => {
+      const stop = (ev) => ev.stopPropagation();
+      const runs = pod.runs.flatMap((trace, i) => [i ? ", " : null, h("a", { href: `#runs/${enc(trace)}`, title: "Opens the run in Runs", onclick: stop, onkeydown: stop }, runLabel(trace))]);
+      const tr = h("tr", {},
+        h("td", {}, statusChip(L.phaseState(pod.phase), pod.phase)),
+        h("td", {}, pod.name || h("span", { className: "muted", title: "The workflow gave this dev pod no name" }, "Unnamed")),
+        h("td", {}, pod.repository),
+        h("td", { className: "name-cell", dataset: { full: pod.workBranch } }, pod.workBranch),
+        h("td", { className: "opt" }, runs.length ? runs : h("span", { className: "muted" }, "No runs")),
+        h("td", { title: pod.expires && !pod.runs.length ? fullTime(pod.expires) : pod.runs.length ? "Kept while a run that uses it is open" : undefined }, L.timeLeft(pod, now)),
+        h("td", { className: "fit connector-actions" },
+          h("a", { className: "step-action", href: L.podHash(pod.id), title: VIEW_TIP, onclick: stop, onkeydown: stop }, "View files"),
+          h("button", { type: "button", className: "danger", title: DESTROY_TIP, onclick: (ev) => { ev.stopPropagation(); destroyPod(pod); }, onkeydown: stop }, "Destroy")));
+      tr.addEventListener("contextmenu", (ev) => openMenu(ev, [
+        ["View files", () => { location.hash = L.podHash(pod.id); }, "", VIEW_TIP],
+        "-",
+        ["Destroy", () => destroyPod(pod), "danger", DESTROY_TIP],
+      ]));
+      return clickableRow(tr, () => { location.hash = L.podHash(pod.id); });
+    }), { name: 3, optional: [4] });
+  }
+  async function showList(seq, quiet = false) {
+    let pods;
+    try { pods = L.devPods(await api("GET", API)); }
+    catch (e) {
+      if (seq !== state.seq) return;
+      if (!quiet) { tree.setRoots([]); fill(detail, errorPanel(`Cannot list the dev pods: ${e.message}`)); }
+      return;
+    }
+    if (seq !== state.seq) return;
+    const key = JSON.stringify(["list", pods, pods.some((p) => !p.runs.length) ? Math.floor(Date.now() / 60000) : 0, pods.flatMap((p) => p.runs).map(runLabel)]);
+    if (key === state.shown) return;
+    state.shown = key;
+    tree.invalidate();
+    tree.setRoots(pods.map((p) => ({ id: POD(p.id), pod: p.id, label: podLabel(p), kind: "pod", full: podLabel(p), title: podTip(p, "Opens this dev pod") })));
+    fill(detail, pods.length ? podList(pods) : emptyPanel("No dev pods"));
   }
 
   tabs.devpods = {
     show(rest) {
       const at = L.parsePodHash(rest);
-      if (!at.id) { location.replace("#connectors"); return; }
+      if (!at.id) {
+        const seq = ++state.seq;
+        state.id = ""; state.pod = null; state.treeFor = ""; state.shown = ""; state.gone = false;
+        tree.setRoots([]);
+        fill(detail);
+        showList(seq);
+        runIndex.refresh().then(() => { if (seq === state.seq) showList(seq, true); }, () => {}); // the runs of a pod are named by their workflow
+        clearInterval(state.timer);
+        // The pods are read again every 10 s while the list is open.
+        state.timer = setInterval(() => { if (!document.hidden && !state.id) showList(state.seq, true); }, 10000);
+        return;
+      }
       const seq = ++state.seq;
       if (at.id !== state.id) { state.id = at.id; state.pod = null; state.treeFor = ""; state.shown = ""; tree.setRoots([]); fill(detail); }
       state.want = { view: at.view, path: at.path };
       open(seq);
+      runIndex.refresh().catch(() => {}); // Destroy's warning names the run that holds the pod by its workflow
       clearInterval(state.timer);
       // What is shown is read again every 10 s: an agent may be changing the pod meanwhile.
       state.timer = setInterval(() => { if (!document.hidden && !state.gone && state.pod) loadView(state.seq, true); }, 10000);

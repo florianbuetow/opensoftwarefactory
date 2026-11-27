@@ -13,7 +13,7 @@ const cases = (script) => [...script.matchAll(/^ {4}([a-z-]+)\) (?:VERIFY_REAL_O
 test("e2e.sh dispatches the end-to-end tests, each to a script that exists, after a preflight", () => {
   const script = read("scripts/e2e.sh");
   const found = cases(script);
-  assert.deepEqual(found.map(([name]) => name), ["ui", "ui-sweep", "openobserve", "measurements-live"]);
+  assert.deepEqual(found.map(([name]) => name), ["ui", "ui-pages", "ui-sweep", "openobserve", "measurements-live"]);
   for (const [, file] of found) assert.ok(existsSync(path.join(root, file)), `${file} exists`);
   assert.match(script, /tests="ui openobserve measurements-live"/, "all of them without a test");
   assert.match(script, /if ! just status >\/dev\/null 2>&1; then\n\s+printf 'The factory is not running: start it with just start\\n' >&2\n\s+exit 1/, "a stopped factory fails at once");

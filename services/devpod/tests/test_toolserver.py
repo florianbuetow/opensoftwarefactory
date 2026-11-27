@@ -264,17 +264,17 @@ class SkillScriptTest(WorkspaceCase):
         )
 
     def test_runs_directly_with_arguments_in_workspace_and_cleans_up(self):
-        def scratch():
-            return {name for name in os.listdir(tempfile.gettempdir()) if name.startswith("factory-skill-")}
-
-        before = scratch()
-        arguments = ["a b; c", '"quotes"', "$(echo not-expanded)", "line\nbreak"]
-        result = self.run_script("#!/bin/sh\nprintf '%s\\n' \"$PWD\"\nprintf '<%s>' \"$@\"\nprintf 'problem' >&2\nexit 7\n", args=arguments)
-        self.assertEqual(result["exit_code"], 7)
-        self.assertEqual(result["stdout"], self.root + "\n" + "".join(f"<{value}>" for value in arguments))
-        self.assertEqual(result["stderr"], "problem")
-        self.assertFalse(result["timed_out"])
-        self.assertEqual(scratch(), before)
+        with tempfile.TemporaryDirectory() as isolated_tmp, mock.patch.object(tempfile, "tempdir", isolated_tmp):
+            arguments = ["a b; c", '"quotes"', "$(echo not-expanded)", "line\nbreak"]
+            result = self.run_script(
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\"\nprintf '<%s>' \"$@\"\nprintf 'problem' >&2\nexit 7\n",
+                args=arguments,
+            )
+            self.assertEqual(result["exit_code"], 7)
+            self.assertEqual(result["stdout"], self.root + "\n" + "".join(f"<{value}>" for value in arguments))
+            self.assertEqual(result["stderr"], "problem")
+            self.assertFalse(result["timed_out"])
+            self.assertEqual(os.listdir(isolated_tmp), [])
 
     def test_files_with_shebangs_are_executable_and_other_files_are_available(self):
         result = self.run_script(

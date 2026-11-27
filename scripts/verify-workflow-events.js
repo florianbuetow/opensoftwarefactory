@@ -62,7 +62,7 @@ try{
  await ready(launch('agent',path.join(dir,'agent'),[],{...shared,LLM_URL:url('llm-gateway')+'/v1',CHAT_ADDR:`127.0.0.1:${ports.agent}`}),url('agent')+'/healthz');
  await ready(launch('connectors',path.join(dir,'connectors'),[],{...shared,NATS_USER:'fixture-consumer',NATS_PASSWORD:'fixture-consumer',CONNECTORS_ADDR:`127.0.0.1:${ports.connectors}`,CONNECTOR_SEED_FILE:path.join(dir,'no-seeds')}),url('connectors')+'/healthz');
  for(const name of ['worker','judge']){
-  const definition={schema_version:1,name:`fixture/${name}`,description:'Temporary integration fixture',models:['fixture'],effort:'low',tools:[],max_retries:0,unpack_inputs:true};
+  const definition={schema_version:1,name:`fixture/${name}`,description:'Temporary integration fixture',models:['fixture'],effort:'low',tools:[],max_turns:1,unpack_inputs:true};
   if(name==='judge')definition.output_contract={format:'json',mappings:[{path:'/quality',name:'quality',type:'number'},{path:'/finding',name:'finding',type:'string'}]};
   await api(url('registry'),'POST',`/agents/fixture/${name}`,{files:{'agent.json':definition,'systemprompt.md':'Return JSON with quality number and finding text.'}},201);
  }

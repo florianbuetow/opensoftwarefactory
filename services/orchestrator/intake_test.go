@@ -15,18 +15,22 @@ import (
 
 import "opensoftwarefactory/orchestrator/pipeline"
 
-func TestDeterministicIntakeIdentityUsesBindingAndEvent(t *testing.T) {
-	a := deterministicIntakeID("quality/main", "event-7")
-	if a != deterministicIntakeID("quality/main", "event-7") {
-		t.Fatal("identity is not stable")
+func TestIntakeClaimIdentityUsesBindingAndEvent(t *testing.T) {
+	a := intakeClaimID("quality/main", "event-7")
+	if a != intakeClaimID("quality/main", "event-7") {
+		t.Fatal("claim identity is not stable")
 	}
-	if a == deterministicIntakeID("quality/other", "event-7") || a == deterministicIntakeID("quality/main", "event-8") {
-		t.Fatal("identity does not include the full pair")
+	if a == intakeClaimID("quality/other", "event-7") || a == intakeClaimID("quality/main", "event-8") {
+		t.Fatal("claim identity does not include the full pair")
+	}
+	if !pipeline.ValidID(a) {
+		t.Fatalf("claim id %q is not an object id the blobstore accepts", a)
 	}
 }
 
-func TestCanonicalIntakeIdentityGolden(t *testing.T) {
-	if got := deterministicIntakeID("quality/main", "event-7"); got != "0da3ef3f-b40d-5ef3-ac72-2e3fd7446385" {
+func TestCanonicalIntakeClaimIdentityGolden(t *testing.T) {
+	// The SHA-256 of the JSON list ["quality/main","event-7"].
+	if got := intakeClaimID("quality/main", "event-7"); got != "intake-claims/48b88392bf98a698106b2e9ace8da14006657710959d09d328b2d0b40126f2d9.json" {
 		t.Fatalf("golden=%s", got)
 	}
 }

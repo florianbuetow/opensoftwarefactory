@@ -57,9 +57,9 @@ func TestConflictedIntentIsNeverProjectedOrCompleted(t *testing.T) {
 func TestCalculationPendingRetriesDependencyFailure(t *testing.T) {
 	f, blob, orch := newFixture(t)
 	s := &service{blobs: blob.URL, orchestrator: orch.URL, http: http.DefaultClient, log: slog.New(slog.DiscardHandler)}
-	price := Price{ID: "p", Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 1000, InputUncached: "1", InputCached: "1", Output: "1"}
+	price := Price{Vendor: "v", Model: "m", Effort: "none", Modes: map[string]string{}, From: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Currency: "EUR", UnitTokens: 1000, InputUncached: "1", InputCached: "1", Output: "1"}
 	f.mu.Lock()
-	f.objects[pricePrefix+"/p.json"], _ = json.Marshal(price)
+	f.objects[price.Key().objectID()], _ = json.Marshal(price)
 	f.failPriceList = true
 	f.mu.Unlock()
 	zero := int64(0)

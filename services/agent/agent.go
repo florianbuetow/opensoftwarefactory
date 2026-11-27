@@ -88,7 +88,20 @@ type Definition struct {
 	// enforces them; here they are only named in the dev pod note.
 	Commands      []string `json:"commands,omitempty"`
 	SchemaVersion int      `json:"schema_version"`
-	MaxRetries    int      `json:"max_retries"` // model calls after the first one, such as after a tool call; 0 by default
+	// MaxTurns is the number of model calls one attempt may make; each tool round needs one.
+	MaxTurns int `json:"max_turns"`
+	// MaxRetries is the name the limit had before max_turns: the model calls after the first
+	// one. Stored versions are never rewritten, so a version that carries it keeps its limit.
+	MaxRetries int `json:"max_retries"`
+}
+
+// turns is the number of model calls one attempt may make: max_turns, or for a version stored
+// before it, one more than max_retries. An agent.json with neither gets one turn.
+func (d *Definition) turns() int {
+	if d.MaxTurns > 0 {
+		return d.MaxTurns
+	}
+	return 1 + max(d.MaxRetries, 0)
 }
 
 // The roles of the messages in a conversation with a model.
@@ -108,13 +121,23 @@ const noThinking = "<think>\n\n</think>\n\n"
 // a limit one such answer holds a step until its timeout.
 const maxAnswerTokens = 6000
 
+// jsonTypeObject is the JSON schema type of the one object an agent with an output contract answers with.
+const jsonTypeObject = "object"
+
 // chatRequest builds the model request of this agent for the given conversation. With the
 // effort "none" the model is asked not to think first: no reasoning_effort is sent and the
 // conversation ends with an empty thinking block.
 func (d *Definition) chatRequest(messages, tools []any) chatRequest {
-	var responseFormat map[string]string
+	// An agent with an output contract answers with one JSON object. It asks for it with a JSON
+	// schema that accepts any object: the OpenAI API and compatible servers take it, while LM
+	// Studio refuses the older format json_object with 400 ("'response_format.type' must be
+	// 'json_schema' or 'text'"). The output contract checks the fields afterwards.
+	var responseFormat map[string]any
 	if d.OutputContract != nil {
-		responseFormat = map[string]string{"type": "json_object"}
+		responseFormat = map[string]any{
+			"type":        "json_schema",
+			"json_schema": map[string]any{"name": "output", "schema": map[string]any{"type": jsonTypeObject}},
+		}
 	}
 	if d.Effort == "none" {
 		ended := append(append(make([]any, 0, len(messages)+1), messages...), map[string]string{"role": roleAssistant, "content": noThinking})
@@ -618,8 +641,8 @@ func (s *Service) Process(ctx context.Context, req *StepRequest) (result StepRes
 	if checkpointErr := s.checkpointRunRecord(&record, req.OutputArtifact, meta, log); checkpointErr != nil {
 		return StepResult{}, checkpointErr
 	}
-	// One model call, plus max_retries more (each tool round needs one).
-	maxCalls := 1 + max(def.MaxRetries, 0)
+	// Each tool round needs one model call, and the answer one more.
+	maxCalls := def.turns()
 
 	user, err := s.firstMessage(ctx, req, *def.UnpackInputs)
 	if err != nil {
@@ -771,7 +794,7 @@ func (s *Service) Process(ctx context.Context, req *StepRequest) (result StepRes
 		}
 	}
 	if !done {
-		return StepResult{}, fmt.Errorf("agent %s gave no final answer within %d model calls (max_retries=%d)", ref, maxCalls, def.MaxRetries)
+		return StepResult{}, fmt.Errorf("agent %s gave no final answer within its turn limit (max_turns=%d)", ref, maxCalls)
 	}
 
 	if len(record.Events) > 0 {

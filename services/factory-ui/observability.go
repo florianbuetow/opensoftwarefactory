@@ -119,13 +119,21 @@ func (o *observabilityClient) search(ctx context.Context, sql string, start, end
 	return o.searchType(ctx, sql, start, end, size, "")
 }
 
-func (o *observabilityClient) searchType(ctx context.Context, sql string, start, end time.Time, size int, signal string) (_ observabilitySearch, err error) {
+func (o *observabilityClient) searchType(ctx context.Context, sql string, start, end time.Time, size int, signal string) (observabilitySearch, error) {
+	return o.searchWithin(ctx, sql, start, end, size, signal, searchSeconds)
+}
+
+// searchSeconds is how long the store may take for one search before it gives up.
+const searchSeconds = 12
+
+// searchWithin is one search that the store gives up on after the given number of seconds.
+func (o *observabilityClient) searchWithin(ctx context.Context, sql string, start, end time.Time, size int, signal string, seconds int) (_ observabilitySearch, err error) {
 	if !o.configured() {
 		return observabilitySearch{}, errors.New("log search is not configured")
 	}
 	body, _ := json.Marshal(map[string]any{"query": map[string]any{
 		"sql": sql, "start_time": start.UnixMicro(), "end_time": end.UnixMicro(), "from": 0, "size": size,
-	}, "search_type": "ui", "timeout": 12})
+	}, "search_type": "ui", "timeout": seconds})
 	endpoint := o.base + "/api/default/_search"
 	if signal != "" {
 		endpoint += "?type=" + url.QueryEscape(signal)
@@ -143,6 +151,9 @@ func (o *observabilityClient) searchType(ctx context.Context, sql string, start,
 	defer func() { err = closeAfter(err, resp.Body) }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode == http.StatusRequestTimeout {
+			return observabilitySearch{}, errSearchTooSlow
+		}
 		return observabilitySearch{}, fmt.Errorf("log search returned %s", resp.Status)
 	}
 	var result observabilitySearch
@@ -261,13 +272,46 @@ func observabilityHandler(client *observabilityClient) http.Handler {
 			return
 		}
 		now := time.Now().UTC()
-		result, err := client.searchType(r.Context(), `SELECT * FROM "default" WHERE trace_id = '`+traceID+`' ORDER BY start_time ASC`, client.searchStart(now), now, 500, "traces")
+		sql := `SELECT * FROM "default" WHERE trace_id = '` + traceID + `' ORDER BY start_time ASC`
+		var result observabilitySearch
+		var err error
+		var searchedAll bool
+		// The caller knows when the attempt ran: searching only that time, with a margin for
+		// spans that began before it or ended after it, answers at once whatever is kept.
+		if rawStart, rawEnd := r.URL.Query().Get("start"), r.URL.Query().Get("end"); rawStart != "" || rawEnd != "" {
+			started, startErr := time.Parse(time.RFC3339Nano, rawStart)
+			finished, endErr := time.Parse(time.RFC3339Nano, rawEnd)
+			if startErr != nil || endErr != nil || finished.Before(started) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "start and end must be an ordered RFC3339 interval"})
+				return
+			}
+			// The time of the attempt is read an hour at a time, from its beginning, and all of it.
+			result, searchedAll, err = client.searchByHour(r.Context(), sql, started.Add(-traceSearchMargin), finished.Add(traceSearchMargin), 500, "traces", false)
+		} else {
+			// Without a time, the newest hours are read first, until the trace is found or the
+			// time for an answer is used up; the answer then says that not everything was
+			// searched instead of failing.
+			result, searchedAll, err = client.searchByHour(r.Context(), sql, client.searchStart(now), now, 500, "traces", true)
+		}
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			status := http.StatusBadGateway
+			if errors.Is(err, errSearchTooSlow) {
+				status = http.StatusGatewayTimeout
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
+		result.Partial = result.Partial || !searchedAll
 		spans := make([]observabilitySpan, 0, len(result.Hits))
+		seen := map[string]bool{}
 		for _, row := range result.Hits {
+			// A span that two neighbouring hours both returned is shown once.
+			if id := stringField(row, "span_id"); id != "" {
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+			}
 			spans = append(spans, observabilitySpan{
 				SpanID: stringField(row, "span_id"), ParentSpanID: stringField(row, "parent_span_id", "reference_parent_span_id"),
 				Operation: stringField(row, "operation_name", "name"), Service: stringField(row, "service_name"), Status: stringField(row, "span_status", "status"),
@@ -478,10 +522,90 @@ func validateObservabilityURL(raw string) string {
 	return raw
 }
 
+// unlimitedSearchDays bounds a search that has no time of its own when nothing expires.
+// OpenObserve refuses a search from Unix time 0 ("invalid time range") and gives up on one
+// over decades (408 Request Timeout), since it looks at every hour of the range. A caller
+// that knows when its run happened passes start and end instead and is not bound by this.
+const unlimitedSearchDays = 90
+
+// errSearchTooSlow is the telemetry store giving up on a search: the period was too long for it.
+var errSearchTooSlow = errors.New("the telemetry store took too long to answer")
+
+// The store answers a search over about an hour of traces in a few seconds and gives up on
+// much more. So a period is read an hour at a time: each hour may take the store
+// hourSearchSeconds, and all of them together hourSearchBudget; what could not be read in that
+// time is left out, and the answer says so.
+const (
+	searchSlice       = time.Hour
+	hourSearchSeconds = 6
+	hourSearchBudget  = 10 * time.Second
+)
+
+// searchByHour searches the period from start to end one hour at a time and returns the hits
+// of all hours, at most size. newestFirst reads the latest hour first and stops at the first
+// hour that has hits, taking the hour before it along (what is looked for, one trace, lies
+// close together in time); otherwise every hour is read, from the first. complete is false
+// when the time for an answer ran out, or the store gave up on an hour, before that was done.
+func (o *observabilityClient) searchByHour(ctx context.Context, sql string, start, end time.Time, size int, signal string, newestFirst bool) (result observabilitySearch, complete bool, err error) {
+	type hour struct{ from, to time.Time }
+	var hours []hour
+	for from := start; from.Before(end); from = from.Add(searchSlice) {
+		to := from.Add(searchSlice)
+		if to.After(end) {
+			to = end
+		}
+		hours = append(hours, hour{from, to})
+	}
+	if newestFirst {
+		// Counted back from the end, so the newest hour is a full one.
+		hours = hours[:0]
+		for to := end; to.After(start); to = to.Add(-searchSlice) {
+			from := to.Add(-searchSlice)
+			if from.Before(start) {
+				from = start
+			}
+			hours = append(hours, hour{from, to})
+		}
+	}
+	deadline := time.Now().Add(hourSearchBudget)
+	takeAlong := false
+	for _, h := range hours {
+		if time.Now().After(deadline) {
+			return result, false, nil
+		}
+		found, searchErr := o.searchWithin(ctx, sql, h.from, h.to, size, signal, hourSearchSeconds)
+		if errors.Is(searchErr, errSearchTooSlow) {
+			return result, false, nil
+		}
+		if searchErr != nil {
+			return observabilitySearch{}, false, searchErr
+		}
+		if newestFirst {
+			// An earlier hour holds the earlier spans: they come first.
+			result.Hits = append(found.Hits, result.Hits...)
+		} else {
+			result.Hits = append(result.Hits, found.Hits...)
+		}
+		result.Total += found.Total
+		result.Partial = result.Partial || found.Partial
+		if len(result.Hits) > size {
+			result.Hits = result.Hits[:size]
+		}
+		if takeAlong {
+			return result, true, nil
+		}
+		takeAlong = newestFirst && len(found.Hits) > 0
+	}
+	return result, true, nil
+}
+
+// traceSearchMargin widens the time of an attempt when its trace is searched.
+const traceSearchMargin = 10 * time.Minute
+
 // No configured expiry must not silently narrow a query to seven days.
 func (o *observabilityClient) searchStart(now time.Time) time.Time {
 	if o.retentionDays > 0 {
 		return now.AddDate(0, 0, -o.retentionDays)
 	}
-	return time.Unix(0, 0).UTC()
+	return now.AddDate(0, 0, -unlimitedSearchDays)
 }

@@ -120,4 +120,6 @@ test("Intake follows the page structure and the shared controls", () => {
   assert.match(source, /"No event triggers yet"/);
   assert.match(source, /multi-select-trigger/);
   assert.match(source, /Unticked, the trigger starts nothing and its events are kept; ticked again, it catches up/);
+  assert.doesNotMatch(source, /randomUUID/, "the browser must never generate an intake binding id");
+  assert.match(source, /api\("POST", API, value\)/, "a new trigger is created with POST so the connectors service assigns its id");
 });

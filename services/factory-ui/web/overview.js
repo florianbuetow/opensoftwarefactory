@@ -101,7 +101,7 @@ const OverviewLogic = (() => {
     if (now - state.costAt < 60000 && (state.cost || state.costError)) return; // once a minute
     state.costAt = now;
     const params = new URLSearchParams({ metric: "cost", group_by: "workflow", currency: localStorage.getItem("factory.displayCurrency") || "EUR", from: new Date(now - 24 * O.HOUR).toISOString(), to: new Date(now).toISOString() });
-    try { state.cost = await api("GET", `/api/evaluations/series?${params}`); state.costError = ""; }
+    try { state.cost = await api("GET", `/api/sqldb/series?${params}`); state.costError = ""; }
     catch (e) { state.cost = null; state.costError = e.message; }
   }
 

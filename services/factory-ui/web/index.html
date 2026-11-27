@@ -56,7 +56,7 @@
   <!-- Workflows: list – canvas – inspector -->
   <section class="page page-workflows" id="tab-workflows" hidden>
     <div class="panel list-panel">
-      <div class="panel-head"><h2>Workflows</h2><span id="wf-new-slot"></span></div>
+      <div class="panel-head"><h2>Workflows</h2><input id="wf-filter" class="list-filter" type="search" placeholder="Filter" aria-label="Filter workflows by name" title="Shows only the workflows whose name contains this text, whatever its case" autocomplete="off" spellcheck="false"><span id="wf-new-slot"></span></div>
       <div class="panel-body"><ul id="wf-list" aria-label="Workflows"></ul></div>
     </div>
     <div class="canvas-area">
@@ -162,6 +162,20 @@
     </aside>
   </section>
 
+  <section class="page page-tools" id="tab-tools" hidden>
+    <div class="panel list-panel">
+      <div class="panel-head"><h2>Tools</h2></div>
+      <div class="panel-body">
+        <ul id="tools-list" aria-label="MCP services and their tools"></ul>
+        <div id="tools-empty"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2 id="tools-detail-title"></h2></div>
+      <div class="panel-body" id="tools-detail"></div>
+    </div>
+  </section>
+
   <section class="page page-memory" id="tab-artifacts" hidden>
     <div class="panel list-panel">
       <div class="panel-head"><h2>Blobstore</h2></div>
@@ -194,10 +208,10 @@
     </div>
   </section>
 
-  <!-- Dev pod (opened from Connectors and Runs): its files, commit log and diff, read-only -->
+  <!-- Dev pods (Factory menu, Connectors and Runs): the live pods, and one pod's files, commit log and diff, read-only -->
   <section class="page page-cluster page-devpods" id="tab-devpods" hidden>
     <div class="panel list-panel">
-      <div class="panel-head"><h2>Dev pod</h2></div>
+      <div class="panel-head"><h2>Dev pods</h2></div>
       <div class="panel-body"><ul id="devpod-tree"></ul></div>
     </div>
     <div class="panel content-panel">
@@ -219,8 +233,8 @@
 
   <section class="page page-measurements" id="tab-system-diagram" hidden>
     <div class="panel content-panel">
-      <div class="panel-head"><h2>Components</h2></div>
-      <div class="panel-body measurement-body" id="system-diagram"></div>
+      <div class="panel-head"><h2>System Diagram</h2><span class="panel-actions" id="system-diagram-actions"></span></div>
+      <div class="panel-body sd-body" id="system-diagram"></div>
     </div>
   </section>
 </main>
@@ -249,6 +263,7 @@
 <script src="policies.js"></script>
 <script src="skills.js"></script>
 <script src="mcp-gateway.js"></script>
+<script src="tools.js"></script>
 <script src="artifacts.js"></script>
 <script src="decisions.js"></script>
 <script src="sessions.js"></script>

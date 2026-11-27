@@ -94,7 +94,8 @@ time { white-space: nowrap; }
 .menu .nav-trigger.active::after { content: ""; position: absolute; left: var(--menu-pad, 12px); right: var(--menu-pad, 12px); bottom: 0; height: 2px; background: var(--accent); }
 .menu .nav-trigger.active > .icon:first-child { color: var(--accent-text); }
 .menu .nav-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
-.menu .badge {
+.nav-popover a .badge { margin-left: auto; }
+.menu .badge, .nav-popover .badge {
   min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
   background: var(--waiting); color: #fff; font-size: .75rem; font-weight: 600; line-height: 20px; text-align: center;
 }
@@ -123,6 +124,9 @@ time { white-space: nowrap; }
 .page-workflows.no-inspector .inspector { display: none; }
 .page-runs { grid-template-columns: var(--list-fit) minmax(0, 1fr) var(--detail-fit); }
 .page-evaluations { grid-template-columns: var(--list-fit) minmax(0, 1fr) var(--detail-fit); }
+.page-tools { grid-template-columns: var(--list-fit) minmax(0, 1fr); }
+.page-tools.no-list { grid-template-columns: minmax(0, 1fr); }
+.page-tools .data-table td { padding: 10px; vertical-align: top; }
 .page-mcp-gateway { grid-template-columns: var(--list-fit) minmax(0, 1fr) var(--detail-fit); }
 .page-mcp-gateway.no-list { grid-template-columns: minmax(0, 1fr) var(--detail-fit); }
 .page-mcp-gateway.no-detail { grid-template-columns: var(--list-fit) minmax(0, 1fr); }
@@ -174,6 +178,8 @@ time { white-space: nowrap; }
 .inspector { border-left: 1px solid var(--line); border-right: 0; } /* the canvas has no border of its own */
 .run-detail { border-left: 0; border-right: 0; }
 .panel-head { flex: none; display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+/* The filter of a list sits between its title and its "+": it takes the room the title leaves. */
+.panel-head .list-filter { flex: 1 1 96px; min-width: 72px; width: 0; } /* in a narrow sidebar the title gives way first, with an ellipsis */
 .panel-head h2 { font-size: 1rem; font-weight: 600; line-height: 1.25; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-head > :last-child:not(h2) { margin-left: auto; }
 .panel-actions { display: flex; align-items: center; gap: 8px; }
@@ -392,6 +398,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tile .name, .tile .sub { pointer-events: none; }
 .port { fill: var(--panel); stroke: var(--muted); stroke-width: 2; cursor: crosshair; }
 .port:hover { stroke: var(--accent); }
+/* A step group marks a part of a workflow: a dashed frame behind its steps with a label. The frame
+   takes no clicks, so the canvas under it still pans; in the editor the label opens it. */
+.step-group-frame { fill: var(--muted); fill-opacity: .06; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 7 5; pointer-events: none; }
+.step-group-label { fill: var(--muted); font-size: 13px; font-weight: 600; pointer-events: none; }
+#canvas .step-group-label { pointer-events: auto; cursor: pointer; }
+/* Drawing a group: the next drag on the canvas draws its frame, and the nodes inside become its nodes. */
+#canvas.drawing-group, #canvas.drawing-group * { cursor: crosshair; }
+.group-draw { fill: var(--accent); fill-opacity: .08; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 7 5; pointer-events: none; }
+#canvas .step-group-label:hover, #canvas .step-group-label:focus-visible { fill: var(--accent-text); outline: none; text-decoration: underline; }
 .edge { stroke: var(--edge); stroke-width: 1.5; fill: none; }
 .edge-hit { stroke: transparent; stroke-width: 12; fill: none; cursor: pointer; }
 .edge-hit:hover + .edge { stroke: var(--failed); }
@@ -425,7 +440,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .file-block.markdown { white-space: normal; }
 /* Read as prose: a line of rendered Markdown runs at most about 75 characters; tables and code keep the full width. */
 .file-block.markdown :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, dl) { max-width: 64ch; } /* inside .markdown-body too; 64 widths of "0" hold about 75 characters of text */
-.wf-description-text { max-width: 64ch; }
+/* The workflow description uses the full width of its footer: it is one short paragraph under the canvas, not a document (bug report, 25 Nov). */
 .markdown-body { max-width: 72ch; line-height: 1.55; overflow-wrap: anywhere; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
@@ -633,8 +648,10 @@ pre.logs.wrap { white-space: pre-wrap; }
 .registry-detail .section.actions { display: flex; justify-content: flex-end; gap: 8px; border-bottom: 0; }
 .registry-detail .section.actions[hidden] { display: none; }
 .registry-detail .section { border-bottom: 0; padding-bottom: 0; } /* files stack 24 px apart, as in the node panel */
-.skill-file-layout { display: grid; grid-template-columns: minmax(9rem, 1fr) minmax(0, 3fr); gap: 16px; }
-.skill-file-layout > .tree { border: 1px solid var(--line); border-radius: 6px; align-self: start; padding: 8px 0; }
+.skill-file-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.skill-file-layout .file-head { min-height: 32px; margin: 0 0 8px; }
+.skill-file-list .file-head .row { margin-left: auto; gap: 8px; flex-wrap: nowrap; }
+.skill-file-list .tree { margin: 0 -8px; } /* rows start under the heading, as in a sidebar */
 .registry-detail .skill-file-editor > .section { padding: 0; }
 .skill-file-editor .section-title { overflow-wrap: anywhere; }
 .registry-detail #agent-skill-script-timeout { width: 5.5rem; }
@@ -674,7 +691,7 @@ select.fit { width: auto; }
 .file-fields .field label, .name-fields .field label { margin: 0 0 4px; }
 .registry-detail .file-fields .field input { min-width: 0; }
 .file-fields input, .file-fields select, .name-fields input { width: auto; max-width: 100%; }
-.file-fields #agent-retries { width: 64px; }
+.file-fields #agent-turns { width: 64px; }
 /* A tickbox sits on the line of the other controls, its label beside it in body text. */
 .file-fields .check-field label { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; margin: 20px 0 0; font-size: .875rem; font-weight: 400; color: var(--text); white-space: nowrap; }
 .file-fields #agent-temperature { width: 80px; }
@@ -805,9 +822,37 @@ select.fit { width: auto; }
 .mermaid-diagram { margin: 0 0 1em; overflow-x: auto; text-align: center; }
 .mermaid-diagram svg { max-width: 100%; height: auto; }
 .mermaid-error { margin: -.5em 0 1em; font-size: .8125rem; }
-#system-diagram .markdown-body { max-width: none; }
-#system-diagram .mermaid-diagram { text-align: left; }
-#system-diagram .mermaid-diagram svg { max-width: none; min-width: 100%; }
+/* System Diagram: a canvas that fills the panel; it zooms, moves, and its components can be dragged. */
+#tab-system-diagram .panel-actions { display: flex; gap: 8px; margin-left: auto; }
+#tab-system-diagram .panel-actions button { min-width: 32px; }
+.page-measurements .content-panel .sd-body { padding: 0; overflow: hidden; display: flex; min-height: 0; position: relative; }
+/* The card under the pointer: what a component, a group or a connection is. */
+.sd-tip { position: absolute; z-index: 2; width: 300px; max-width: calc(100% - 16px); box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); font-size: .8125rem; line-height: 1.45; pointer-events: none; }
+.sd-tip[hidden] { display: none; }
+.sd-tip-title { display: block; font-size: .875rem; font-weight: 600; }
+.sd-tip p { margin: 4px 0 0; }
+.sd-tip-line { color: var(--muted); }
+.sd-hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; }
+.sd-edge { cursor: default; }
+.sd-group.sd-lit rect { stroke: var(--accent); }
+.sd-canvas { flex: 1; width: 100%; height: 100%; min-height: 320px; display: block; background: var(--canvas, transparent); cursor: grab; user-select: none; touch-action: none; outline: none; }
+.sd-canvas.sd-panning { cursor: grabbing; }
+.sd-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sd-group rect { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.sd-group-name { fill: var(--muted); font-size: 12px; font-weight: 600; pointer-events: none; paint-order: stroke; stroke: var(--panel); stroke-width: 5px; stroke-linejoin: round; }
+.sd-group { cursor: move; }
+.sd-node { cursor: move; outline: none; }
+.sd-node rect { fill: var(--node-fill, var(--panel)); stroke: var(--muted); stroke-width: 1; }
+.sd-node text { fill: var(--text); font-size: 13px; pointer-events: none; }
+.sd-node:hover rect, .sd-node.sd-lit rect, .sd-node:focus-visible rect { stroke: var(--accent); stroke-width: 2; }
+.sd-line { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+.sd-arrow { fill: var(--muted); stroke: none; }
+.sd-dashed .sd-line { stroke-dasharray: 5 4; }
+.sd-edge-label { fill: var(--muted); font-size: 11px; paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
+.sd-edge.sd-lit .sd-line { stroke: var(--accent); stroke-width: 2; }
+.sd-edge.sd-lit .sd-arrow { fill: var(--accent); }
+.sd-edge.sd-lit .sd-edge-label { fill: var(--text); }
+.sd-edge.sd-dim { opacity: .2; }
 /* Files column: the list, then the one primary action of the page. */
 .chat-files .panel-body { padding: 8px; }
 .chat-files .empty-panel { margin: 40px auto; }
@@ -934,6 +979,7 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .connector-form .connector-idle { width: 72px; }
 .connector-form .field-problem { margin: 4px 0 0; font-size: .8125rem; }
 /* Dev pod view: a file, the commit log, or the diff; additions and removals are tinted. */
+.page-devpods .run-meta .pod-destroy { margin-left: auto; flex: none; }
 .page-devpods .file-head { margin-bottom: 8px; }
 .page-devpods .evidence-note { margin: 0 0 8px; }
 .file-block.diff .diff-add { background: rgb(31 138 76 / .12); }
@@ -1001,8 +1047,6 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .page-measurements:not(.page-judge-editor) { grid-template-columns: minmax(0, 1fr); }
 .page-measurements .content-panel .measurement-body { overflow: auto; min-width: 0; padding: 24px; }
 .measurement-body > p { margin: 0 0 16px; }
-.measurement-values { margin-top: 24px; }
-.measurement-values summary { cursor: pointer; }
 .measurement-filters .field[hidden] { display: none; }
 .measurement-nav { display: flex; gap: 16px; padding: 0 24px; flex-wrap: wrap; border-bottom: 1px solid var(--line, #d9dee6); }
 .measurement-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin-bottom: 24px; }
@@ -1016,12 +1060,42 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .measurement-checkbox, .measurement-series { display: flex; align-items: center; gap: 8px; }
 .measurement-list-row { display: flex; justify-content: space-between; width: 100%; gap: 16px; min-height: 40px; text-align: left; border-radius: 0; }
 .measurement-json { overflow: auto; max-height: 400px; font-family: ui-monospace, monospace; white-space: pre; }
+/* Events: a table as wide as its three columns need, not as wide as the window. */
+.event-table { max-width: 880px; margin-bottom: 16px; }
 .event-feed { position: relative; max-height: 65vh; overflow: auto; }
-.event-feed-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(120px, 2fr) minmax(90px, 1fr); gap: 16px; width: 100%; min-height: 40px; text-align: left; border-radius: 0; }
+.event-feed-head, .event-feed-row { display: grid; grid-template-columns: 168px minmax(0, 1fr) 160px; gap: 16px; align-items: center; padding: 0 10px; box-sizing: border-box; }
+.event-feed-head { height: 32px; font-size: .75rem; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); }
+.event-feed-row { width: 100%; min-height: 40px; text-align: left; font: inherit; font-size: .875rem; color: var(--text); background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; cursor: pointer; }
+.event-feed-row:hover { background: var(--hover); }
+.event-feed-row[aria-pressed="true"] { background: var(--accent-tint); }
+.event-feed-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.event-feed-row time { color: var(--muted); font-variant-numeric: tabular-nums; }
 .event-feed-row > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.measurement-chart svg { display: block; width: 100%; max-height: 480px; min-height: 260px; }
-.measurement-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
-.measurement-table { overflow: auto; max-height: 35vh; }
+.page-measurements .measurement-json { max-width: 880px; }
+.measurement-chart svg { display: block; width: 100%; }
+/* Prices: one table of the model prices, filtered by model or vendor. */
+.price-table { overflow-x: auto; }
+.price-table .name-cell { min-width: 200px; }
+#pricing-filter { width: 220px; }
+/* Metrics: totals of the period, one measurement as ranked bars, then its trend. */
+.measurement-filters button[hidden] { display: none; }
+.metric-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
+.metric-tile { display: flex; flex-direction: column; gap: 4px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); min-width: 0; }
+.metric-tile-value { font-size: 1.5rem; font-weight: 600; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metric-tile-label { font-size: .8125rem; color: var(--muted); }
+.metric-tile-note, .metric-warning { font-size: .8125rem; color: var(--warning-text); }
+.measurement-body > .metric-status { margin: 0 0 24px; font-size: .8125rem; min-height: 1.45em; }
+.measurement-body > h2, .metric-trend > h2 { margin: 0 0 8px; }
+/* The ranked table: proportional columns, so name, total and bar keep their share at any width. */
+.metric-bars { margin-bottom: 24px; }
+.metric-bars .metric-rank-name { width: 40%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.metric-bars .num { font-variant-numeric: tabular-nums; }
+.metric-bars .metric-rank-bar { width: 50%; }
+.metric-swatch { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: currentColor; vertical-align: middle; }
+.metric-bar { display: block; height: 12px; border-radius: 3px; background: var(--accent); }
+.metric-trend[hidden] { display: none; }
+.metric-trend { margin-bottom: 8px; }
+@media (max-width: 720px) { .metric-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .plot-axis { stroke: currentColor; }
 .plot-grid { stroke: currentColor; opacity: .12; }
 .plot-label { fill: currentColor; font-size: 12px; }
@@ -1072,6 +1146,18 @@ mark.search-hit.current { background: var(--accent); color: var(--accent-fg); }
 .run-graph .tile.selected .body { stroke: var(--accent); stroke-width: 2; }
 
 .run-graph-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); }
+/* The graph of the run on show pans (a drag) and zooms (the wheel) inside its box, and opens
+   nearly full screen. The steps the run is at now are drawn in red, with their state as a word. */
+.run-graph-wrap.pannable { position: relative; overflow: hidden; }
+.run-detail-graph { cursor: grab; touch-action: none; }
+.run-detail-graph.panning, .run-detail-graph.panning .tile { cursor: grabbing; }
+.run-graph-wrap .graph-enlarge { position: absolute; top: 8px; right: 8px; background: var(--panel); border: 1px solid var(--line); }
+.run-detail-graph .tile.active .body { stroke: var(--failed); stroke-width: 3; }
+.run-detail-graph .tile.active { filter: drop-shadow(0 0 5px var(--failed)); }
+.dialog-backdrop.graph-backdrop { align-items: stretch; padding: 24px; }
+.dialog.graph-dialog { height: 100%; max-height: none; }
+.graph-dialog .dialog-body { flex: 1; overflow: hidden; }
+.run-graph-large, .run-graph-large .run-graph-wrap { height: 100%; }
 .step-list li.step-focus { background: var(--accent-tint); }
 /* Keyboard shortcuts: each key as a small key cap. */
 kbd { display: inline-block; min-width: 20px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--canvas); color: var(--text); font: 600 .75rem/1.45 ui-monospace, SF Mono, Menlo, monospace; text-align: center; white-space: nowrap; }

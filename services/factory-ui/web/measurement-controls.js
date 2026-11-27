@@ -10,10 +10,11 @@ const measurementUI = {
   panel(id, navigation = false) {
     const page = $(`tab-${id}`), body = h("div", { className: "panel-body measurement-body" });
     const section = id === "metrics" || id === "pricing" ? "metrics" : "evaluations";
-    const title = { metrics: "Graphs", pricing: "Prices", judges: "Judge configuration", events: "Events" }[id];
+    // Graphs and Prices are named by their tab; a heading under it would say the same again.
+    const title = { judges: "Judge configuration", events: "Events" }[id];
     if (navigation) page.classList.add("page-sectioned");
     page.replaceChildren(...(navigation ? [this.nav(section, id)] : []),
-      h("div", { className: "panel content-panel" }, h("div", { className: "panel-head" }, h("h2", {}, title)), body));
+      h("div", { className: "panel content-panel" }, title ? h("div", { className: "panel-head" }, h("h2", {}, title)) : null, body));
     return body;
   },
   rows(data) { return Array.isArray(data) ? data : (data.items || data.measurements || data.prices || data.conversions || data.bindings || []); },

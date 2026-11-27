@@ -135,6 +135,16 @@ func (f *fixture) blobHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(204)
 			return
 		}
+		if r.Method == http.MethodDelete {
+			if _, ok := f.objects[id]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			delete(f.objects, id)
+			delete(f.revisions, id)
+			w.WriteHeader(204)
+			return
+		}
 		data, ok := f.objects[id]
 		if !ok {
 			http.NotFound(w, r)

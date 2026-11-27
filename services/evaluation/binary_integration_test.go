@@ -49,15 +49,15 @@ func TestBinaryMeasurementJourney(t *testing.T) {
 	}
 	t.Cleanup(func() { stopProcess(evaluation) })
 	waitHTTP(t, "http://"+evaluationAddr+"/healthz")
-	price := `{"id":"p","vendor":"v","model":"m","effort":"none","modes":{},"from":"2026-01-01T00:00:00Z","to":null,"currency":"EUR","unit_tokens":1000,"input_uncached":"2","input_cached":"1","output":"4"}`
-	if status, body := integrationRequest(t, http.MethodPut, "http://"+evaluationAddr+"/api/prices/p", price); status != 200 {
+	price := `{"vendor":"v","model":"m","effort":"none","modes":{},"from":"2026-01-01T00:00:00Z","to":null,"currency":"EUR","unit_tokens":1000,"input_uncached":"2","input_cached":"1","output":"4"}`
+	if status, body := integrationRequest(t, http.MethodPost, "http://"+evaluationAddr+"/api/prices", price); status != 200 {
 		t.Fatalf("price %d %s", status, body)
 	}
 	var prices struct {
 		Prices []Price `json:"prices"`
 	}
 	integrationGET(t, "http://"+evaluationAddr+"/api/prices", &prices)
-	if len(prices.Prices) != 1 || prices.Prices[0].ID != "p" || prices.Prices[0].Revision == "" {
+	if len(prices.Prices) != 1 || prices.Prices[0].Vendor != "v" || prices.Prices[0].Revision == "" {
 		t.Fatalf("price list %+v", prices)
 	}
 	usage := `{"schema_version":1,"id":"attempt","kind":"usage","run_id":"run","execution_id":"execution","occurred_at":"2026-11-01T12:00:00Z","vendor":"v","model":"m","effort":"none","modes":{},"input_tokens":1000,"cached_input_tokens":200,"output_tokens":50,"status":"reported","missing":[],"raw_usage":{"prompt_tokens":1000}}`

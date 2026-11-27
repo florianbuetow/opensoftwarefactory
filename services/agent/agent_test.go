@@ -295,7 +295,7 @@ func TestPromptEvidencePrefixPreservesNestedStepPath(t *testing.T) {
 }
 
 func TestProcessCompilesLatestPoliciesThroughPolicyService(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":[],"max_retries":0}`,
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":[],"max_turns":1}`,
 		respond(finalResponse), respond(finalResponse))
 	f.prompt = "Start\n{{policy::security/review}}\nAgain: {{policy::security/review}}\nEnd"
 	f.policyContent = "Policy v1 contains {{policy::missing}} literally."
@@ -359,7 +359,7 @@ func TestProcessMissingOrMalformedRequiredPolicyFailsBeforeModel(t *testing.T) {
 		{"unclosed", "{{policy::security/review", 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":[],"max_retries":0}`, respond(finalResponse))
+			f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":[],"max_turns":1}`, respond(finalResponse))
 			f.prompt, f.policyContent, f.policyStatus = test.prompt, "", test.status
 			var logs bytes.Buffer
 			f.svc.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
@@ -388,7 +388,7 @@ func TestProcessMissingOrMalformedRequiredPolicyFailsBeforeModel(t *testing.T) {
 }
 
 func TestProcessHappyPathWithToolCall(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":["docs/search","docs/missing"],"max_retries":3,"extra":true}`,
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1","m2"],"effort":"high","tools":["docs/search","docs/missing"],"max_turns":4,"extra":true}`,
 		respond(toolCallResponse), respond(finalResponse))
 	res, err := f.svc.Process(context.Background(), request())
 	if err != nil {
@@ -585,7 +585,7 @@ func TestDuplicateToolNamesRouteToSelectedServers(t *testing.T) {
 	calls := `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[` +
 		`{"id":"a","type":"function","function":{"name":"docs__search","arguments":"{\"q\":\"docs\"}"}},` +
 		`{"id":"b","type":"function","function":{"name":"code__search","arguments":"{\"q\":\"code\"}"}}]}}]}`
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search","code/search"],"max_retries":1}`,
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search","code/search"],"max_turns":2}`,
 		respond(calls), respond(finalResponse))
 	if _, err := f.svc.Process(context.Background(), request()); err != nil {
 		t.Fatal(err)
@@ -630,7 +630,7 @@ func TestDisallowedAndInvalidToolCallsBecomeToolErrors(t *testing.T) {
 	calls := `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[` +
 		`{"id":"a","type":"function","function":{"name":"docs__delete_all","arguments":"{}"}},` +
 		`{"id":"b","type":"function","function":{"name":"docs__search","arguments":"{not json"}}]}}]}`
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`, respond(calls), respond(finalResponse))
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`, respond(calls), respond(finalResponse))
 	if _, err := f.svc.Process(context.Background(), request()); err != nil {
 		t.Fatal(err)
 	}
@@ -647,10 +647,10 @@ func TestDisallowedAndInvalidToolCallsBecomeToolErrors(t *testing.T) {
 	}
 }
 
-func TestMaxRetriesExceeded(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`, respond(toolCallResponse))
+func TestMaxTurnsExceeded(t *testing.T) {
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`, respond(toolCallResponse))
 	_, err := f.svc.Process(context.Background(), request())
-	if err == nil || !strings.Contains(err.Error(), "max_retries=1") {
+	if err == nil || !strings.Contains(err.Error(), "max_turns=2") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(f.llmReqs) != 2 {
@@ -663,7 +663,7 @@ func TestMaxRetriesExceeded(t *testing.T) {
 	if err := json.Unmarshal(f.blobs["runs/t1/plan.run.json"], &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != statusFailed || !strings.Contains(rec.Error, "max_retries=1") || rec.ModelCalls != 2 || len(rec.Messages) < 4 {
+	if rec.Status != statusFailed || !strings.Contains(rec.Error, "max_turns=2") || rec.ModelCalls != 2 || len(rec.Messages) < 4 {
 		t.Fatalf("failure record = %+v", rec)
 	}
 	if _, ok := f.blobs["runs/t1/plan.attempt-1.run.json"]; !ok {
@@ -673,7 +673,7 @@ func TestMaxRetriesExceeded(t *testing.T) {
 
 func TestOneModelCallByDefault(t *testing.T) {
 	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"]}`, respond(toolCallResponse))
-	if _, err := f.svc.Process(context.Background(), request()); err == nil || !strings.Contains(err.Error(), "within 1 model calls") {
+	if _, err := f.svc.Process(context.Background(), request()); err == nil || !strings.Contains(err.Error(), "within its turn limit (max_turns=1)") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(f.llmReqs) != 1 {
@@ -710,7 +710,7 @@ func TestErrorCategoriesDistinguishGatewayAndTransport(t *testing.T) {
 }
 
 func TestMCPTransportFailurePersistsTimeline(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`, respond(toolCallResponse))
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`, respond(toolCallResponse))
 	f.mcpFailMethod = mcpToolsCall
 	_, err := f.svc.Process(context.Background(), request())
 	if err == nil || !strings.Contains(err.Error(), "502") {
@@ -726,7 +726,7 @@ func TestMCPTransportFailurePersistsTimeline(t *testing.T) {
 }
 
 func TestSuccessfulToolTextStartingWithErrorIsNotMisclassified(t *testing.T) {
-	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`, respond(toolCallResponse), respond(finalResponse))
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_turns":2}`, respond(toolCallResponse), respond(finalResponse))
 	f.mcpToolText = "Error: this is documentation, not a failure"
 	if _, err := f.svc.Process(context.Background(), request()); err != nil {
 		t.Fatal(err)
@@ -876,5 +876,18 @@ func TestDefinitionWithoutModels(t *testing.T) {
 	}
 	if len(f.llmReqs) != 0 {
 		t.Fatal("model called without models")
+	}
+}
+
+// A version stored before max_turns names its limit max_retries: the model calls after the
+// first one. It keeps running with the same number of calls.
+func TestStoredMaxRetriesStillLimitsTheTurns(t *testing.T) {
+	f := newFakes(t, `{"schema_version":1,"name":"intake","unpack_inputs":true,"models":["m1"],"tools":["docs/search"],"max_retries":1}`, respond(toolCallResponse))
+	_, err := f.svc.Process(context.Background(), request())
+	if err == nil || !strings.Contains(err.Error(), "within its turn limit (max_turns=2)") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(f.llmReqs) != 2 {
+		t.Fatalf("model calls = %d", len(f.llmReqs))
 	}
 }

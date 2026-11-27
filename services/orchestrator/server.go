@@ -151,6 +151,7 @@ type server struct {
 	events     *eventService
 	httpClient *http.Client
 	agentURL   string
+	sqldbURL   string
 }
 
 func (s *server) routes() http.Handler {
@@ -240,7 +241,11 @@ func (s *server) startRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	traceID := uuid.NewString()
+	traceID, err := newRunID()
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, err)
+		return
+	}
 	span := trace.SpanFromContext(r.Context())
 	span.SetAttributes(attribute.String("factory.run_id", traceID), attribute.String("factory.workflow", def.Name))
 	distributedTraceID := ""
@@ -296,6 +301,7 @@ func (s *server) startRun(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, err)
 		return
 	}
+	s.syncRunStart(r.Context(), &run)
 	if run.ExecutionID != "" {
 		finalized := true
 		eventObligated := s.events == nil
@@ -407,6 +413,7 @@ func (s *server) deleteRun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.syncRunDelete(r.Context(), trace)
 	s.logger.Info("run removed", "trace_id", trace)
 	w.WriteHeader(http.StatusNoContent)
 }

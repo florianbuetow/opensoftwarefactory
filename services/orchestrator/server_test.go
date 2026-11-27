@@ -119,6 +119,16 @@ func (m *memStore) Put(_ context.Context, id string, d []byte, meta pipeline.Met
 	return nil
 }
 
+// PutIfAbsent stores an object only when none has the id, as the blobstore's create-only write.
+func (m *memStore) PutIfAbsent(_ context.Context, id string, d []byte, meta pipeline.Meta) (string, error) {
+	if _, ok := m.data[id]; ok {
+		return "", pipeline.ErrPreconditionFailed
+	}
+	m.data[id] = d
+	m.meta[id] = meta
+	return "1", nil
+}
+
 func (m *memStore) Delete(_ context.Context, id string) error {
 	delete(m.data, id)
 	delete(m.meta, id)

@@ -15,6 +15,8 @@ const (
 	pinnedFullHash       = "b09ed59c89e02df36f9712c13e0e69eb6d5167c33d528ec365c84f0b30ce6671"
 	pinnedMinimalHash    = "61e3b06a7efc0fe2148625760197241032bb9cfe336d15016f1b7ac1d35af600"
 	pinnedEmptyStepsHash = "3ac3080ac8ef78135b916c17e3ad6dc79429dbf670f52368829f646ce47c3293"
+	// Recorded when Definition.Groups was added, for the full definition with a group.
+	pinnedFullWithGroupsHash = "625179992dd4a61affb94239e922b145461ee3eb0f9a95a8a565d36c34283149"
 )
 
 // fullDefinition sets every field of Definition, Step, Point, and Rule to a value that is
@@ -60,6 +62,7 @@ func fullDefinition() Definition {
 			},
 			{ID: "required-only", Service: "svc"},
 		},
+		Groups: []Group{{Label: "Triage <a> & \"b\"", Nodes: []string{"every-field", "required-only"}}},
 	}
 }
 
@@ -73,13 +76,18 @@ func hashInput() *IntakeInput {
 
 func TestIntakeAcceptanceHashIsPinned(t *testing.T) {
 	full := fullDefinition()
+	// The fields that existed when the hashes were first pinned: a definition without groups
+	// must hash as it always did, so pinnedFullHash stays as recorded.
+	before := full
+	before.Groups = nil
 	for name, tc := range map[string]struct {
 		def  *Definition
 		want string
 	}{
-		"every field": {&full, pinnedFullHash},
-		"name only":   {&Definition{Name: "group/score", Version: 3}, pinnedMinimalHash},
-		"empty steps": {&Definition{Name: "group/score", Steps: []Step{}}, pinnedEmptyStepsHash},
+		"every field before groups": {&before, pinnedFullHash},
+		"every field":               {&full, pinnedFullWithGroupsHash},
+		"name only":                 {&Definition{Name: "group/score", Version: 3}, pinnedMinimalHash},
+		"empty steps":               {&Definition{Name: "group/score", Steps: []Step{}}, pinnedEmptyStepsHash},
 	} {
 		got, err := IntakeAcceptanceHash(tc.def, hashInput())
 		if err != nil {

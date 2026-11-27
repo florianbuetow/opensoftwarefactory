@@ -201,7 +201,7 @@ test("a segmented control has room inside its edge: its options never touch it",
 
 test("rendered Markdown reads as prose, at most about 75 characters to a line", () => {
   assert.match(read("style.css"), /\.file-block\.markdown :is\(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, dl\) \{ max-width: 64ch; \}/, "nested in .markdown-body too");
-  assert.match(read("style.css"), /\.wf-description-text \{ max-width: 64ch; \}/);
+  assert.doesNotMatch(read("style.css"), /\.wf-description-text \{ max-width/, "the workflow description wraps at the width of its footer, not before");
 });
 
 test("each page clips itself, so nothing positioned over the content area is cut off", () => {

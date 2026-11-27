@@ -158,7 +158,7 @@ test("a failed run names the nested steps its error passes through", () => {
 
 test("the team view has no menu item and keeps Runs active", () => {
   const app = read("app.js"), html = read("index.html");
-  assert.match(app, /const SUBPAGES = \{ teams: \{ name: "teams", title: "Team", menu: "runs" \}, /);
+  assert.match(app, /const SUBPAGES = \{ teams: \{ name: "teams", title: "Team", menu: "runs" \} /);
   assert.doesNotMatch(app.slice(app.indexOf("const PAGES = ["), app.indexOf("];", app.indexOf("const PAGES = ["))), /teams/);
   assert.match(html, /<section class="page page-teams" id="tab-teams" hidden>/);
   assert.ok(html.indexOf('src="chat.js"') < html.indexOf('src="teams.js"') && html.indexOf('src="teams.js"') < html.indexOf('src="runs.js"'));

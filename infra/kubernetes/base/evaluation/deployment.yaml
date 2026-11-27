@@ -38,6 +38,8 @@ spec:
               value: http://blobstore:8080
             - name: ORCHESTRATOR_URL
               value: http://orchestrator:8080
+            - name: SQLDB_URL
+              value: http://sqldb:8080
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               value: http://telemetry-collector:4318/v1/traces
           volumeMounts:

@@ -405,7 +405,7 @@ func TestStartRunWritesMetadata(t *testing.T) {
 		switch ref {
 		case "demo/coder@v1":
 			return AgentSettings{
-				Model: "qwen3.5-9b-mlx", Effort: "low", Temperature: &temperature, Tools: []string{"factory/send_message"}, MaxRetries: 10,
+				Model: "qwen3.5-9b-mlx", Effort: "low", Temperature: &temperature, Tools: []string{"factory/send_message"}, MaxTurns: 10,
 				Skills: map[string]string{"git": "v3"}, SkillScriptTimeoutSeconds: 300,
 			}, nil
 		case "demo/triage@v1":
@@ -450,12 +450,12 @@ func TestStartRunWritesMetadata(t *testing.T) {
 		t.Fatalf("agents %v", meta.Agents)
 	}
 	coder, _ := json.Marshal(meta.Agents["demo/coder@v1"])
-	if string(coder) != `{"effort":"low","max_retries":10,"model":"qwen3.5-9b-mlx","skill_script_timeout_seconds":300,"skills":{"git":"v3"},"temperature":0.2,"tools":["factory/send_message"]}` {
+	if string(coder) != `{"effort":"low","max_turns":10,"model":"qwen3.5-9b-mlx","skill_script_timeout_seconds":300,"skills":{"git":"v3"},"temperature":0.2,"tools":["factory/send_message"]}` {
 		t.Errorf("coder %s", coder)
 	}
 	// Temperature is left out when the agent sets none.
 	lead, _ := json.Marshal(meta.Agents["demo/lead@v1"])
-	if string(lead) != `{"effort":"","max_retries":0,"model":"plain","tools":[]}` {
+	if string(lead) != `{"effort":"","max_turns":0,"model":"plain","tools":[]}` {
 		t.Errorf("lead %s", lead)
 	}
 	unread, _ := json.Marshal(meta.Agents["demo/triage@v1"])
@@ -538,12 +538,12 @@ func TestAgentRegistryReadsTheSettingsOfAnAgent(t *testing.T) {
 	}
 	// A temperature of 0 is set, so it is recorded.
 	data, _ := json.Marshal(coder)
-	if string(data) != `{"model":"first","effort":"low","temperature":0,"skills":{"git":"v3"},"tools":["factory/send_message"],"max_retries":10,"skill_script_timeout_seconds":300}` {
+	if string(data) != `{"model":"first","effort":"low","temperature":0,"skills":{"git":"v3"},"tools":["factory/send_message"],"max_turns":11,"skill_script_timeout_seconds":300}` {
 		t.Errorf("coder %s", data)
 	}
 	plain, err := agents.settings(ctx, "plain@v2")
 	data, _ = json.Marshal(plain)
-	if err != nil || string(data) != `{"model":"only","effort":"","tools":[],"max_retries":0}` {
+	if err != nil || string(data) != `{"model":"only","effort":"","tools":[],"max_turns":1}` {
 		t.Errorf("plain %s %v", data, err)
 	}
 	for ref, want := range map[string]string{"gone@v1": "does not know", "broken@v1": "500", "unpinned": "not pinned"} {

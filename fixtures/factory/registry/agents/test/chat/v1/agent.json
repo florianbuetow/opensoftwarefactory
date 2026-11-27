@@ -6,5 +6,5 @@
   "models": ["qwen3-0.6b-mlx"],
   "effort": "none",
   "tools": [],
-  "max_retries": 0
+  "max_turns": 1
 }

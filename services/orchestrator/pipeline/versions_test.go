@@ -215,9 +215,9 @@ func TestResolveRouteAcceptsANameOrAPinnedVersion(t *testing.T) {
 	}
 }
 
-// startedMetadata is what the server writes when a run starts. The max_retries number does
+// startedMetadata is what the server writes when a run starts. The max_turns number does
 // not fit a float64, so it shows whether FinishRun keeps the other fields exactly.
-const startedMetadata = `{"schema_version":1,"run_id":"RUN","workflow":{"name":"w","version":2},"agents":{"a@v1":{"max_retries":9007199254740993}}}`
+const startedMetadata = `{"schema_version":1,"run_id":"RUN","workflow":{"name":"w","version":2},"agents":{"a@v1":{"max_turns":9007199254740993}}}`
 
 func finishedMetadata(t *testing.T, data []byte) map[string]any {
 	t.Helper()
