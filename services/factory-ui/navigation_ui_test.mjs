@@ -86,4 +86,18 @@ test("each page has one navigation group and groups open by click", () => {
   assert.equal(planned.href, undefined);
 });
 
+test("nav submenu highlights only on hover and does not steal focus on mouse click", () => {
+  const { context, rail, document } = setup();
+  const factory = rail.children[1];
+  document.activeElement = factory;
+  factory.onclick({ detail: 1 });
+  assert.equal(document.activeElement, factory, "mouse click must not focus a submenu item");
+  factory.onclick({ detail: 1 }); // close
+  factory.onclick({ detail: 0 }); // keyboard open
+  assert.equal(document.activeElement, context.nav.getPopover().querySelector("a"), "keyboard open still focuses the first submenu item");
+  const css = fs.readFileSync(new URL("web/style.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /\.nav-popover a\[aria-current="page"\]/);
+  assert.match(css, /\.nav-popover a:hover \{ background: var\(--hover\); text-decoration: none; \}/);
+});
+
 // The System Diagram page has its own tests in system_diagram_ui_test.mjs.

@@ -1685,7 +1685,7 @@ function closeNavPopover(returnFocus = false) {
   navTrigger = null;
 }
 
-function openNavPopover(trigger, group) {
+function openNavPopover(trigger, group, focusItem = false) {
   if (navTrigger === trigger && !navPopover.hidden) { closeNavPopover(true); return; }
   closeNavPopover();
   navTrigger = trigger;
@@ -1708,7 +1708,7 @@ function openNavPopover(trigger, group) {
   const anchor = trigger.getBoundingClientRect(), bounds = navPopover.getBoundingClientRect();
   navPopover.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - bounds.width - 8))}px`;
   navPopover.style.top = `${anchor.bottom + 4}px`;
-  (navPopover.querySelector('[aria-current="page"]') || navPopover.querySelector("a"))?.focus();
+  if (focusItem) (navPopover.querySelector('[aria-current="page"]') || navPopover.querySelector("a"))?.focus();
 }
 
 function route() {
@@ -1746,7 +1746,7 @@ function buildRail() {
   document.body.append(navPopover);
   $("rail").replaceChildren(...NAV_GROUPS.map((group) => {
     const button = h("button", { type: "button", className: "nav-trigger", dataset: { group: group.name },
-      "aria-haspopup": "menu", "aria-expanded": "false", onclick: () => openNavPopover(button, group) },
+      "aria-haspopup": "menu", "aria-expanded": "false", onclick: (event) => openNavPopover(button, group, event?.detail === 0) },
       icon(group.icon), h("span", { className: "rail-label" }, group.name), icon("down", 12));
     if (group.name === "Tasks") button.append(h("span", { id: "decisions-badge", className: "badge", hidden: true }), h("span", { id: "sessions-badge", className: "badge", hidden: true }));
     return button;
